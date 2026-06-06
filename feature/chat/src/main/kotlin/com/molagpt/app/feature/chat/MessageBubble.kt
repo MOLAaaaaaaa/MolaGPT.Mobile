@@ -1,0 +1,149 @@
+package com.molagpt.app.feature.chat
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.dp
+import com.molagpt.app.core.model.ChatMessage
+import com.molagpt.app.core.model.FileInfo
+import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.feature.file.AttachmentStrip
+
+/** 用户气泡（助手消息由 MessageList 按块/片段成行渲染，不走这里）。 */
+@Composable
+fun MessageBubble(message: ChatMessage, modifier: Modifier = Modifier) {
+    Box(modifier = modifier, contentAlignment = Alignment.CenterEnd) {
+        // 用户气泡使用淡品牌底色、细边框与非对称圆角。
+        val bubbleShape = RoundedCornerShape(
+            topStart = 16.dp, topEnd = 4.dp, bottomEnd = 16.dp, bottomStart = 16.dp,
+        )
+        Column(
+            modifier = Modifier
+                .widthIn(max = 320.dp)
+                .clip(bubbleShape)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+                .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.22f), bubbleShape)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+        ) {
+            val files = message.attachments.map { attachment ->
+                FileInfo(
+                    id = attachment.id,
+                    name = attachment.name,
+                    mimeType = attachment.mimeType,
+                    sizeBytes = attachment.sizeBytes,
+                    url = attachment.thumbnailUrl ?: attachment.remoteUrl,
+                    sandboxPath = attachment.sandboxPath,
+                    uploadStatus = UploadStatus.UPLOADED,
+                )
+            }
+            if (files.isNotEmpty()) {
+                AttachmentStrip(files = files)
+            }
+            val text = message.rawText.orEmpty()
+            if (text.isNotBlank()) {
+                Text(
+                    text = text,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            }
+        }
+    }
+}
+
+/** 助手消息头部/连接态文字（模型名 / 「正在连接…」）。 */
+@Composable
+fun AssistantPendingText(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier,
+    )
+}
+
+/** 等待首 token 的脉冲点。 */
+@Composable
+fun AssistantStreamingPlaceholder(modifier: Modifier = Modifier) {
+    com.molagpt.app.core.render.PulsingDots(modifier = modifier.padding(vertical = 4.dp))
+}
+
+/** 助手消息下方操作栏。重新生成仅在最后一条助手消息可用。 */
+@Composable
+fun MessageActionBar(
+    onCopy: () -> Unit,
+    onRegenerate: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        ActionChip("复制", onCopy)
+        if (onRegenerate != null) ActionChip("重新生成", onRegenerate)
+    }
+}
+
+@Composable
+private fun ActionChip(text: String, onClick: () -> Unit) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    )
+}
+
+/** 重试版本切换栏：‹ n/m ›。 */
+@Composable
+fun RetryBar(
+    current: Int,
+    total: Int,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        RetryArrow("‹", enabled = current > 0, onClick = onPrev)
+        Text(
+            text = "${current + 1}/$total",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        RetryArrow("›", enabled = current < total - 1, onClick = onNext)
+    }
+}
+
+@Composable
+private fun RetryArrow(glyph: String, enabled: Boolean, onClick: () -> Unit) {
+    Text(
+        text = glyph,
+        style = MaterialTheme.typography.titleMedium,
+        color = if (enabled) {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+        },
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    )
+}

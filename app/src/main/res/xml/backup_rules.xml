@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- 不备份加密凭据（含 JWT）。 -->
+    <exclude domain="sharedpref" path="mola_creds.xml" />
+    <exclude domain="sharedpref" path="mola_creds_plain.xml" />
+</full-backup-content>

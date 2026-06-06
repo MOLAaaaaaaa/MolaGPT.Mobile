@@ -1,0 +1,30 @@
+# Gradle / Android Studio
+*.iml
+.gradle/
+.kotlin/
+/local.properties
+/.idea/
+.DS_Store
+build/
+/captures
+.externalNativeBuild
+.cxx
+
+# 构建产物
+/artifacts/
+*.apk
+*.aab
+*.ap_
+*.dex
+output.json
+
+# 签名（按需保留 debug）
+*.jks
+*.keystore
+!debug.keystore
+
+# 本地敏感
+secrets.properties
+_tools/*
+deepseek_jadx/*
+deepseek_jadx.7z
