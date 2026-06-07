@@ -37,6 +37,7 @@ import com.molagpt.app.feature.auth.LoginScreen
 import com.molagpt.app.feature.chat.ChatScreen
 import com.molagpt.app.feature.session.SessionDrawer
 import com.molagpt.app.feature.session.SessionViewModel
+import com.molagpt.app.feature.settings.AboutScreen
 import com.molagpt.app.feature.settings.PersonalizationScreen
 import com.molagpt.app.feature.settings.PersonalizationViewModel
 import com.molagpt.app.feature.settings.SettingsScreen
@@ -49,6 +50,7 @@ private object Routes {
     const val CHAT = "chat"
     const val SETTINGS = "settings"
     const val PERSONALIZATION = "personalization"
+    const val ABOUT = "about"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -146,6 +148,11 @@ fun MolaNavHost(
                         navController.navigate(Routes.PERSONALIZATION) { launchSingleTop = true }
                     }
                 },
+                onOpenAbout = {
+                    if (navController.currentDestination?.route != Routes.ABOUT) {
+                        navController.navigate(Routes.ABOUT) { launchSingleTop = true }
+                    }
+                },
                 buildLabel = "MolaGPT v${com.molagpt.app.BuildConfig.VERSION_NAME} · 构建 ${com.molagpt.app.BuildConfig.BUILD_TIME}",
                 modifier = Modifier.fillMaxSize(),
             )
@@ -157,6 +164,21 @@ fun MolaNavHost(
                 viewModel = vm,
                 onBack = {
                     if (navController.currentDestination?.route == Routes.PERSONALIZATION) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.ABOUT) {
+            AboutScreen(
+                versionName = com.molagpt.app.BuildConfig.VERSION_NAME,
+                buildTime = com.molagpt.app.BuildConfig.BUILD_TIME,
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.ABOUT) {
                         if (!navController.popBackStack()) {
                             navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
                         }

@@ -1,6 +1,7 @@
 import com.android.build.api.dsl.ApplicationExtension
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -13,12 +14,28 @@ android {
     namespace = "com.molagpt.app"
     compileSdk = 36
 
+    val releaseSigningFile = rootProject.file("signing/release.properties")
+    val releaseSigning = Properties()
+    if (releaseSigningFile.isFile) {
+        releaseSigningFile.inputStream().use { releaseSigning.load(it) }
+    }
+
+    fun releaseSigningValue(name: String): String? =
+        releaseSigning.getProperty(name)?.takeIf { it.isNotBlank() }
+
+    val hasReleaseSigning = listOf(
+        "storeFile",
+        "storePassword",
+        "keyAlias",
+        "keyPassword",
+    ).all { releaseSigningValue(it) != null }
+
     defaultConfig {
         applicationId = "com.molagpt.app"
         minSdk = 23
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         // 开发专用构建时间戳：注入 BuildConfig.BUILD_TIME，设置页底部展示。
         // configuration-cache 已关（见 gradle.properties），每次构建都会重新求值 → 时间会变，
         // 据此可确认装到机器上的是不是刚编译的新包。
@@ -32,6 +49,17 @@ android {
         vectorDrawables { useSupportLibrary = true }
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseSigningValue("storeFile")!!)
+                storePassword = releaseSigningValue("storePassword")
+                keyAlias = releaseSigningValue("keyAlias")
+                keyPassword = releaseSigningValue("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         getByName("debug") {
             isMinifyEnabled = false
@@ -39,6 +67,9 @@ android {
         getByName("release") {
             isMinifyEnabled = true
             isShrinkResources = true
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

@@ -32,6 +32,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -66,6 +67,7 @@ fun SettingsScreen(
     onLogout: () -> Unit,
     onBack: () -> Unit,
     onOpenPersonalization: () -> Unit,
+    onOpenAbout: () -> Unit,
     buildLabel: String,
     modifier: Modifier = Modifier,
 ) {
@@ -118,7 +120,7 @@ fun SettingsScreen(
             if (loggedIn) {
                 SectionTitle("云同步")
                 ToggleRow(
-                    label = "自动云同步",
+                    label = "使用云同步",
                     checked = s.cloudSyncEnabled,
                     onChange = viewModel::setCloudSync,
                     enabled = !syncing,
@@ -148,11 +150,10 @@ fun SettingsScreen(
                 }
 
                 SectionTitle("个性化记忆 · MolaGPT Tracks")
-                ToggleRow("启用个性化记忆", s.tracksEnabled, viewModel::setTracks)
-                NavRow(
-                    title = "管理个性化回答",
-                    subtitle = "用户画像、对话风格与隐私",
-                    onClick = onOpenPersonalization,
+                TracksCard(
+                    enabled = s.tracksEnabled,
+                    onEnabledChange = viewModel::setTracks,
+                    onOpenPersonalization = onOpenPersonalization,
                 )
             }
 
@@ -171,6 +172,10 @@ fun SettingsScreen(
             ToggleRow("Enter 发送（关闭则换行）", s.enterToSend, viewModel::setEnterToSend)
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            SectionTitle("关于")
+            AboutEntryCard(onOpenAbout = onOpenAbout)
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text(
                 text = buildLabel,
                 style = MaterialTheme.typography.labelSmall,
@@ -178,6 +183,147 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 textAlign = TextAlign.Center,
             )
+        }
+    }
+}
+
+@Composable
+private fun AboutEntryCard(onOpenAbout: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpenAbout)
+                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TracksRowIcon(kind = TracksIconKind.Info)
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("关于 MolaGPT", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "版本、开源项目与许可证",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp).rotate(180f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun TracksCard(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    onOpenPersonalization: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 14.dp, end = 14.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TracksRowIcon(kind = TracksIconKind.Sparkles)
+                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                    Text("启用个性化记忆", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "基于历史对话提供更连贯的个性化回答",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = onEnabledChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        uncheckedBorderColor = MaterialTheme.colorScheme.outline,
+                    ),
+                )
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 58.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenPersonalization)
+                    .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TracksRowIcon(kind = TracksIconKind.Info)
+                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                    Text("管理个性化回答", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "用户画像、对话风格与隐私",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp).rotate(180f),
+                )
+            }
+        }
+    }
+}
+
+private enum class TracksIconKind { Sparkles, Info }
+
+@Composable
+private fun TracksRowIcon(kind: TracksIconKind) {
+    val tint = MaterialTheme.colorScheme.primary
+    val container = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+    Box(
+        modifier = Modifier
+            .size(30.dp)
+            .clip(RoundedCornerShape(15.dp))
+            .background(container),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.size(19.dp)) {
+            val stroke = 2.dp.toPx()
+            when (kind) {
+                TracksIconKind.Sparkles -> {
+                    val cx = size.width * 0.43f
+                    val cy = size.height * 0.43f
+                    drawLine(tint, Offset(cx, size.height * 0.02f), Offset(cx, size.height * 0.84f), stroke)
+                    drawLine(tint, Offset(size.width * 0.05f, cy), Offset(size.width * 0.82f, cy), stroke)
+                    drawLine(tint, Offset(size.width * 0.18f, size.height * 0.18f), Offset(size.width * 0.68f, size.height * 0.68f), stroke)
+                    drawLine(tint, Offset(size.width * 0.68f, size.height * 0.18f), Offset(size.width * 0.18f, size.height * 0.68f), stroke)
+                    drawCircle(tint, radius = size.minDimension * 0.08f, center = Offset(size.width * 0.80f, size.height * 0.80f))
+                }
+                TracksIconKind.Info -> {
+                    drawCircle(tint, radius = size.minDimension * 0.42f, center = center, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
+                    drawCircle(tint, radius = size.minDimension * 0.045f, center = Offset(center.x, size.height * 0.31f))
+                    drawLine(tint, Offset(center.x, size.height * 0.45f), Offset(center.x, size.height * 0.70f), stroke)
+                }
+            }
         }
     }
 }
@@ -321,35 +467,6 @@ private fun SectionTitle(text: String) {
         color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(top = 14.dp, bottom = 2.dp),
     )
-}
-
-/** 可点击的导航行（进入下钻页）。前进箭头复用 ArrowBack 旋转 180°（material-icons-core 无 ArrowForward）。 */
-@Composable
-private fun NavRow(title: String, subtitle: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
-            .padding(vertical = 10.dp, horizontal = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp),
-            )
-        }
-        Icon(
-            Icons.AutoMirrored.Filled.ArrowBack,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp).rotate(180f),
-        )
-    }
 }
 
 @Composable

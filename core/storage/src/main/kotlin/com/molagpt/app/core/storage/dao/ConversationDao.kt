@@ -35,6 +35,9 @@ interface ConversationDao {
     @Query("UPDATE conversations SET title = :title, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun rename(sessionId: String, title: String, now: Long)
 
+    @Query("UPDATE conversations SET model = :model, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId")
+    suspend fun updateModel(sessionId: String, model: String?, now: Long)
+
     @Query("UPDATE conversations SET pinned = :pinned, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun setPinned(sessionId: String, pinned: Boolean)
 

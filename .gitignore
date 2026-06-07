@@ -22,9 +22,11 @@ output.json
 *.jks
 *.keystore
 !debug.keystore
+/signing/
 
 # 本地敏感
 secrets.properties
+release-signing.properties
 _tools/*
 deepseek_jadx/*
 deepseek_jadx.7z

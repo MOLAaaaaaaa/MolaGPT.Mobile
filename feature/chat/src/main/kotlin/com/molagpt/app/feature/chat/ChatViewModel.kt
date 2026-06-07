@@ -72,12 +72,16 @@ class ChatViewModel(
     private val _loadingHistory = MutableStateFlow(false)
 
     init {
+        viewModelScope.launch {
+            restoreConversationModel()
+        }
         // 懒加载：若该会话是云端「占位」(仅元数据)，进入时按需拉取消息正文。非占位/游客内部直接跳过。
         // onFetchStart 仅在「确认占位、即将发起网络请求」时回调 → 据此转圈；普通本地会话不会误闪。
         viewModelScope.launch {
             runCatching {
                 syncEngine.loadConversationIfNeeded(sessionId) { _loadingHistory.value = true }
             }
+            restoreConversationModel()
             _loadingHistory.value = false
         }
     }
@@ -265,6 +269,7 @@ class ChatViewModel(
             val shouldGenerateTitle = chatRepository.messageCount(sessionId) == 0
             val titleSeed = content.ifBlank { _pendingAttachments.value.firstOrNull()?.name ?: "附件" }
             sessionRepository.ensure(sessionId, title = fallbackTitle(titleSeed), model = modelId)
+            sessionRepository.updateModel(sessionId, modelId)
             val now = System.currentTimeMillis()
             val ready = _pendingAttachments.value
                 .filter { it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank()) }
@@ -305,6 +310,7 @@ class ChatViewModel(
                 metadata = messageMetadata,
             )
             chatRepository.persistUserMessage(userMsg)
+            syncEngine.schedulePush(sessionId)
             _pendingAttachments.value = emptyList()
             startStream(
                 modelId = modelId,
@@ -355,6 +361,7 @@ class ChatViewModel(
         val prior = RetryAttempts.decode(lastAssistant.metadata[RetryAttempts.KEY_ATTEMPTS])
             .ifEmpty { listOf(attemptOf(lastAssistant)) }
         viewModelScope.launch {
+            sessionRepository.updateModel(sessionId, modelId)
             chatRepository.deleteMessagesFrom(sessionId, lastAssistant.createdAt)
             startStream(modelId, priorAttempts = prior)
         }
@@ -382,7 +389,10 @@ class ChatViewModel(
             metadata = meta,
         )
         backgroundStreams.updateInFlight(sessionId, updated)
-        viewModelScope.launch { chatRepository.updateMessage(updated) }
+        viewModelScope.launch {
+            chatRepository.updateMessage(updated)
+            syncEngine.schedulePush(sessionId)
+        }
     }
 
     private fun attemptOf(m: ChatMessage): RetryAttempt = RetryAttempt(
@@ -470,10 +480,24 @@ class ChatViewModel(
             .let { if (it.length <= 25) it else it.take(25).trim() + "..." }
             .ifBlank { "无标题对话" }
 
-    private fun resolvedModelId(candidate: String?, models: List<ProviderModel>): String? =
-        candidate?.takeIf { id -> models.any { it.id == id } }
+    private suspend fun restoreConversationModel() {
+        val savedModel = sessionRepository.get(sessionId)?.model?.takeIf { it.isNotBlank() } ?: return
+        _selectedModel.value = savedModel
+    }
+
+    private fun resolvedModelId(candidate: String?, models: List<ProviderModel>): String? {
+        val normalized = normalizeSavedModelId(candidate)
+        return normalized?.takeIf { id -> models.any { it.id == id } }
             ?: models.firstOrNull()?.id
-            ?: candidate
+            ?: normalized
+    }
+
+    private fun normalizeSavedModelId(modelId: String?): String? = when (modelId?.trim()) {
+        null, "" -> null
+        "autoLLM" -> "auto"
+        "default" -> defaultModelId ?: "auto"
+        else -> modelId.trim()
+    }
 }
 
 private data class ChatControlState(

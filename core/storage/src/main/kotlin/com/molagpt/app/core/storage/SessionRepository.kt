@@ -53,6 +53,9 @@ class SessionRepository(
     suspend fun rename(sessionId: String, title: String) =
         withContext(dispatchers.io) { conversationDao.rename(sessionId, title, System.currentTimeMillis()) }
 
+    suspend fun updateModel(sessionId: String, model: String?) =
+        withContext(dispatchers.io) { conversationDao.updateModel(sessionId, model, System.currentTimeMillis()) }
+
     suspend fun setPinned(sessionId: String, pinned: Boolean) =
         withContext(dispatchers.io) { conversationDao.setPinned(sessionId, pinned) }
 

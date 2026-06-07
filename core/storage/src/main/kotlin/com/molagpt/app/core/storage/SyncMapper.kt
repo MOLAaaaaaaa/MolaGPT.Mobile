@@ -12,6 +12,7 @@ import com.molagpt.app.core.storage.entity.ConversationEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
@@ -75,24 +76,26 @@ object SyncMapper {
     fun messageToJson(m: MessageEntity): JsonObject = buildJsonObject {
         val meta = MessageJson.decodeMeta(m.metadataJson)
         val isUser = m.role.equals(Role.USER.name, ignoreCase = true)
-        val visible = visibleContent(m)
-        val reasoning = reasoningOf(m)
+        val visible = if (isUser) visibleContent(m) else webTimelineContent(m)
+        val sources = sourcesOf(m)
         val sendContent = meta[META_SEND_CONTENT]?.takeIf { it.isNotBlank() }
         val attachments = MessageJson.decodeAttachments(meta[META_ATTACHMENTS])
         put("role", m.role.lowercase(Locale.US))
         put(
             "content",
-            if (isUser && sendContent != null) sendContent else webCompatibleContent(visible, reasoning),
+            if (isUser && sendContent != null) sendContent else visible,
         )
         put("timestamp", m.createdAt)
         m.model?.let { put("model", it) }
-        reasoning?.let { put("reasoning_content", it) }
         val metaJson = buildJsonObject {
             if (isUser && sendContent != null) {
                 put(META_DISPLAY_CONTENT, meta[META_DISPLAY_CONTENT]?.takeIf { it.isNotBlank() } ?: visible)
             }
             if (isUser && attachments.isNotEmpty()) {
                 put(META_ATTACHMENTS, attachmentsToJson(attachments))
+            }
+            if (!isUser && sources.isNotEmpty()) {
+                put("sources", sourcesToJson(sources))
             }
         }
         if (metaJson.isNotEmpty()) {
@@ -204,45 +207,134 @@ object SyncMapper {
             )
         }
 
-        val fragments = mutableListOf<MessageFragment>()
-        var remaining = content
-
-        val leadingTools = peelLeadingToolMarkup(remaining)
-        leadingTools.tools.forEach(fragments::add)
-        remaining = leadingTools.visible
-
-        val split = splitThinkTags(remaining)
-        var thinking = mergeText(explicitThinking, split.thinking)
-        if (leadingTools.thinkingMarkup.isNotBlank()) {
-            thinking = mergeText(thinking, leadingTools.thinkingMarkup)
-        }
-        if (!thinking.isNullOrBlank()) {
-            fragments.add(MessageFragment.Thinking(Ids.newFragmentId(), thinking.trim(), collapsed = true))
-        }
-
-        val visible = cleanVisibleText(split.visible)
-        if (visible.isNotBlank()) {
-            fragments.add(MessageFragment.Text(Ids.newFragmentId(), visible))
+        val timeline = parseCloudTimeline(content)
+        val fragments = timeline.fragments.toMutableList()
+        if (!explicitThinking.isNullOrBlank() && !timeline.hasInlineThinking) {
+            fragments.add(
+                0,
+                MessageFragment.Thinking(Ids.newFragmentId(), explicitThinking.trim(), collapsed = true),
+            )
         }
 
         if (sources.isNotEmpty()) {
             fragments.add(
                 MessageFragment.SearchResult(
                     id = Ids.newFragmentId(),
-                    query = leadingTools.searchQueries.joinToString(" / "),
+                    query = timeline.searchQueries.joinToString(" / "),
                     refs = sources,
                 ),
             )
         }
 
         if (fragments.isEmpty()) {
-            fragments.add(MessageFragment.Text(Ids.newFragmentId(), visible.ifBlank { content }))
+            val fallback = cleanVisibleText(content)
+            fragments.add(MessageFragment.Text(Ids.newFragmentId(), fallback.ifBlank { content }))
         }
 
         return NormalizedCloudContent(
             fragments = fragments,
-            rawText = visible.ifBlank { cleanVisibleText(content) },
+            rawText = timeline.visibleText.ifBlank { cleanVisibleText(content) },
         )
+    }
+
+    private data class CloudTimelineParse(
+        val fragments: List<MessageFragment>,
+        val visibleText: String,
+        val searchQueries: List<String>,
+        val hasInlineThinking: Boolean,
+    )
+
+    private fun parseCloudTimeline(content: String): CloudTimelineParse {
+        val fragments = mutableListOf<MessageFragment>()
+        val visible = StringBuilder()
+        val searchQueries = mutableListOf<String>()
+        var pos = 0
+        var hasThinking = false
+
+        fun appendVisible(segment: String) {
+            val text = cleanVisibleText(segment)
+            if (text.isBlank()) return
+            fragments.add(MessageFragment.Text(Ids.newFragmentId(), text))
+            if (visible.isNotEmpty()) visible.append("\n\n")
+            visible.append(text)
+        }
+
+        while (pos < content.length) {
+            val next = findNextCloudTimelineMarker(content, pos)
+            if (next < 0) {
+                appendVisible(content.substring(pos))
+                break
+            }
+
+            if (next > pos) {
+                appendVisible(content.substring(pos, next))
+            }
+
+            if (startsWithIgnoreCase(content, next, "<think")) {
+                val openEnd = content.indexOf('>', next)
+                if (openEnd < 0) {
+                    appendThinkingFragment(fragments, content.substring(next))
+                    hasThinking = true
+                    break
+                }
+                val close = indexOfIgnoreCase(content, THINK_CLOSE, openEnd + 1)
+                val body = if (close < 0) {
+                    content.substring(openEnd + 1)
+                } else {
+                    content.substring(openEnd + 1, close)
+                }
+                appendThinkingFragment(fragments, body)
+                hasThinking = true
+                pos = if (close < 0) content.length else close + THINK_CLOSE.length
+                continue
+            }
+
+            val end = findToolMarkupEnd(content, next)
+            if (end < 0) {
+                appendVisible(content.substring(next, (next + 1).coerceAtMost(content.length)))
+                pos = next + 1
+                continue
+            }
+
+            val unit = content.substring(next, end)
+            if (startsWithIgnoreCase(unit, 0, "<DSanalysis") && mergeDsAnalysisWithPreviousTool(fragments, unit)) {
+                pos = end
+                continue
+            }
+
+            val tools = mutableListOf<MessageFragment.ToolCall>()
+            parseToolUnit(unit, tools, searchQueries)
+            fragments.addAll(tools)
+            pos = end
+        }
+
+        return CloudTimelineParse(
+            fragments = fragments,
+            visibleText = visible.toString(),
+            searchQueries = searchQueries,
+            hasInlineThinking = hasThinking,
+        )
+    }
+
+    private fun appendThinkingFragment(fragments: MutableList<MessageFragment>, text: String) {
+        val thinking = text.trim()
+        if (thinking.isBlank()) return
+        fragments.add(MessageFragment.Thinking(Ids.newFragmentId(), thinking, collapsed = true))
+    }
+
+    private fun mergeDsAnalysisWithPreviousTool(fragments: MutableList<MessageFragment>, unit: String): Boolean {
+        val body = stripTagPair(unit, "DSanalysis").trim()
+        if (body.isBlank()) return true
+        val lastIndex = fragments.lastIndex
+        val previous = fragments.getOrNull(lastIndex) as? MessageFragment.ToolCall ?: return false
+        fragments[lastIndex] = previous.copy(
+            name = dsToolName(unit),
+            status = webToolStatus(unit),
+            label = readableDsLabel(unit),
+            resultPreview = body,
+            provider = previous.provider ?: "MolaGPT",
+        )
+        return true
     }
 
     private data class ToolPeel(
@@ -296,12 +388,29 @@ object SyncMapper {
             )
             return
         }
-        if (startsWithToolStatusBlockquote(unit)) {
+        if (startsWithIgnoreCase(unit, 0, "<steel-step")) {
+            val name = steelStepToolName(unit)
+            val status = webToolStatus(unit)
             tools.add(
                 MessageFragment.ToolCall(
                     id = Ids.newFragmentId(),
-                    name = "tool",
-                    status = ToolStatus.SUCCESS,
+                    name = name,
+                    status = status,
+                    label = extractSteelStepTitle(unit)
+                        .ifBlank { readableToolStatusLabel(name, status) },
+                    resultPreview = extractSteelStepPreview(unit),
+                    provider = "MolaGPT",
+                ),
+            )
+            return
+        }
+        if (startsWithToolStatusBlockquote(unit)) {
+            val name = toolNameFromStatusMarkup(unit)
+            tools.add(
+                MessageFragment.ToolCall(
+                    id = Ids.newFragmentId(),
+                    name = name,
+                    status = webToolStatus(unit),
                     label = htmlToText(unit).ifBlank { "工具调用" },
                     provider = "MolaGPT",
                 ),
@@ -315,7 +424,7 @@ object SyncMapper {
                     MessageFragment.ToolCall(
                         id = Ids.newFragmentId(),
                         name = dsToolName(unit),
-                        status = ToolStatus.SUCCESS,
+                        status = webToolStatus(unit),
                         label = readableDsLabel(unit),
                         resultPreview = body,
                         provider = "MolaGPT",
@@ -523,6 +632,23 @@ object SyncMapper {
         return -1
     }
 
+    private fun findNextCloudTimelineMarker(source: String, start: Int): Int =
+        minPositive(
+            indexOfIgnoreCase(source, "<think", start),
+            indexOfIgnoreCase(source, "<steel-step", start),
+            indexOfIgnoreCase(source, "<DSanalysis", start),
+            indexOfNextToolStatusBlockquote(source, start),
+        )
+
+    private fun indexOfNextToolStatusBlockquote(source: String, start: Int): Int {
+        var pos = indexOfIgnoreCase(source, "<blockquote", start)
+        while (pos >= 0) {
+            if (startsWithToolStatusBlockquote(source, pos)) return pos
+            pos = indexOfIgnoreCase(source, "<blockquote", pos + "<blockquote".length)
+        }
+        return -1
+    }
+
     private fun findTagEnd(source: String, start: Int, closeTag: String): Int {
         val close = indexOfIgnoreCase(source, closeTag, start)
         return if (close < 0) source.length else close + closeTag.length
@@ -558,6 +684,55 @@ object SyncMapper {
         }
     }
 
+    private fun extractSteelStepTitle(html: String): String =
+        Regex(
+            """<p\b[^>]*class=["'][^"']*\btool-steel-step-title\b[^"']*["'][^>]*>([\s\S]*?)</p>""",
+            RegexOption.IGNORE_CASE,
+        ).find(html)?.groupValues?.getOrNull(1)?.let(::htmlToText).orEmpty()
+
+    private fun extractSteelStepPreview(html: String): String? {
+        val items = Regex(
+            """<span\b[^>]*class=["'][^"']*\btool-steel-meta-item\b[^"']*["'][^>]*>([\s\S]*?)</span>""",
+            RegexOption.IGNORE_CASE,
+        ).findAll(html).map { htmlToText(it.groupValues[1]) }.filter { it.isNotBlank() }.distinct().toList()
+        return items.joinToString("\n").ifBlank { null }
+    }
+
+    private fun toolNameFromStatusMarkup(unit: String): String {
+        if (containsIgnoreCase(unit, "tool-search-blockquote")) return "web_search"
+        val text = htmlToText(unit)
+        return when {
+            containsIgnoreCase(text, "搜索") -> "web_search"
+            containsIgnoreCase(text, "查看图片") || containsIgnoreCase(text, "图片分析") -> "image-analyze"
+            containsIgnoreCase(text, "绘制") || containsIgnoreCase(text, "图片生成") -> "image-gen"
+            containsIgnoreCase(text, "Python") -> "python"
+            containsIgnoreCase(text, "阅读网页") || containsIgnoreCase(text, "读取网页") -> "web_fetch"
+            else -> "tool"
+        }
+    }
+
+    private fun steelStepToolName(unit: String): String {
+        val title = extractSteelStepTitle(unit)
+        return when {
+            containsIgnoreCase(unit, "data-steel-action=\"scrape\"") ||
+                containsIgnoreCase(unit, "data-steel-action='scrape'") ||
+                containsIgnoreCase(title, "阅读网页") ||
+                containsIgnoreCase(title, "读取网页") -> "web_fetch"
+            else -> "steel_browser"
+        }
+    }
+
+    private fun webToolStatus(unit: String): ToolStatus {
+        val lower = unit.lowercase(Locale.US)
+        return when {
+            lower.contains("data-analysis-phase=\"error\"") ||
+                lower.contains(" tool-status error") ||
+                lower.contains(" failed") ||
+                lower.contains("失败") -> ToolStatus.FAILED
+            else -> ToolStatus.SUCCESS
+        }
+    }
+
     private fun htmlToText(html: String): String =
         html.replace(Regex("""<[^>]+>"""), "")
             .replace("&nbsp;", " ")
@@ -569,14 +744,28 @@ object SyncMapper {
             .trim()
 
     private fun dsToolName(unit: String): String = when {
+        containsIgnoreCase(unit, "web_search") -> "web_search"
+        containsIgnoreCase(unit, "image-analyze") -> "image-analyze"
+        containsIgnoreCase(unit, "image-gen") -> "image-gen"
+        containsIgnoreCase(unit, "image-action") -> "image-action"
+        containsIgnoreCase(unit, "操作类型: scrape") ||
+            containsIgnoreCase(unit, "**操作类型:** scrape") ||
+            containsIgnoreCase(unit, "operation type: scrape") ||
+            (containsIgnoreCase(unit, "页面标题") && containsIgnoreCase(unit, "内容长度")) -> "web_fetch"
         containsIgnoreCase(unit, "python") -> "python"
+        containsIgnoreCase(unit, "mcp") -> "mcp"
         containsIgnoreCase(unit, "image") -> "image-action"
         else -> "tool"
     }
 
-    private fun readableDsLabel(unit: String): String = when {
-        containsIgnoreCase(unit, "python") -> "Python 执行"
-        containsIgnoreCase(unit, "image") -> "图片处理"
+    private fun readableDsLabel(unit: String): String = when (dsToolName(unit)) {
+        "web_search" -> "网络搜索"
+        "web_fetch" -> "阅读网页"
+        "image-analyze" -> "图片分析"
+        "image-gen" -> "图片生成"
+        "image-action" -> "图片处理"
+        "python" -> "Python 执行"
+        "mcp" -> "连接器调用"
         else -> "工具调用"
     }
 
@@ -614,10 +803,14 @@ object SyncMapper {
     private fun containsIgnoreCase(source: String, value: String): Boolean =
         source.contains(value, ignoreCase = true)
 
+    private fun minPositive(vararg values: Int): Int =
+        values.filter { it >= 0 }.minOrNull() ?: -1
+
     private fun visibleContent(m: MessageEntity): String {
         val frags = MessageJson.decodeFragments(m.fragmentsJson)
         val hasWebOnlyFragments = frags.any { it is MessageFragment.ToolCall || it is MessageFragment.Image || it is MessageFragment.SearchResult }
         if (!hasWebOnlyFragments && !m.rawText.isNullOrBlank()) return m.rawText!!
+        val hasSearchTool = frags.any { it is MessageFragment.ToolCall && webToolType(it.name) == "web_search" }
         return buildString {
             frags.forEach { f ->
                 when (f) {
@@ -627,12 +820,51 @@ object SyncMapper {
                     is MessageFragment.Latex -> append(if (f.display) "$$${f.expr}$$" else "$${f.expr}$")
                     is MessageFragment.Mermaid -> append("\n```mermaid\n").append(f.source).append("\n```\n")
                     is MessageFragment.ToolCall -> append(webToolMarkup(f))
-                    is MessageFragment.SearchResult -> append(webSearchMarkup(f))
+                    is MessageFragment.SearchResult -> if (!hasSearchTool) append(webSearchMarkup(f))
                     is MessageFragment.Image -> append("\n\n![${escapeMarkdownAlt(f.prompt ?: "生成的图片")}](${f.url})\n\n")
                     else -> Unit
                 }
             }
         }.trim()
+    }
+
+    private fun webTimelineContent(m: MessageEntity): String {
+        val frags = MessageJson.decodeFragments(m.fragmentsJson)
+        val hasTimelineFragments = frags.any {
+            it is MessageFragment.Thinking ||
+                it is MessageFragment.ToolCall ||
+                it is MessageFragment.Image ||
+                it is MessageFragment.SearchResult
+        }
+        if (!hasTimelineFragments && !m.rawText.isNullOrBlank()) return m.rawText!!
+
+        val hasSearchTool = frags.any { it is MessageFragment.ToolCall && webToolType(it.name) == "web_search" }
+        return buildString {
+            frags.forEach { f ->
+                when (f) {
+                    is MessageFragment.Text -> append(f.markdown)
+                    is MessageFragment.Thinking -> appendWebThink(f.text)
+                    is MessageFragment.CodeBlock ->
+                        append("\n```").append(f.language ?: "").append('\n').append(f.code).append("\n```\n")
+                    is MessageFragment.Latex -> append(if (f.display) "$$${f.expr}$$" else "$${f.expr}$")
+                    is MessageFragment.Mermaid -> append("\n```mermaid\n").append(f.source).append("\n```\n")
+                    is MessageFragment.ToolCall -> append(webToolMarkup(f))
+                    is MessageFragment.SearchResult -> if (!hasSearchTool) append(webSearchMarkup(f))
+                    is MessageFragment.Image -> append("\n\n![${escapeMarkdownAlt(f.prompt ?: "生成的图片")}](${f.url})\n\n")
+                    is MessageFragment.Tip -> append("\n\n").append(f.text).append("\n\n")
+                    is MessageFragment.Error -> append("\n\n").append(f.message).append("\n\n")
+                    else -> Unit
+                }
+            }
+        }.trim()
+    }
+
+    private fun StringBuilder.appendWebThink(text: String) {
+        val thinking = text.trim()
+        if (thinking.isBlank()) return
+        append("\n\n<think>\n")
+        append(thinking)
+        append("\n</think>\n\n")
     }
 
     private fun webToolMarkup(tool: MessageFragment.ToolCall): String {
@@ -644,6 +876,9 @@ object SyncMapper {
         val label = tool.label?.takeIf { it.isNotBlank() } ?: readableToolStatusLabel(tool.name, tool.status)
         val safeLabel = escapeHtml(label)
         val toolType = webToolType(tool.name)
+        if (toolType == "web_search") {
+            return webSearchMarkup(chips = searchChipsFromTool(tool, label), phase = phase)
+        }
         val extraClass = if (toolType == "image-gen") " tool-image-blockquote" else ""
         val dsBody = buildString {
             tool.argsJson?.takeIf { it.isNotBlank() }?.let {
@@ -661,12 +896,111 @@ object SyncMapper {
     }
 
     private fun webSearchMarkup(search: MessageFragment.SearchResult): String {
-        val chips = search.query.takeIf { it.isNotBlank() } ?: "联网搜索"
-        return "\n\n<blockquote class=\"tool-status completed tool-search-blockquote\"><p class=\"tool-search-title\">联网搜索</p>" +
-            "<div class=\"tool-search-chip-wrap\"><span class=\"tool-search-chip\"><span class=\"tool-search-chip-text\">" +
-            escapeHtml(chips) +
-            "</span></span></div></blockquote>\n\n" +
-            "<DSanalysis data-tool-type=\"web_search\" data-analysis-phase=\"completed\"></DSanalysis>\n\n"
+        val chips = splitSearchChipText(search.query.takeIf { it.isNotBlank() } ?: "联网搜索")
+        return webSearchMarkup(chips = chips, phase = "completed")
+    }
+
+    private data class SearchChip(
+        val text: String,
+        val badges: List<String> = emptyList(),
+    )
+
+    private fun webSearchMarkup(chips: List<SearchChip>, phase: String): String {
+        val safePhase = when (phase) {
+            "completed", "error", "analyzing" -> phase
+            else -> "completed"
+        }
+        val chipHtml = chips.ifEmpty { listOf(SearchChip("联网搜索")) }.joinToString("") { chip ->
+            val badges = chip.badges.joinToString("") { badge ->
+                val icon = searchBadgeIcon(badge)
+                "<span class=\"tool-search-chip-badge\"><span class=\"tool-search-chip-badge-icon\"><i class=\"$icon\"></i></span>${escapeHtml(badge)}</span>"
+            }
+            "<span class=\"tool-search-chip\"><span class=\"tool-search-chip-icon\" aria-hidden=\"true\"><i class=\"fas fa-search\"></i></span>" +
+                "<span class=\"tool-search-chip-text\">${escapeHtml(chip.text)}</span>$badges</span>"
+        }
+        return "\n\n<blockquote class=\"tool-status $safePhase tool-search-blockquote\" data-search-phase=\"$safePhase\">" +
+            "<p class=\"tool-search-title\">网络搜索</p><div class=\"tool-search-chip-wrap\">$chipHtml</div></blockquote>\n\n" +
+            "<DSanalysis data-tool-type=\"web_search\" data-analysis-phase=\"$safePhase\"></DSanalysis>\n\n"
+    }
+
+    private fun searchChipsFromTool(tool: MessageFragment.ToolCall, label: String): List<SearchChip> =
+        searchChipsFromArgs(tool.argsJson).ifEmpty { splitSearchChipText(label) }
+
+    private fun searchChipsFromArgs(argsJson: String?): List<SearchChip> {
+        if (argsJson.isNullOrBlank()) return emptyList()
+        val root = runCatching { Json.parseToJsonElement(argsJson) }.getOrNull() as? JsonObject ?: return emptyList()
+        val queries = root["queries"] as? JsonArray
+        if (queries != null) {
+            return queries.mapNotNull { item ->
+                if (item is JsonPrimitive) {
+                    return@mapNotNull item.contentOrNull
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { SearchChip(it) }
+                }
+                val obj = item as? JsonObject ?: return@mapNotNull null
+                val query = obj["query"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["text"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["q"]?.jsonPrimitive?.contentOrNull
+                    ?: return@mapNotNull null
+                SearchChip(query, searchBadgesFrom(obj))
+            }.filter { it.text.isNotBlank() }
+        }
+        val query = root["query"]?.jsonPrimitive?.contentOrNull
+            ?: root["search_query"]?.jsonPrimitive?.contentOrNull
+            ?: root["q"]?.jsonPrimitive?.contentOrNull
+            ?: return emptyList()
+        return listOf(SearchChip(query, searchBadgesFrom(root))).filter { it.text.isNotBlank() }
+    }
+
+    private fun searchBadgesFrom(obj: JsonObject): List<String> =
+        listOfNotNull(
+            obj["topic"]?.jsonPrimitive?.contentOrNull,
+            obj["time_range"]?.jsonPrimitive?.contentOrNull,
+            obj["country"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.uppercase(Locale.US),
+        ).filter { it.isNotBlank() }
+
+    private fun splitSearchChipText(rawText: String): List<SearchChip> {
+        val normalized = rawText
+            .replace(Regex("""\s+"""), " ")
+            .replace(Regex("""^\s*(?:✓\s*)?(?:网络搜索|联网搜索|搜索完成|网络搜索完成|联网搜索完成)\s*[:：-]?\s*"""), "")
+            .trim()
+        if (normalized.isBlank()) return emptyList()
+        val slashParts = normalized.split(Regex("""\s*/\s*""")).map { it.trim() }.filter { it.isNotBlank() }
+        if (slashParts.size > 1) {
+            return slashParts.map { parseSearchChipWithTrailingBadge(it) }
+        }
+
+        val knownBadge = """(?:news|finance|paper|technology|day|week|month|year)"""
+        val matches = Regex("""(.+?)\s+($knownBadge)(?=\s+|$)""", RegexOption.IGNORE_CASE)
+            .findAll(normalized)
+            .map {
+                SearchChip(
+                    text = it.groupValues[1].trim(),
+                    badges = listOf(it.groupValues[2].lowercase(Locale.US)),
+                )
+            }
+            .filter { it.text.isNotBlank() }
+            .toList()
+        return matches.ifEmpty { listOf(parseSearchChipWithTrailingBadge(normalized)) }
+    }
+
+    private fun parseSearchChipWithTrailingBadge(value: String): SearchChip {
+        val match = Regex("""^(.+?)\s+(news|finance|paper|technology|day|week|month|year)$""", RegexOption.IGNORE_CASE)
+            .matchEntire(value.trim())
+        return if (match != null) {
+            SearchChip(match.groupValues[1].trim(), listOf(match.groupValues[2].lowercase(Locale.US)))
+        } else {
+            SearchChip(value.trim())
+        }
+    }
+
+    private fun searchBadgeIcon(badge: String): String = when (badge.lowercase(Locale.US)) {
+        "news" -> "far fa-newspaper"
+        "finance" -> "fas fa-chart-line"
+        "paper" -> "fas fa-graduation-cap"
+        "technology" -> "fas fa-microchip"
+        "day", "week", "month", "year" -> "far fa-clock"
+        else -> if (badge.length == 2 && badge.all { it.isLetter() }) "fas fa-globe-asia" else "fas fa-tag"
     }
 
     private fun webToolType(name: String): String = when (name) {
@@ -682,6 +1016,9 @@ object SyncMapper {
 
     private fun readableToolStatusLabel(name: String, status: ToolStatus): String {
         val completed = status == ToolStatus.SUCCESS
+        if (name == "web_fetch" || name == "steel_browser") {
+            return if (completed) "阅读网页" else if (status == ToolStatus.FAILED) "网页阅读失败" else "正在阅读网页"
+        }
         return when (webToolType(name)) {
             "image-gen" -> if (completed) "绘制完成" else if (status == ToolStatus.FAILED) "绘制失败" else "正在绘制"
             "image-analyze" -> if (completed) "图片分析完成" else if (status == ToolStatus.FAILED) "图片分析失败" else "正在查看图片"
@@ -702,24 +1039,30 @@ object SyncMapper {
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
 
-    private fun reasoningOf(m: MessageEntity): String? {
-        val frags = MessageJson.decodeFragments(m.fragmentsJson)
-        val r = frags.filterIsInstance<MessageFragment.Thinking>().joinToString("\n") { it.text }.trim()
-        return r.ifBlank { null }
+    private fun sourcesOf(m: MessageEntity): List<SourceReference> {
+        val seen = mutableSetOf<String>()
+        return MessageJson.decodeFragments(m.fragmentsJson)
+            .filterIsInstance<MessageFragment.SearchResult>()
+            .flatMap { it.refs }
+            .filter { source ->
+                val key = source.url.takeIf { it.isNotBlank() }
+                    ?: "${source.index}:${source.title}"
+                seen.add(key)
+            }
     }
 
-    private fun webCompatibleContent(visible: String, reasoning: String?): String {
-        val thinking = reasoning?.trim()
-        if (thinking.isNullOrBlank()) return visible
-        val body = visible.trimStart()
-        return buildString {
-            append("<think>\n")
-            append(thinking)
-            append("\n</think>")
-            if (body.isNotBlank()) {
-                append("\n\n")
-                append(body)
-            }
+    private fun sourcesToJson(sources: List<SourceReference>): JsonArray = buildJsonArray {
+        sources.forEachIndexed { index, source ->
+            add(
+                buildJsonObject {
+                    put("id", source.index ?: index + 1)
+                    put("title", source.title)
+                    put("url", source.url)
+                    source.snippet?.takeIf { it.isNotBlank() }?.let { put("snippet", it) }
+                    source.faviconUrl?.takeIf { it.isNotBlank() }?.let { put("favicon", it) }
+                },
+            )
         }
     }
+
 }
