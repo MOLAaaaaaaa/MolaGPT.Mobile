@@ -3,6 +3,7 @@ package com.molagpt.app.feature.chat
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Base64
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.molagpt.app.core.common.DispatcherProvider
@@ -13,6 +14,8 @@ import com.molagpt.app.core.model.EnabledTools
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.MessageStatus
+import com.molagpt.app.core.model.ProviderIds
+import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
@@ -49,7 +52,8 @@ class ChatViewModel(
     private val dispatchers: DispatcherProvider,
     private val modelsFlow: StateFlow<List<ProviderModel>>,
     private val modelRefreshingFlow: StateFlow<Boolean>,
-    private val modelRefresher: suspend () -> List<ProviderModel>,
+    private val modelRefresher: suspend (ProviderKind) -> List<ProviderModel>,
+    private val settingsFlow: StateFlow<com.molagpt.app.core.storage.AppSettings>,
     private val defaultModelId: String?,
     private val tools: EnabledTools,
     useThinking: Boolean,
@@ -61,6 +65,8 @@ class ChatViewModel(
 
     private val conversationId = Ids.conversationIdForSession(sessionId)
     private val _selectedModel = MutableStateFlow(defaultModelId)
+    private val _conversationProviderId = MutableStateFlow<String?>(ProviderIds.MOLAGPT)
+    private val _conversationProviderKind = MutableStateFlow(ProviderKind.MOLAGPT)
     private val _error = MutableStateFlow<String?>(null)
     private val _authExpired = MutableStateFlow(false)
     private val _enabledTools = MutableStateFlow(tools)
@@ -92,10 +98,31 @@ class ChatViewModel(
         ChatControlState(error, authExpired, enabledTools, thinking, effort)
     }
 
+    /** 已启用的 MCP 服务器是否存在——门控对话内 MCP 工具开关，避免空配置时仍向模型暴露 MCP。 */
+    private val hasMcpServersFlow: StateFlow<Boolean> = settingsFlow
+        .map { s -> s.byokMcpServers.any { it.enabled } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    private val providerState = combine(
+        _conversationProviderId, _conversationProviderKind, hasMcpServersFlow,
+    ) { providerId, providerKind, hasMcp -> ConversationProviderState(providerId, providerKind, hasMcp) }
+
+    /** 当前会话标题（随重命名实时刷新）；空/缺省回退「新对话」。 */
+    private val conversationTitleFlow: StateFlow<String> = sessionRepository.observe(sessionId)
+        .map { it?.title?.takeIf { t -> t.isNotBlank() } ?: "新对话" }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "新对话")
+
     private val uiMeta = combine(
-        controls, _pendingAttachments, modelRefreshingFlow, _loadingHistory,
-    ) { controls, pending, refreshing, loadingHistory ->
-        ChatUiMeta(controls, pending, refreshing, loadingHistory)
+        controls, _pendingAttachments, modelRefreshingFlow, _loadingHistory, providerState, conversationTitleFlow,
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        val controls = values[0] as ChatControlState
+        val pending = values[1] as List<FileInfo>
+        val refreshing = values[2] as Boolean
+        val loadingHistory = values[3] as Boolean
+        val provider = values[4] as ConversationProviderState
+        val title = values[5] as String
+        ChatUiMeta(controls, pending, refreshing, loadingHistory, provider.providerId, provider.providerKind, provider.hasMcpServers, title)
     }
 
     val uiState: StateFlow<ChatUiState> = combine(
@@ -107,18 +134,25 @@ class ChatViewModel(
     ) { history, streamState, model, meta, models ->
         val controls = meta.controls
         val pending = meta.pendingAttachments
-        val selectedModelId = resolvedModelId(model, models)
-        val selectedModel = models.firstOrNull { it.id == selectedModelId }
+        val visibleModels = models.filter { it.providerKind == meta.providerKind && it.supportsChat }
+        val selectedModel = selectedModelFor(model, meta.providerId, visibleModels)
+        val selectedModelId = selectedModel?.id ?: normalizeSavedModelId(model)
         val inFlight = streamState.inFlight
         // 合并历史与 in-flight：若 in-flight 的 id 已在历史里（已落库），以 in-flight 为准覆盖。
         val merged = if (inFlight == null) history
         else (history.filterNot { it.messageId == inFlight.messageId } + inFlight)
         ChatUiState(
             sessionId = sessionId,
+            title = meta.title,
             messages = merged,
-            models = models,
+            models = visibleModels,
+            modelGroups = buildModelGroups(models),
             selectedModelId = selectedModelId,
             selectedModel = selectedModel,
+            providerKind = meta.providerKind,
+            hasMolaGptModels = models.any { it.providerKind == ProviderKind.MOLAGPT && it.supportsChat },
+            hasByokModels = models.any { it.providerKind == ProviderKind.BYOK && it.supportsChat },
+            hasMcpServers = meta.hasMcpServers,
             isModelRefreshing = meta.isModelRefreshing,
             isStreaming = streamState.isStreaming,
             inputEnabled = !streamState.isStreaming,
@@ -132,23 +166,76 @@ class ChatViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ChatUiState(sessionId))
 
-    fun selectModel(modelId: String) {
-        _selectedModel.value = modelId
+    /** 把全量模型按阵营→提供商分组：MolaGPT 一组在前，每个 BYOK provider 各一组。 */
+    private fun buildModelGroups(models: List<ProviderModel>): List<ModelGroup> {
+        val chatModels = models.filter { it.supportsChat }
+        val groups = mutableListOf<ModelGroup>()
+        chatModels.filter { it.providerKind == ProviderKind.MOLAGPT }
+            .takeIf { it.isNotEmpty() }
+            ?.let { groups.add(ModelGroup(ProviderKind.MOLAGPT, null, "MolaGPT", it)) }
+        chatModels.filter { it.providerKind == ProviderKind.BYOK }
+            .groupBy { it.providerId }
+            .forEach { (providerId, list) ->
+                groups.add(
+                    ModelGroup(
+                        kind = ProviderKind.BYOK,
+                        providerId = providerId,
+                        title = "自定义 API · ${list.firstOrNull()?.providerName ?: providerId}",
+                        models = list,
+                    ),
+                )
+            }
+        return groups
+    }
+
+    fun selectModel(modelId: String, providerId: String? = null) {
+        val visible = modelsFlow.value.filter { it.providerKind == _conversationProviderKind.value && it.supportsChat }
+        val selected = visible.firstOrNull { it.id == modelId && (providerId == null || it.providerId == providerId) }
+            ?: visible.firstOrNull { it.id == modelId }
+            ?: return
+        _selectedModel.value = selected.id
+        _conversationProviderId.value = selected.providerId
+        _conversationProviderKind.value = selected.providerKind
+        adaptThinkingStateTo(selected)
+    }
+
+    /**
+     * 切换模型后把推理状态适配到新模型：
+     * - 非推理模型（thinkingConfig==NONE 且不支持 reasoning_effort）：关闭推理。
+     * - 有 effortLevels 的 kind：当前档位不在可选集时重置为该 kind 默认档位。
+     * - 仅开/关的 kind（如 Kimi）：保留 useThinking，不强制档位。
+     */
+    private fun adaptThinkingStateTo(model: ProviderModel) {
+        val tc = model.thinkingConfig
+        val kind = tc?.kind ?: com.molagpt.app.core.model.ThinkingParamKind.NONE
+        if (kind == com.molagpt.app.core.model.ThinkingParamKind.NONE) {
+            if (!model.supportsReasoningEffort) {
+                _useThinking.value = false
+            } else if (_reasoningEffort.value !in listOf("low", "medium", "high")) {
+                _reasoningEffort.value = "medium"
+            }
+            return
+        }
+        val levels = com.molagpt.app.core.model.ThinkingKinds.effortLevelsFor(kind)
+        if (levels.isNotEmpty() && _reasoningEffort.value !in levels) {
+            _reasoningEffort.value = com.molagpt.app.core.model.ThinkingKinds.defaultEffortFor(kind)
+        }
     }
 
     fun refreshModels() {
         if (modelRefreshingFlow.value) return
         viewModelScope.launch {
+            // 同时刷新两阵营：保证选择器打开时 MolaGPT 与 BYOK 模型都即时可见，
+            // hasMolaGptModels/hasByokModels 不会因只刷新当前阵营而长期失真。
             // 成功后 registry 的 StateFlow 自动 emit，uiState 实时重组——无需手动 tick。
-            runCatching { withContext(dispatchers.io) { modelRefresher() } }
-                .onSuccess { models ->
-                    if (models.isEmpty()) {
-                        _error.value = "未获取到模型列表，请稍后重试"
-                    }
+            runCatching {
+                withContext(dispatchers.io) {
+                    modelRefresher(ProviderKind.MOLAGPT)
+                    modelRefresher(ProviderKind.BYOK)
                 }
-                .onFailure { e ->
-                    _error.value = e.message ?: "模型列表刷新失败"
-                }
+            }.onFailure { e ->
+                _error.value = e.message ?: "模型列表刷新失败"
+            }
         }
     }
 
@@ -164,9 +251,16 @@ class ChatViewModel(
         _enabledTools.value = _enabledTools.value.copy(codeExecution = enabled)
     }
 
-    /** 「网络访问」一键开关：同时控制联网搜索(network)与网页阅读(steelBrowser)。 */
-    fun setNetworkAccess(enabled: Boolean) {
-        _enabledTools.value = _enabledTools.value.copy(network = enabled, steelBrowser = enabled)
+    fun setMcpTool(enabled: Boolean) {
+        _enabledTools.value = _enabledTools.value.copy(mcp = enabled)
+    }
+
+    fun setVisionTool(enabled: Boolean) {
+        _enabledTools.value = _enabledTools.value.copy(vision = enabled)
+    }
+
+    fun setImageGenerationTool(enabled: Boolean) {
+        _enabledTools.value = _enabledTools.value.copy(imageGeneration = enabled)
     }
 
     fun setUseThinking(enabled: Boolean) {
@@ -177,16 +271,30 @@ class ChatViewModel(
         _reasoningEffort.value = effort
     }
 
-    /** 选图后即时上传：先放 UPLOADING 占位条，成功回填 url 转 UPLOADED，失败置 FAILED。 */
-    fun attachImage(uri: Uri) {
+    /** 选取附件后即时处理：MolaGPT 走上传，BYOK 留在本地并以内联 data URL 发送。 */
+    fun attachFile(uri: Uri) {
         val tempId = Ids.newFragmentId()
         viewModelScope.launch {
-            val meta = withContext(dispatchers.io) { readImage(uri) }
+            val meta = withContext(dispatchers.io) { readFile(uri) }
             if (meta == null) {
-                _error.value = "无法读取所选图片"
+                _error.value = "无法读取所选附件"
                 return@launch
             }
             val (bytes, name, mime) = meta
+            val isByokAttachment = _conversationProviderKind.value == ProviderKind.BYOK
+            if (isByokAttachment && !isByokSupportedAttachmentMime(mime)) {
+                _pendingAttachments.update {
+                    it + FileInfo(
+                        id = tempId,
+                        name = name,
+                        mimeType = mime,
+                        sizeBytes = bytes.size.toLong(),
+                        uploadStatus = UploadStatus.FAILED,
+                    )
+                }
+                _error.value = "BYOK 支持图片、文本和 PDF 附件"
+                return@launch
+            }
             _pendingAttachments.update {
                 it + FileInfo(
                     id = tempId,
@@ -195,6 +303,22 @@ class ChatViewModel(
                     sizeBytes = bytes.size.toLong(),
                     uploadStatus = UploadStatus.UPLOADING,
                 )
+            }
+            if (isByokAttachment) {
+                val dataUrl = "data:$mime;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+                _pendingAttachments.update { list ->
+                    list.map {
+                        if (it.id == tempId) {
+                            it.copy(
+                                url = dataUrl,
+                                uploadStatus = UploadStatus.UPLOADED,
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                }
+                return@launch
             }
             runCatching { chatRepository.uploadImage(bytes, name, mime, conversationId) }
                 .onSuccess { info ->
@@ -223,15 +347,17 @@ class ChatViewModel(
         }
     }
 
+    fun attachImage(uri: Uri) = attachFile(uri)
+
     fun removeAttachment(id: String) {
         _pendingAttachments.update { list -> list.filterNot { it.id == id } }
     }
 
-    private fun readImage(uri: Uri): Triple<ByteArray, String, String>? = runCatching {
+    private fun readFile(uri: Uri): Triple<ByteArray, String, String>? = runCatching {
         val resolver = appContext.contentResolver
         val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-        val mime = resolver.getType(uri) ?: "image/*"
-        val name = queryDisplayName(uri) ?: "image_${System.currentTimeMillis()}.${mimeExt(mime)}"
+        val mime = resolver.getType(uri) ?: "application/octet-stream"
+        val name = queryDisplayName(uri) ?: "attachment_${System.currentTimeMillis()}.${mimeExt(mime)}"
         Triple(bytes, name, mime)
     }.getOrNull()
 
@@ -252,7 +378,11 @@ class ChatViewModel(
         mime.contains("png") -> "png"
         mime.contains("webp") -> "webp"
         mime.contains("gif") -> "gif"
-        else -> "jpg"
+        mime.contains("json") -> "json"
+        mime.contains("markdown") -> "md"
+        mime.startsWith("text/") -> "txt"
+        mime.contains("pdf") -> "pdf"
+        else -> "bin"
     }
 
     fun send(text: String) {
@@ -261,15 +391,41 @@ class ChatViewModel(
             it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank())
         }
         if ((content.isEmpty() && !hasReadyAttachment) || backgroundStreams.isStreaming(sessionId)) return
-        val modelId = resolvedModelId(_selectedModel.value, modelsFlow.value) ?: return
+        val visibleModels = modelsFlow.value.filter { it.providerKind == _conversationProviderKind.value && it.supportsChat }
+        val selectedModel = selectedModelFor(_selectedModel.value, _conversationProviderId.value, visibleModels)
+            ?: return
+        val modelId = selectedModel.id
         _selectedModel.value = modelId
         _error.value = null
+
+        // 非视觉 BYOK 模型上传图片时，必须开启外挂视觉工具，否则上游 API 会拒收 image_url。
+        val hasImageAttachment = _pendingAttachments.value.any {
+            it.uploadStatus == UploadStatus.UPLOADED &&
+                it.mimeType?.startsWith("image/") == true &&
+                (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank())
+        }
+        if (selectedModel.providerKind == ProviderKind.BYOK &&
+            hasImageAttachment &&
+            selectedModel.supportsVision != true &&
+            !_enabledTools.value.vision
+        ) {
+            _error.value = "当前 BYOK 模型不支持视觉输入，请开启「视觉」工具或切换到支持视觉的模型"
+            return
+        }
 
         viewModelScope.launch {
             val shouldGenerateTitle = chatRepository.messageCount(sessionId) == 0
             val titleSeed = content.ifBlank { _pendingAttachments.value.firstOrNull()?.name ?: "附件" }
-            sessionRepository.ensure(sessionId, title = fallbackTitle(titleSeed), model = modelId)
-            sessionRepository.updateModel(sessionId, modelId)
+            sessionRepository.ensure(
+                sessionId = sessionId,
+                title = fallbackTitle(titleSeed),
+                model = modelId,
+                providerId = selectedModel.providerId,
+                providerKind = selectedModel.providerKind,
+            )
+            sessionRepository.updateModel(sessionId, modelId, selectedModel.providerId, selectedModel.providerKind)
+            _conversationProviderId.value = selectedModel.providerId
+            _conversationProviderKind.value = selectedModel.providerKind
             val now = System.currentTimeMillis()
             val ready = _pendingAttachments.value
                 .filter { it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank()) }
@@ -285,8 +441,8 @@ class ChatViewModel(
                         sizeBytes = it.sizeBytes,
                     )
                 }
-            val sandboxHint = buildSandboxHint(ready)
-            val sendContent = sandboxHint?.let { appendHiddenSystemHint(content, it) } ?: content
+            val attachmentHint = buildAttachmentHint(ready, selectedModel.providerKind)
+            val sendContent = attachmentHint?.let { appendHiddenSystemHint(content, it) } ?: content
             val messageMetadata = buildMap {
                 if (sendContent != content) {
                     put("sendContent", sendContent)
@@ -327,6 +483,11 @@ class ChatViewModel(
             "$content\n\n✝[系统提示: $hint]✝"
         }
 
+    private fun buildAttachmentHint(attachments: List<Attachment>, providerKind: ProviderKind): String? {
+        if (providerKind == ProviderKind.BYOK) return buildByokAttachmentHint(attachments)
+        return buildSandboxHint(attachments)
+    }
+
     private fun buildSandboxHint(attachments: List<Attachment>): String? {
         if (attachments.isEmpty()) return null
         val lines = attachments.mapIndexed { index, attachment ->
@@ -336,8 +497,65 @@ class ChatViewModel(
         return "用户已上传以下文件到沙箱：\n${lines.joinToString("\n")}"
     }
 
+    private fun buildByokAttachmentHint(attachments: List<Attachment>): String? {
+        val fileSections = attachments
+            .filterNot { it.mimeType.startsWith("image/") }
+            .mapIndexed { index, attachment ->
+                buildString {
+                    append(index + 1)
+                    append(". ")
+                    append(attachment.name)
+                    append(" (")
+                    append(attachment.mimeType)
+                    append(")")
+                    val text = decodeTextDataUrl(attachment.remoteUrl, attachment.mimeType)
+                    if (!text.isNullOrBlank()) {
+                        append("\n")
+                        append(text.take(12_000))
+                    } else if (isPdfMime(attachment.mimeType)) {
+                        append("\nPDF 已随消息附加。")
+                    }
+                }
+            }
+        if (fileSections.isEmpty()) return null
+        return "用户已附加以下文件内容：\n${fileSections.joinToString("\n\n")}"
+    }
+
+    private fun decodeTextDataUrl(value: String?, mimeType: String): String? {
+        if (value.isNullOrBlank() || !isTextLikeMime(mimeType)) return null
+        val comma = value.indexOf(',')
+        if (!value.startsWith("data:", ignoreCase = true) || comma <= 5) return null
+        val meta = value.substring(5, comma)
+        if (!meta.contains(";base64", ignoreCase = true)) return null
+        val encoded = value.substring(comma + 1)
+        return runCatching {
+            String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
+        }.getOrNull()
+    }
+
+    private fun isTextLikeMime(mimeType: String): Boolean {
+        val lower = mimeType.lowercase(Locale.US)
+        return lower.startsWith("text/") ||
+            lower.contains("json") ||
+            lower.contains("xml") ||
+            lower.contains("csv") ||
+            lower.contains("yaml") ||
+            lower.contains("markdown") ||
+            lower.contains("javascript")
+    }
+
+    private fun isPdfMime(mimeType: String): Boolean =
+        mimeType.lowercase(Locale.US).contains("pdf")
+
+    private fun isByokSupportedAttachmentMime(mimeType: String): Boolean =
+        mimeType.startsWith("image/") || isTextLikeMime(mimeType) || isPdfMime(mimeType)
+
     private fun Attachment.typeLabel(): String =
-        if (mimeType.startsWith("image/")) "图片文件" else "数据文件"
+        when {
+            mimeType.startsWith("image/") -> "图片文件"
+            isPdfMime(mimeType) -> "PDF 文件"
+            else -> "数据文件"
+        }
 
     private fun Attachment.sandboxInputPath(): String {
         val fileName = sandboxPath
@@ -349,7 +567,11 @@ class ChatViewModel(
     }
 
     private fun attachmentLabel(file: FileInfo): String =
-        if (file.mimeType?.startsWith("image/") == true) "图片" else file.name.substringAfterLast('.', "文件").uppercase(Locale.US)
+        when {
+            file.mimeType?.startsWith("image/") == true -> "图片"
+            file.mimeType?.let { isPdfMime(it) } == true -> "PDF"
+            else -> file.name.substringAfterLast('.', "文件").uppercase(Locale.US)
+        }
 
     /** 重发：保留旧答案为一个版本，重新生成一版并切到新版本（可在版本间切换）。 */
     fun regenerateLast() {
@@ -361,7 +583,13 @@ class ChatViewModel(
         val prior = RetryAttempts.decode(lastAssistant.metadata[RetryAttempts.KEY_ATTEMPTS])
             .ifEmpty { listOf(attemptOf(lastAssistant)) }
         viewModelScope.launch {
-            sessionRepository.updateModel(sessionId, modelId)
+            val selectedModel = uiState.value.selectedModel
+            sessionRepository.updateModel(
+                sessionId,
+                modelId,
+                selectedModel?.providerId ?: _conversationProviderId.value,
+                selectedModel?.providerKind ?: _conversationProviderKind.value,
+            )
             chatRepository.deleteMessagesFrom(sessionId, lastAssistant.createdAt)
             startStream(modelId, priorAttempts = prior)
         }
@@ -424,10 +652,20 @@ class ChatViewModel(
         }
         val assistantId = Ids.newMessageId()
         val streamSessionId = Ids.newSessionId()
-        val modelDisplayName = modelsFlow.value.firstOrNull { it.id == modelId }?.displayName ?: modelId
+        val providerModel = modelsFlow.value.firstOrNull {
+            it.id == modelId &&
+                it.providerKind == _conversationProviderKind.value &&
+                (_conversationProviderId.value == null || it.providerId == _conversationProviderId.value)
+        } ?: modelsFlow.value.firstOrNull {
+            it.id == modelId && it.providerKind == _conversationProviderKind.value
+        }
+        val modelDisplayName = providerModel?.displayName ?: modelId
+        val requestTools = resolveRequestTools(providerModel)
         val request = ChatRequest(
             modelId = modelId,
             modelDisplayName = modelDisplayName,
+            providerId = providerModel?.providerId ?: _conversationProviderId.value ?: ProviderIds.MOLAGPT,
+            providerKind = providerModel?.providerKind ?: _conversationProviderKind.value,
             messages = history,
             sessionId = sessionId,
             streamSessionId = streamSessionId,
@@ -435,12 +673,39 @@ class ChatViewModel(
             temperature = temperature,
             useThinking = _useThinking.value,
             reasoningEffort = _reasoningEffort.value,
-            enabledTools = _enabledTools.value,
+            enabledTools = requestTools,
         )
         backgroundStreams.start(request, assistantId, throttleMs, priorAttempts)
         observeTitleAfterFirstTurn(assistantId, titleUserMessage)
         // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，
         // Room 落库的同一条消息不会与之重复显示，也避免“清空→回灌”的瞬时闪烁。
+    }
+
+    /**
+     * 计算本次请求实际启用的工具：以 composer 当前开关为基础，按阵营与模型能力裁剪，
+     * 杜绝「设置里开了但当前阵营/模型不支持」造成的静默失效。
+     * - MolaGPT：清零 mcp/vision/imageGeneration（wire 层本就不传，避免脏状态）。
+     * - BYOK：清零 codeExecution（无执行路径）；工具类需模型 supportsToolCalling；
+     *   vision 作为外挂视觉工具，只要模型支持工具调用即可启用，不依赖模型原生视觉能力；
+     *   imageGeneration 由独立的「图像用途」provider 提供（purpose=IMAGE），不依赖当前聊天模型，
+     *   只要模型支持工具调用即可在对话内调用 generate_image 工具；mcp 需已配置启用的服务器。
+     */
+    private fun resolveRequestTools(providerModel: ProviderModel?): EnabledTools {
+        val enabled = _enabledTools.value
+        return when (_conversationProviderKind.value) {
+            ProviderKind.MOLAGPT -> enabled.copy(mcp = false, vision = false, imageGeneration = false)
+            ProviderKind.BYOK -> {
+                val canTool = providerModel?.supportsToolCalling == true
+                enabled.copy(
+                    codeExecution = false,
+                    network = enabled.network && canTool,
+                    steelBrowser = enabled.steelBrowser && canTool,
+                    mcp = enabled.mcp && canTool && hasMcpServersFlow.value,
+                    vision = enabled.vision && canTool,
+                    imageGeneration = enabled.imageGeneration && canTool,
+                )
+            }
+        }
     }
 
     private fun observeTitleAfterFirstTurn(assistantId: String, firstUserMessage: String?) {
@@ -456,10 +721,19 @@ class ChatViewModel(
     }
 
     private fun generateTitleAfterFirstTurn(firstUserMessage: String, assistantMessage: ChatMessage) {
+        // BYOK 没有 MolaGPT 的标题生成端点：用首条用户消息派生标题（会话行在新建时占位为「新对话」，这里改名）。
+        if (_conversationProviderKind.value == ProviderKind.BYOK) {
+            val title = fallbackTitle(firstUserMessage)
+            if (title.isNotBlank()) {
+                viewModelScope.launch { sessionRepository.rename(sessionId, title) }
+            }
+            return
+        }
         val assistantText = assistantMessage.rawText
             ?: assistantMessage.fragments
-                ?.filterIsInstance<com.molagpt.app.core.model.MessageFragment.Text>()
-                ?.joinToString("\n") { it.markdown }
+                .filterIsInstance<com.molagpt.app.core.model.MessageFragment.Text>()
+                .joinToString("\n") { it.markdown }
+                .takeIf { it.isNotBlank() }
             ?: return
         if (assistantText.isBlank()) return
         viewModelScope.launch {
@@ -481,15 +755,28 @@ class ChatViewModel(
             .ifBlank { "无标题对话" }
 
     private suspend fun restoreConversationModel() {
-        val savedModel = sessionRepository.get(sessionId)?.model?.takeIf { it.isNotBlank() } ?: return
-        _selectedModel.value = savedModel
+        val conversation = sessionRepository.get(sessionId) ?: return
+        _conversationProviderId.value = conversation.providerId ?: ProviderIds.MOLAGPT
+        _conversationProviderKind.value = conversation.providerKind
+        conversation.model?.takeIf { it.isNotBlank() }?.let { _selectedModel.value = it }
+        // 恢复后把推理档位适配到该模型（模型列表可能已加载）。
+        val model = modelsFlow.value.firstOrNull {
+            it.id == _selectedModel.value && it.providerKind == _conversationProviderKind.value
+        }
+        model?.let { adaptThinkingStateTo(it) }
     }
 
-    private fun resolvedModelId(candidate: String?, models: List<ProviderModel>): String? {
+    private fun selectedModelFor(
+        candidate: String?,
+        providerId: String?,
+        models: List<ProviderModel>,
+    ): ProviderModel? {
         val normalized = normalizeSavedModelId(candidate)
-        return normalized?.takeIf { id -> models.any { it.id == id } }
-            ?: models.firstOrNull()?.id
-            ?: normalized
+        if (normalized != null) {
+            models.firstOrNull { it.id == normalized && providerId != null && it.providerId == providerId }?.let { return it }
+            models.firstOrNull { it.id == normalized }?.let { return it }
+        }
+        return models.firstOrNull()
     }
 
     private fun normalizeSavedModelId(modelId: String?): String? = when (modelId?.trim()) {
@@ -513,4 +800,14 @@ private data class ChatUiMeta(
     val pendingAttachments: List<FileInfo>,
     val isModelRefreshing: Boolean,
     val isLoadingHistory: Boolean,
+    val providerId: String?,
+    val providerKind: ProviderKind,
+    val hasMcpServers: Boolean,
+    val title: String,
+)
+
+private data class ConversationProviderState(
+    val providerId: String?,
+    val providerKind: ProviderKind,
+    val hasMcpServers: Boolean,
 )

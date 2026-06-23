@@ -4,8 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.molagpt.app.core.model.AccountStatus
 import com.molagpt.app.core.model.EnabledTools
+import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.network.toAccountStatus
 import com.molagpt.app.core.storage.AppSettings
+import com.molagpt.app.core.storage.allModels
 import com.molagpt.app.di.AppContainer
 import com.molagpt.app.feature.auth.AuthViewModel
 import com.molagpt.app.feature.chat.ChatViewModel
@@ -30,7 +32,12 @@ object ViewModelFactories {
             syncEngine = container.syncEngine,
             syncApi = container.syncApi,
             jwtProvider = { container.credentialStore.jwt },
-            accountStatusLoader = { loadAccountStatus(container) },
+            accountStatus = container.accountStatusCache,
+            byokProviders = container.byokProviderRepository,
+            byokModelApi = container.byokModelApi,
+            byokImageApi = container.byokImageApi,
+            mcpToolListApi = container.mcpToolListApi,
+            credentialStore = container.credentialStore,
             dispatchers = container.dispatchers,
         )
     }
@@ -56,9 +63,17 @@ object ViewModelFactories {
             dispatchers = container.dispatchers,
             modelsFlow = container.modelRegistry.models,
             modelRefreshingFlow = container.modelRegistry.isRefreshing,
-            modelRefresher = { container.modelApi.refresh() },
+            modelRefresher = { providerKind -> refreshModels(container, providerKind) },
+            settingsFlow = container.settingsFlow,
             defaultModelId = settings.defaultModel,
-            tools = EnabledTools(settings.toolNetwork, settings.toolSteel, settings.toolCode),
+            tools = EnabledTools(
+                network = settings.toolNetwork,
+                steelBrowser = settings.toolSteel,
+                codeExecution = settings.toolCode,
+                mcp = settings.byokToolMcp,
+                vision = settings.byokToolVision,
+                imageGeneration = settings.byokToolImage,
+            ),
             useThinking = settings.useThinking,
             reasoningEffort = settings.reasoningEffort,
             temperature = settings.temperature,
@@ -74,6 +89,30 @@ object ViewModelFactories {
             container.modelRegistry.find(mid)?.displayName
         }
     }
+
+    private suspend fun refreshModels(container: AppContainer, providerKind: ProviderKind) =
+        if (providerKind == ProviderKind.MOLAGPT) {
+            container.modelApi.refresh()
+        } else {
+            container.modelRegistry.beginRefresh()
+            try {
+                val providers = container.byokProviderRepository.list().filter { it.enabled }
+                providers.forEach { provider ->
+                    runCatching {
+                        val fetched = container.byokModelApi.fetchModels(provider)
+                        val merged = (fetched.associateBy { it.id } + provider.models.associateBy { it.id })
+                            .values
+                            .sortedWith(compareByDescending<com.molagpt.app.core.model.ProviderModel> { it.supportsChat }.thenBy { it.id })
+                        container.byokProviderRepository.upsert(provider.copy(models = merged))
+                    }
+                }
+                container.byokProviderRepository.list()
+                    .filter { it.enabled }
+                    .flatMap { it.allModels() }
+            } finally {
+                container.modelRegistry.endRefresh()
+            }
+        }
 
     private inline fun <reified VM : ViewModel> factory(crossinline create: () -> VM) =
         object : ViewModelProvider.Factory {

@@ -17,6 +17,48 @@ data class ProviderModel(
     val supportsVision: Boolean = false,
     val supportsThinking: Boolean = false,
     val supportsReasoningEffort: Boolean = false,
+    val supportsToolCalling: Boolean = false,
+    val supportsImageGeneration: Boolean = false,
+    /** 图像模型支持编辑（如 gpt-image、imagen），仅 image 用途 provider 的模型有意义。 */
+    val supportsImageEdit: Boolean = false,
+    val supportsChat: Boolean = true,
     val group: String? = null,
     val description: String? = null,
+    val providerId: String = ProviderIds.MOLAGPT,
+    val providerName: String = "MolaGPT",
+    val providerKind: ProviderKind = ProviderKind.MOLAGPT,
+    /** 推理参数配置（仅 BYOK 聊天模型有意义）。null 表示未配置，按模型 ID/host 启发式处理。 */
+    val thinkingConfig: ThinkingConfig? = null,
 )
+
+/**
+ * 图像生成参数（OpenRouter /v1/chat/completions 出图）。
+ * 纯 API 入参——由图像工作台（本地记住）或对话工具设置组装后传给网络层，不挂在模型上。
+ * - [imageSize]: OpenRouter image_config.image_size，0.5K/1K/2K/4K。
+ * - [aspectRatio]: image_config.aspect_ratio，1:1/16:9/9:16/4:3/3:4 等。
+ * - [reasoning]: 是否启用推理（仅 GPT-5 Image / Gemini 3 Image 系列生效）。
+ * - [reasoningEffort]: reasoning.effort，low/medium/high/xhigh/max。
+ */
+@Serializable
+data class ImageGenerationConfig(
+    val imageSize: String = "1K",
+    val aspectRatio: String = "1:1",
+    val reasoning: Boolean = false,
+    val reasoningEffort: String = "medium",
+) {
+    companion object {
+        val IMAGE_SIZES = listOf("0.5K", "1K", "2K", "4K")
+        val ASPECT_RATIOS = listOf("1:1", "16:9", "9:16", "4:3", "3:4")
+        val REASONING_EFFORTS = listOf("low", "medium", "high", "xhigh", "max")
+    }
+}
+
+@Serializable
+enum class ProviderKind {
+    MOLAGPT,
+    BYOK,
+}
+
+object ProviderIds {
+    const val MOLAGPT = "molagpt"
+}

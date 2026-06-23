@@ -2,6 +2,8 @@ package com.molagpt.app.core.storage.entity
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.molagpt.app.core.model.ProviderIds
+import com.molagpt.app.core.model.ProviderKind
 
 /**
  * 在途流式任务的「被杀恢复」记录。
@@ -18,6 +20,8 @@ data class StreamTaskEntity(
     val assistantMessageId: String,
     val modelId: String,
     val modelDisplayName: String?,
+    val providerId: String? = ProviderIds.MOLAGPT,
+    val providerKind: String = ProviderKind.MOLAGPT.name,
     /** 发起时已解析好的相对 apiUrl（恢复时直接复用，免在启动早期依赖未就绪的模型注册表）。 */
     val apiUrl: String,
     val createdAt: Long,

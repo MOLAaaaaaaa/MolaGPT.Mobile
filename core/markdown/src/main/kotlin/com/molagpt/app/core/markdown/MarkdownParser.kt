@@ -125,17 +125,17 @@ object MarkdownParser {
         }
     }
 
-    private fun listItems(list: Node): List<List<MdInline>> = buildList {
+    private fun listItems(list: Node): List<ListItemContent> = buildList {
         var item = list.firstChild
         while (item != null) {
             if (item is ListItem) {
-                val inlines = ArrayList<MdInline>()
+                val blocks = mutableListOf<MdBlock>()
                 var c = item.firstChild
                 while (c != null) {
-                    if (c is Paragraph) inlines.addAll(inlinesOf(c))
+                    blockOf(c)?.let { blocks.add(it) }
                     c = c.next
                 }
-                add(inlines)
+                add(ListItemContent(blocks))
             }
             item = item.next
         }

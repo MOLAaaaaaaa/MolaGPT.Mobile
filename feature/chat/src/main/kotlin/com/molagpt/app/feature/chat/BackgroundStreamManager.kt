@@ -4,6 +4,7 @@ import com.molagpt.app.core.common.chunkedTimeWindow
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.MessageStatus
+import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.storage.ChatRepository
 import com.molagpt.app.core.storage.StreamTaskRecord
@@ -42,8 +43,8 @@ data class BackgroundStreamState(
 class BackgroundStreamManager(
     private val chatRepository: ChatRepository,
     private val scope: CoroutineScope,
-    /** modelId → 相对 apiUrl（来自 ModelRegistry）；落库进任务记录，供被杀后续传直接复用。 */
-    private val apiUrlResolver: (modelId: String) -> String,
+    /** providerId + modelId → 相对 apiUrl（来自 ModelRegistry）；落库进任务记录，供被杀后续传直接复用。 */
+    private val apiUrlResolver: (providerId: String?, modelId: String) -> String,
     private val defaultThrottleMs: Long = 16L,
 ) {
     /** 一次生成正常完成（COMPLETE）的事件，供完成通知消费。 */
@@ -56,6 +57,7 @@ class BackgroundStreamManager(
     private data class Task(
         val sessionId: String,
         val streamSessionId: String,
+        val providerKind: ProviderKind,
         val job: Job,
     )
 
@@ -92,11 +94,15 @@ class BackgroundStreamManager(
 
         val state = stateFor(request.sessionId)
         state.update { it.copy(error = null, streamSessionId = request.streamSessionId, active = true) }
-        val apiUrl = apiUrlResolver(request.modelId)
+        val apiUrl = apiUrlResolver(request.providerId, request.modelId)
 
         // 先停旧服务端流、再持久化新任务，二者在同一协程里顺序执行，避免 remove/persist 乱序。
         scope.launch {
-            if (previousStreamId != null && previousStreamId != request.streamSessionId) {
+            if (
+                previousStreamId != null &&
+                previousStreamId != request.streamSessionId &&
+                previous.providerKind == ProviderKind.MOLAGPT
+            ) {
                 runCatching { chatRepository.stop(previousStreamId) }
             }
             chatRepository.persistStreamTask(
@@ -107,6 +113,8 @@ class BackgroundStreamManager(
                     assistantMessageId = assistantMessageId,
                     modelId = request.modelId,
                     modelDisplayName = request.modelDisplayName,
+                    providerId = request.providerId,
+                    providerKind = request.providerKind,
                     apiUrl = apiUrl,
                     createdAt = System.currentTimeMillis(),
                 ),
@@ -131,7 +139,7 @@ class BackgroundStreamManager(
             }
             .launchIn(scope)
 
-        tasks[request.sessionId] = Task(request.sessionId, request.streamSessionId, job)
+        tasks[request.sessionId] = Task(request.sessionId, request.streamSessionId, request.providerKind, job)
         publishActiveCount()
     }
 
@@ -166,7 +174,7 @@ class BackgroundStreamManager(
             }
             .launchIn(scope)
 
-        tasks[record.sessionId] = Task(record.sessionId, record.streamSessionId, job)
+        tasks[record.sessionId] = Task(record.sessionId, record.streamSessionId, ProviderKind.MOLAGPT, job)
         publishActiveCount()
     }
 
@@ -176,7 +184,9 @@ class BackgroundStreamManager(
         markStopped(sessionId)
         task.job.cancel()
         scope.launch {
-            chatRepository.stop(task.streamSessionId)
+            if (task.providerKind == ProviderKind.MOLAGPT) {
+                chatRepository.stop(task.streamSessionId)
+            }
             chatRepository.removeStreamTask(sessionId)
         }
     }

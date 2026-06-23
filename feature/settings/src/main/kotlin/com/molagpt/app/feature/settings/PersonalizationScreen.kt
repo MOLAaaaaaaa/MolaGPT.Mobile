@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -727,8 +728,13 @@ private fun LoadingInsights() {
 @Composable
 private fun PrivacySheet(onDismiss: () -> Unit) {
     val cs = androidx.compose.material3.MaterialTheme.colorScheme
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp).verticalScroll(rememberScrollState())) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        // 自带 inset 置 0，底部留白只由内容的 navigationBarsPadding 处理一次（否则全屏展开时底部多一条白条把内容顶出屏幕）。
+        contentWindowInsets = { WindowInsets(0) },
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp).verticalScroll(rememberScrollState()).navigationBarsPadding()) {
             Text("个性化记忆 · 隐私说明", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
             PrivacyBlock("功能概述", "通过安全地存储和分析你的对话，让 MolaGPT 记住关键信息、理解你的偏好，提供更连贯贴心的回答，并在多设备间无缝衔接。")
             PrivacyBlock("学习机制", "对话以加密形式存储；提问时检索最相关历史片段（事件记忆）；定期异步分析提炼高级洞察（人格理解）；二者融合生成贴合你风格的回复。")
@@ -759,8 +765,13 @@ private fun PrivacyBlock(title: String, body: String) {
 @Composable
 private fun EditInsightSheet(initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var text by remember { mutableStateOf(initial) }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        // 自带 inset 置 0，底部留白只由内容的 navigationBarsPadding 处理一次（否则全屏展开时底部多一条白条把内容顶出屏幕）。
+        contentWindowInsets = { WindowInsets(0) },
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp).navigationBarsPadding().imePadding()) {
             Text("调整印象", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
             Text(
                 "若你觉得 MolaGPT 理解得不够准确，可在此修正。修改后它会按新的描述调整对话风格。",

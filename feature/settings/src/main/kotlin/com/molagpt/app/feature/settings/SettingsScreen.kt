@@ -3,6 +3,7 @@ package com.molagpt.app.feature.settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -29,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -39,6 +42,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,9 +54,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.AccountStatus
+import com.molagpt.app.core.model.ByokMcpServer
+import com.molagpt.app.core.model.ByokProvider
+import com.molagpt.app.core.model.ByokProviderType
+import com.molagpt.app.core.model.ProviderKind
+import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.QuotaItem
 import com.molagpt.app.core.render.shimmer
 
@@ -68,6 +81,9 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenPersonalization: () -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenImageWorkbench: () -> Unit,
+    onOpenByokProviders: () -> Unit,
+    onOpenByokTools: () -> Unit,
     buildLabel: String,
     modifier: Modifier = Modifier,
 ) {
@@ -75,11 +91,11 @@ fun SettingsScreen(
     val status by viewModel.status.collectAsStateWithLifecycle()
     val statusLoading by viewModel.statusLoading.collectAsStateWithLifecycle()
     val syncing by viewModel.syncing.collectAsStateWithLifecycle()
+    val byokProviders by viewModel.byokProviderList.collectAsStateWithLifecycle()
+    val byokStatus by viewModel.byokStatus.collectAsStateWithLifecycle()
 
-    // 系统返回由 NavHost 统一处理，本页只提供顶栏返回入口。
-    // 顶栏返回箭头仍调 onBack。
-    // 登录态变化后重拉配额（游客/登录可用额度不同）。
-    LaunchedEffect(loggedIn) { viewModel.refreshStatus() }
+    // 进入/登录态变化时确保有配额数据：命中容器级缓存则不重拉（避免每次回到设置页刷新整张额度表）。
+    LaunchedEffect(loggedIn) { viewModel.ensureStatus() }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -111,6 +127,13 @@ fun SettingsScreen(
                 status = status,
                 onOpenLogin = onOpenLogin,
                 onLogout = onLogout,
+            )
+
+            SectionTitle("模型服务")
+            ByokEntryCard(
+                providerCount = byokProviders.size,
+                modelCount = byokProviders.sumOf { it.models.size },
+                onClick = onOpenByokProviders,
             )
 
             SectionTitle("配额用量 · 今日")
@@ -158,8 +181,20 @@ fun SettingsScreen(
             }
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
-            SectionTitle("对话")
-            ToggleRow("代码执行", s.toolCode, onChange = { viewModel.setTools(s.toolNetwork, s.toolSteel, it) })
+            SectionTitle("对话工具")
+            MolaGptToolsSection(
+                network = s.toolNetwork,
+                steel = s.toolSteel,
+                code = s.toolCode,
+                onChange = viewModel::setTools,
+            )
+            ByokToolsEntryCard(
+                mcp = s.byokToolMcp,
+                vision = s.byokToolVision,
+                image = s.byokToolImage,
+                servers = s.byokMcpServers,
+                onClick = onOpenByokTools,
+            )
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             SectionTitle("外观与输入")
@@ -220,6 +255,122 @@ private fun AboutEntryCard(onOpenAbout: () -> Unit) {
         }
     }
 }
+
+@Composable
+private fun ByokEntryCard(
+    providerCount: Int,
+    modelCount: Int,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TracksRowIcon(kind = TracksIconKind.Sparkles)
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("自定义 API 模型", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    if (providerCount == 0) "接入你自己的 OpenAI / Claude / Gemini 服务"
+                    else "$providerCount 个服务 · $modelCount 个模型",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            ForwardChevron()
+        }
+    }
+}
+
+/**
+ * MolaGPT 账户工具卡片：联网搜索 / 网页拉取 / 代码执行——由 MolaGPT 服务端执行，
+ * 仅对 MolaGPT 账户模型生效，与 [ByokToolsEntryCard] 进入的 BYOK 自定义工具页明确分离。
+ */
+@Composable
+private fun MolaGptToolsSection(
+    network: Boolean,
+    steel: Boolean,
+    code: Boolean,
+    onChange: (network: Boolean, steel: Boolean, code: Boolean) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                TracksRowIcon(kind = TracksIconKind.Info)
+                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                    Text("MolaGPT 账户工具", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "对 MolaGPT 账户模型生效",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+            }
+            ToggleRow("联网搜索", network, onChange = { onChange(it, steel, code) })
+            ToggleRow("网页拉取", steel, onChange = { onChange(network, it, code) })
+            ToggleRow("代码执行", code, onChange = { onChange(network, steel, it) })
+        }
+    }
+}
+
+/**
+ * BYOK 自定义工具入口卡：进入独立的 BYOK 自定义工具页（网络搜索、MCP、视觉理解、图像生成）。
+ * 与 [MolaGptToolsSection] 并列，把两类工具的入口在「对话工具」区清晰分开。
+ */
+@Composable
+private fun ByokToolsEntryCard(
+    mcp: Boolean,
+    vision: Boolean,
+    image: Boolean,
+    servers: List<ByokMcpServer>,
+    onClick: () -> Unit,
+) {
+    val enabledCount = listOf(mcp, vision, image).count { it }
+    val subtitle = buildString {
+        append("对自定义模型生效")
+        if (servers.isNotEmpty()) append(" · ${servers.count { it.enabled }} 个 MCP 已启用")
+        if (enabledCount > 0) append(" · $enabledCount 项已开启")
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TracksRowIcon(kind = TracksIconKind.Sparkles)
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("BYOK 自定义工具", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            ForwardChevron()
+        }
+    }
+}
+
 
 @Composable
 private fun TracksCard(
@@ -288,41 +439,6 @@ private fun TracksCard(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(20.dp).rotate(180f),
                 )
-            }
-        }
-    }
-}
-
-private enum class TracksIconKind { Sparkles, Info }
-
-@Composable
-private fun TracksRowIcon(kind: TracksIconKind) {
-    val tint = MaterialTheme.colorScheme.primary
-    val container = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
-    Box(
-        modifier = Modifier
-            .size(30.dp)
-            .clip(RoundedCornerShape(15.dp))
-            .background(container),
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(modifier = Modifier.size(19.dp)) {
-            val stroke = 2.dp.toPx()
-            when (kind) {
-                TracksIconKind.Sparkles -> {
-                    val cx = size.width * 0.43f
-                    val cy = size.height * 0.43f
-                    drawLine(tint, Offset(cx, size.height * 0.02f), Offset(cx, size.height * 0.84f), stroke)
-                    drawLine(tint, Offset(size.width * 0.05f, cy), Offset(size.width * 0.82f, cy), stroke)
-                    drawLine(tint, Offset(size.width * 0.18f, size.height * 0.18f), Offset(size.width * 0.68f, size.height * 0.68f), stroke)
-                    drawLine(tint, Offset(size.width * 0.68f, size.height * 0.18f), Offset(size.width * 0.18f, size.height * 0.68f), stroke)
-                    drawCircle(tint, radius = size.minDimension * 0.08f, center = Offset(size.width * 0.80f, size.height * 0.80f))
-                }
-                TracksIconKind.Info -> {
-                    drawCircle(tint, radius = size.minDimension * 0.42f, center = center, style = androidx.compose.ui.graphics.drawscope.Stroke(stroke))
-                    drawCircle(tint, radius = size.minDimension * 0.045f, center = Offset(center.x, size.height * 0.31f))
-                    drawLine(tint, Offset(center.x, size.height * 0.45f), Offset(center.x, size.height * 0.70f), stroke)
-                }
             }
         }
     }
@@ -455,50 +571,6 @@ private fun SegmentedRow(
             selected = selected,
             onSelect = onSelect,
             modifier = Modifier.fillMaxWidth(),
-        )
-    }
-}
-
-@Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(top = 14.dp, bottom = 2.dp),
-    )
-}
-
-@Composable
-private fun ToggleRow(
-    label: String,
-    checked: Boolean,
-    onChange: (Boolean) -> Unit,
-    enabled: Boolean = true,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            label,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge,
-            color = if (enabled) MaterialTheme.colorScheme.onSurface
-                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-        )
-        Switch(
-            checked = checked,
-            onCheckedChange = onChange,
-            enabled = enabled,
-            // 圆点统一白/暗白(关态用 onSurfaceVariant，暗色下为浅灰，避免默认 outline 看不清)。
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                checkedTrackColor = MaterialTheme.colorScheme.primary,
-                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
-                uncheckedBorderColor = MaterialTheme.colorScheme.outline,
-            ),
         )
     }
 }

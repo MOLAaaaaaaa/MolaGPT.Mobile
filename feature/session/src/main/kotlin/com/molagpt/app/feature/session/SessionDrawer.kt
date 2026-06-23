@@ -54,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.model.ProviderKind
 import androidx.paging.LoadState
 import androidx.paging.PagingData
 import androidx.paging.compose.LazyPagingItems
@@ -297,6 +298,10 @@ private fun SessionRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                if (conversation.providerKind == ProviderKind.BYOK) {
+                    Spacer(Modifier.width(6.dp))
+                    SourceBadge("BYOK")
+                }
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = time,
@@ -320,6 +325,20 @@ private fun SessionRow(
             )
         }
     }
+}
+
+@Composable
+private fun SourceBadge(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.primary,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f))
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    )
 }
 
 private fun LazyPagingItems<SessionListItem>.nextSessionIdAfterDelete(

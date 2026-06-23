@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.paging.PagingSource
 import com.molagpt.app.core.storage.entity.ConversationEntity
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ConversationDao {
@@ -26,6 +27,10 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")
     suspend fun getById(sessionId: String): ConversationEntity?
 
+    /** 观察单个会话（用于顶栏标题随重命名实时刷新）。 */
+    @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")
+    fun observeById(sessionId: String): Flow<ConversationEntity?>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: ConversationEntity)
 
@@ -35,8 +40,8 @@ interface ConversationDao {
     @Query("UPDATE conversations SET title = :title, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun rename(sessionId: String, title: String, now: Long)
 
-    @Query("UPDATE conversations SET model = :model, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId")
-    suspend fun updateModel(sessionId: String, model: String?, now: Long)
+    @Query("UPDATE conversations SET model = :model, providerId = :providerId, providerKind = :providerKind, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId")
+    suspend fun updateModel(sessionId: String, model: String?, providerId: String?, providerKind: String, now: Long)
 
     @Query("UPDATE conversations SET pinned = :pinned, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun setPinned(sessionId: String, pinned: Boolean)
@@ -63,15 +68,15 @@ interface ConversationDao {
     // —— 云同步 ——
 
     /** 未删除、有未推送改动、且已 materialize（非占位）的会话（增量 push 用）。 */
-    @Query("SELECT * FROM conversations WHERE dirty = 1 AND deletedAt IS NULL AND placeholder = 0")
+    @Query("SELECT * FROM conversations WHERE dirty = 1 AND deletedAt IS NULL AND placeholder = 0 AND providerKind = 'MOLAGPT'")
     suspend fun getDirty(): List<ConversationEntity>
 
     /** 全部未删除、已 materialize 的会话（首次全量 push 用；占位会话只有元数据不参与推送）。 */
-    @Query("SELECT * FROM conversations WHERE deletedAt IS NULL AND placeholder = 0")
+    @Query("SELECT * FROM conversations WHERE deletedAt IS NULL AND placeholder = 0 AND providerKind = 'MOLAGPT'")
     suspend fun getAllActive(): List<ConversationEntity>
 
     /** 软删墓碑（待 push delete）。 */
-    @Query("SELECT * FROM conversations WHERE deletedAt IS NOT NULL")
+    @Query("SELECT * FROM conversations WHERE deletedAt IS NOT NULL AND providerKind = 'MOLAGPT'")
     suspend fun getDeleted(): List<ConversationEntity>
 
     /** push 成功后清脏标。 */
@@ -107,7 +112,7 @@ interface ConversationDao {
     suspend fun refreshListVisibility(sessionId: String)
 
     /** 同步拉取时只更新元数据（不动 dirty/placeholder/消息）。 */
-    @Query("UPDATE conversations SET title = :title, model = :model, updatedAt = :updatedAt WHERE sessionId = :sessionId")
+    @Query("UPDATE conversations SET title = :title, model = :model, providerId = 'molagpt', providerKind = 'MOLAGPT', updatedAt = :updatedAt WHERE sessionId = :sessionId")
     suspend fun updateMetaFromSync(sessionId: String, title: String, model: String?, updatedAt: Long)
 
     /** 账户切换/登出时清理只有元数据、无正文的占位会话。 */

@@ -50,7 +50,23 @@ class CredentialStore(context: Context) {
             .apply()
     }
 
-    fun clear() = prefs.edit().clear().apply()
+    fun clear() = prefs.edit()
+        .remove(KEY_JWT)
+        .remove(KEY_USERNAME)
+        .remove(KEY_UA_HASH)
+        .apply()
+
+    fun saveSecret(key: String, value: String?) {
+        prefs.edit()
+            .apply { if (value.isNullOrBlank()) remove(key) else putString(key, value) }
+            .apply()
+    }
+
+    fun loadSecret(key: String): String? = prefs.getString(key, null)
+
+    fun removeSecret(key: String) {
+        prefs.edit().remove(key).apply()
+    }
 
     private companion object {
         const val KEY_JWT = "molagpt.jwt"

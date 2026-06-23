@@ -17,6 +17,8 @@ data class ConversationEntity(
     @PrimaryKey val sessionId: String,
     val title: String,
     val model: String?,
+    val providerId: String? = "molagpt",
+    val providerKind: String = "MOLAGPT",
     val createdAt: Long,
     val updatedAt: Long,
     val pinned: Boolean = false,

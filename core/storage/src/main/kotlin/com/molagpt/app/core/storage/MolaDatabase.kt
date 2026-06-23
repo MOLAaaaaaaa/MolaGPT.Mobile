@@ -7,26 +7,29 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.molagpt.app.core.storage.dao.ConversationDao
+import com.molagpt.app.core.storage.dao.ByokProviderDao
 import com.molagpt.app.core.storage.dao.MessageDao
 import com.molagpt.app.core.storage.dao.StreamTaskDao
+import com.molagpt.app.core.storage.entity.ByokProviderEntity
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
 import com.molagpt.app.core.storage.entity.StreamTaskEntity
 
 @Database(
-    entities = [ConversationEntity::class, MessageEntity::class, StreamTaskEntity::class],
-    version = 4,
+    entities = [ConversationEntity::class, MessageEntity::class, StreamTaskEntity::class, ByokProviderEntity::class],
+    version = 8,
     exportSchema = false,
 )
 abstract class MolaDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
+    abstract fun byokProviderDao(): ByokProviderDao
     abstract fun messageDao(): MessageDao
     abstract fun streamTaskDao(): StreamTaskDao
 
     companion object {
         fun build(context: Context): MolaDatabase =
             Room.databaseBuilder(context.applicationContext, MolaDatabase::class.java, "mola.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -83,6 +86,51 @@ abstract class MolaDatabase : RoomDatabase() {
                     """.trimIndent(),
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_conversations_deletedAt_visibleInList_pinned_updatedAt ON conversations(deletedAt, visibleInList, pinned, updatedAt)")
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN providerId TEXT DEFAULT 'molagpt'")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN providerKind TEXT NOT NULL DEFAULT 'MOLAGPT'")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS byok_providers (
+                        id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        baseUrl TEXT NOT NULL,
+                        chatPath TEXT NOT NULL,
+                        modelsPath TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        modelsJson TEXT NOT NULL DEFAULT '[]',
+                        sortOrder INTEGER NOT NULL DEFAULT 0,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE stream_tasks ADD COLUMN providerId TEXT DEFAULT 'molagpt'")
+                db.execSQL("ALTER TABLE stream_tasks ADD COLUMN providerKind TEXT NOT NULL DEFAULT 'MOLAGPT'")
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE byok_providers ADD COLUMN imagePath TEXT NOT NULL DEFAULT 'v1/images/generations'")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE byok_providers ADD COLUMN purpose TEXT NOT NULL DEFAULT 'CHAT'")
+                db.execSQL("ALTER TABLE byok_providers ADD COLUMN imageFormat TEXT NOT NULL DEFAULT 'OPENAI_IMAGES'")
+                db.execSQL("ALTER TABLE byok_providers ADD COLUMN imageEditPath TEXT NOT NULL DEFAULT ''")
             }
         }
     }

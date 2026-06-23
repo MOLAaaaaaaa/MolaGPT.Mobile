@@ -92,6 +92,7 @@ fun ToolCallView(
         AnimatedVisibility(visible = !collapsed && preview != null) {
             StreamingMarkdownView(
                 markdown = preview!!.trim(),
+                textScale = 0.85f,
                 modifier = Modifier.padding(top = 8.dp),
             )
         }
@@ -134,6 +135,11 @@ private fun PopIn(content: @Composable () -> Unit) {
 
 private fun readableToolName(name: String): String = when (name) {
     "search_web", "web_search" -> "联网搜索"
+    "fetch_url" -> "阅读网页"
+    "view_image", "vision_proxy" -> "视觉理解"
+    "generate_image" -> "图像生成"
+    "mcp_list_tools" -> "MCP 工具列表"
+    "mcp_call" -> "MCP 服务器"
     "steel_browser", "browser" -> "网页访问"
     "execute_python_code", "python" -> "Python 执行"
     "mcp" -> "连接器调用"

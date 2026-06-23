@@ -1,6 +1,7 @@
 package com.molagpt.app.core.storage
 
 import com.molagpt.app.core.common.DispatcherProvider
+import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.network.SyncApi
 import com.molagpt.app.core.storage.dao.ConversationDao
 import com.molagpt.app.core.storage.dao.MessageDao
@@ -58,6 +59,10 @@ class SyncEngine(
         pushDebounce[sessionId] = scope.launch {
             delay(2_000)
             pushDebounce.remove(sessionId)
+            val providerKind = withContext(dispatchers.io) {
+                conversationDao.getById(sessionId)?.providerKind
+            }
+            if (providerKind != ProviderKind.MOLAGPT.name) return@launch
             runCatching { syncNow() }
         }
     }

@@ -10,6 +10,8 @@ import kotlinx.serialization.Serializable
 data class ChatRequest(
     val modelId: String,
     val modelDisplayName: String? = null,
+    val providerId: String = ProviderIds.MOLAGPT,
+    val providerKind: ProviderKind = ProviderKind.MOLAGPT,
     val messages: List<ChatMessage>,
     /** 本地会话 id：用于 Room/UI 归属，通常是 sess_<ts>_<rand>。 */
     val sessionId: String,
@@ -37,4 +39,10 @@ data class EnabledTools(
     val steelBrowser: Boolean = false,
     /** 代码执行（enable-code-execution），默认开启。 */
     val codeExecution: Boolean = true,
+    /** BYOK MCP 服务器工具。MolaGPT 账户模式下由服务端能力决定。 */
+    val mcp: Boolean = false,
+    /** BYOK 外挂视觉工具。 */
+    val vision: Boolean = false,
+    /** BYOK 图像生成工具。 */
+    val imageGeneration: Boolean = false,
 )

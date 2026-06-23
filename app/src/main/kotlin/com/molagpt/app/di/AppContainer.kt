@@ -6,31 +6,49 @@ import com.molagpt.app.StreamForegroundService
 import com.molagpt.app.core.common.DefaultDispatchers
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.common.Logger
+import com.molagpt.app.core.model.byokMcpServerTokenKey
+import com.molagpt.app.core.model.ImageGenerationConfig
+import com.molagpt.app.core.model.ProviderKind
+import com.molagpt.app.core.model.WebSearchOptions
+import com.molagpt.app.core.model.WebSearchProvider
+import com.molagpt.app.core.model.webSearchApiKeyKey
 import com.molagpt.app.core.network.AltchaSolver
+import com.molagpt.app.core.network.AccountStatusCache
 import com.molagpt.app.core.network.AuthApi
+import com.molagpt.app.core.network.ByokChatService
+import com.molagpt.app.core.network.ByokImageApi
+import com.molagpt.app.core.network.ByokModelApi
 import com.molagpt.app.core.network.ChatService
 import com.molagpt.app.core.network.MolaGptChatService
 import com.molagpt.app.core.network.MolaHttp
 import com.molagpt.app.core.network.ModelApi
 import com.molagpt.app.core.network.ModelRegistry
+import com.molagpt.app.core.network.McpToolListApi
+import com.molagpt.app.core.network.RoutingChatService
 import com.molagpt.app.core.network.ShortTokenManager
 import com.molagpt.app.core.network.SyncApi
 import com.molagpt.app.core.network.UserAgentProvider
 import com.molagpt.app.core.network.UserDataApi
+import com.molagpt.app.core.network.toAccountStatus
+import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.storage.AppSettings
+import com.molagpt.app.core.storage.ByokProviderRepository
 import com.molagpt.app.core.storage.ChatRepository
 import com.molagpt.app.core.storage.CredentialStore
 import com.molagpt.app.core.storage.MolaDatabase
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.core.storage.SettingsStore
 import com.molagpt.app.core.storage.SyncEngine
+import com.molagpt.app.core.storage.allModels
 import com.molagpt.app.feature.auth.MolaGptAuthService
 import com.molagpt.app.feature.chat.BackgroundStreamManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -64,8 +82,17 @@ class AppContainer(
     @Volatile
     private var latestSettings: AppSettings = AppSettings()
 
+    /** 设置 StateFlow（供聊天 VM 订阅 MCP 服务器存在性等门控信号）。 */
+    val settingsFlow: StateFlow<AppSettings> =
+        settingsStore.settings.stateIn(applicationScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, AppSettings())
+
     private val database = MolaDatabase.build(context)
     val modelRegistry = ModelRegistry()
+    val byokProviderRepository = ByokProviderRepository(
+        dao = database.byokProviderDao(),
+        credentialStore = credentialStore,
+        dispatchers = dispatchers,
+    )
 
     val authApi = AuthApi(http)
 
@@ -81,6 +108,22 @@ class AppContainer(
     )
 
     val modelApi = ModelApi(http, modelRegistry, shortTokenManager, authApi)
+    val byokModelApi = ByokModelApi(http)
+    val byokImageApi = ByokImageApi(http)
+    val mcpToolListApi = McpToolListApi(http)
+
+    /**
+     * 账号配额状态缓存（容器级，跨 ViewModel 重建存活）。设置页/个性化页只读它，
+     * 导航返回不再每次重拉整张额度表；登录态变化由 [MolaGptAuthService.onAuthChanged] invalidate。
+     */
+    val accountStatusCache = AccountStatusCache(
+        scope = applicationScope,
+        dispatchers = dispatchers,
+        loader = {
+            val jwt = shortTokenManager.freshToken()
+            authApi.status(jwt)?.toAccountStatus { mid -> modelRegistry.find(mid)?.displayName }
+        },
+    )
 
     val authService = MolaGptAuthService(
         authApi = authApi,
@@ -89,6 +132,7 @@ class AppContainer(
         dispatchers = dispatchers,
         onAuthChanged = {
             shortTokenManager.invalidate()
+            accountStatusCache.invalidate()
             applicationScope.launch { runCatching { modelApi.refresh() } }
             // 登录后做一次全量云同步；登出后重置游标（下次按首次全量处理）。
             applicationScope.launch {
@@ -103,12 +147,57 @@ class AppContainer(
         },
     )
 
-    /** 唯一对话服务。token 由 [shortTokenManager] 统一提供（游客/登录同路径）。 */
-    private val chatService: ChatService = MolaGptChatService(
+    private val molaGptChatService: ChatService = MolaGptChatService(
         http = http,
         registry = modelRegistry,
         shortTokenManager = shortTokenManager,
         dispatchers = dispatchers,
+    )
+
+    private val byokChatService = ByokChatService(
+        http = http,
+        providerResolver = { id -> byokProviderRepository.get(id) },
+        mcpServersProvider = {
+            latestSettings.byokMcpServers.map { server ->
+                server.copy(token = credentialStore.loadSecret(byokMcpServerTokenKey(server.id)))
+            }
+        },
+        webSearchOptionsProvider = {
+            val provider = WebSearchProvider.fromId(latestSettings.webSearchProvider)
+            WebSearchOptions(
+                provider = provider,
+                apiKey = credentialStore.loadSecret(webSearchApiKeyKey(provider.id)),
+                maxResults = latestSettings.webSearchMaxResults,
+            )
+        },
+        imageProviderResolver = {
+            byokProviderRepository.list().firstOrNull { it.enabled && it.purpose == ByokPurpose.IMAGE }
+        },
+        imageGenConfigProvider = {
+            ImageGenerationConfig(
+                imageSize = latestSettings.imageGenSize,
+                aspectRatio = latestSettings.imageGenAspectRatio,
+                reasoning = latestSettings.imageGenReasoning,
+                reasoningEffort = latestSettings.imageGenReasoningEffort,
+            )
+        },
+        byokImageApi = byokImageApi,
+        imageFileSaver = { bytes, ext ->
+            // 生成图落地到 app 私有 filesDir/gen_images，返回 file:// 供 Coil 加载（消息只存引用，不存 base64）。
+            runCatching {
+                val dir = java.io.File(appContext.filesDir, "gen_images").apply { mkdirs() }
+                val file = java.io.File(dir, "${java.util.UUID.randomUUID()}.$ext")
+                file.writeBytes(bytes)
+                android.net.Uri.fromFile(file).toString()
+            }.getOrNull()
+        },
+        dispatchers = dispatchers,
+    )
+
+    /** 唯一对话服务。按会话来源路由到 MolaGPT 账户或 BYOK。 */
+    private val chatService: ChatService = RoutingChatService(
+        molaGpt = molaGptChatService,
+        byok = byokChatService,
     )
 
     val sessionRepository = SessionRepository(
@@ -148,7 +237,7 @@ class AppContainer(
     val backgroundStreamManager = BackgroundStreamManager(
         chatRepository = chatRepository,
         scope = applicationScope,
-        apiUrlResolver = { modelId -> modelRegistry.apiUrlFor(modelId) },
+        apiUrlResolver = { providerId, modelId -> modelRegistry.apiUrlFor(providerId, modelId) },
     )
 
     /** App 是否在前台（MainActivity onStart/onStop 维护），用于完成通知抑制。 */
@@ -207,6 +296,17 @@ class AppContainer(
             settingsStore.settings.collect { latestSettings = it }
         }
 
+        // BYOK provider 配置变化时刷新运行时模型注册表。
+        applicationScope.launch {
+            byokProviderRepository.providers.collect { providers ->
+                modelRegistry.updateByok(
+                    providers
+                        .filter { it.enabled }
+                        .flatMap { it.allModels() },
+                )
+            }
+        }
+
         // 刷新模型 → 对账被杀的在途流任务 → 已登录则做一次启动云同步。
         applicationScope.launch {
             latestSettings = runCatching { settingsStore.settings.first() }.getOrDefault(AppSettings())
@@ -246,6 +346,10 @@ class AppContainer(
     private suspend fun reconcileStreamTasks() {
         val tasks = runCatching { chatRepository.loadStreamTasks() }.getOrDefault(emptyList())
         for (record in tasks) {
+            if (record.providerKind == ProviderKind.BYOK) {
+                runCatching { chatRepository.removeStreamTask(record.sessionId) }
+                continue
+            }
             val status = runCatching { chatService.checkStreamStatus(record.streamSessionId) }.getOrNull()
             when (status?.status) {
                 "completed", "streaming" -> backgroundStreamManager.resume(record)

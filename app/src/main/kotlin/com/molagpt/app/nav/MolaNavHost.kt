@@ -25,11 +25,14 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.molagpt.app.LocalAppContainer
 import com.molagpt.app.core.model.Ids
+import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.feature.auth.AuthViewModel
@@ -38,6 +41,11 @@ import com.molagpt.app.feature.chat.ChatScreen
 import com.molagpt.app.feature.session.SessionDrawer
 import com.molagpt.app.feature.session.SessionViewModel
 import com.molagpt.app.feature.settings.AboutScreen
+import com.molagpt.app.feature.settings.ByokProviderDetailScreen
+import com.molagpt.app.feature.settings.ByokProvidersScreen
+import com.molagpt.app.feature.settings.ByokToolsScreen
+import com.molagpt.app.feature.settings.ImageWorkbenchScreen
+import com.molagpt.app.feature.settings.McpServerDetailScreen
 import com.molagpt.app.feature.settings.PersonalizationScreen
 import com.molagpt.app.feature.settings.PersonalizationViewModel
 import com.molagpt.app.feature.settings.SettingsScreen
@@ -51,6 +59,11 @@ private object Routes {
     const val SETTINGS = "settings"
     const val PERSONALIZATION = "personalization"
     const val ABOUT = "about"
+    const val IMAGE_WORKBENCH = "image_workbench"
+    const val BYOK_PROVIDERS = "byok_providers"
+    const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
+    const val BYOK_TOOLS = "byok_tools"
+    const val MCP_SERVER_DETAIL = "mcp_server_detail"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -153,7 +166,117 @@ fun MolaNavHost(
                         navController.navigate(Routes.ABOUT) { launchSingleTop = true }
                     }
                 },
+                onOpenImageWorkbench = {
+                    if (navController.currentDestination?.route != Routes.IMAGE_WORKBENCH) {
+                        navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
+                    }
+                },
+                onOpenByokProviders = {
+                    if (navController.currentDestination?.route != Routes.BYOK_PROVIDERS) {
+                        navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
+                    }
+                },
+                onOpenByokTools = {
+                    if (navController.currentDestination?.route != Routes.BYOK_TOOLS) {
+                        navController.navigate(Routes.BYOK_TOOLS) { launchSingleTop = true }
+                    }
+                },
                 buildLabel = "MolaGPT v${com.molagpt.app.BuildConfig.VERSION_NAME} · 构建 ${com.molagpt.app.BuildConfig.BUILD_TIME}",
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.IMAGE_WORKBENCH) {
+            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            ImageWorkbenchScreen(
+                viewModel = vm,
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.IMAGE_WORKBENCH) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.BYOK_PROVIDERS) {
+            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            ByokProvidersScreen(
+                viewModel = vm,
+                onOpenDetail = { id ->
+                    navController.navigate("${Routes.BYOK_PROVIDER_DETAIL}/$id") { launchSingleTop = true }
+                },
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.BYOK_PROVIDERS) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(
+            route = "${Routes.BYOK_PROVIDER_DETAIL}/{id}",
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            ByokProviderDetailScreen(
+                providerId = backStackEntry.arguments?.getString("id").orEmpty(),
+                viewModel = vm,
+                onBack = {
+                    if (!navController.popBackStack()) {
+                        navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.BYOK_TOOLS) {
+            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            ByokToolsScreen(
+                viewModel = vm,
+                onOpenImageWorkbench = {
+                    if (navController.currentDestination?.route != Routes.IMAGE_WORKBENCH) {
+                        navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
+                    }
+                },
+                onOpenMcpDetail = { id ->
+                    navController.navigate("${Routes.MCP_SERVER_DETAIL}/$id") { launchSingleTop = true }
+                },
+                onOpenByokProviders = {
+                    if (navController.currentDestination?.route != Routes.BYOK_PROVIDERS) {
+                        navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
+                    }
+                },
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.BYOK_TOOLS) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(
+            route = "${Routes.MCP_SERVER_DETAIL}/{id}",
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            McpServerDetailScreen(
+                serverId = backStackEntry.arguments?.getString("id").orEmpty(),
+                viewModel = vm,
+                onBack = {
+                    if (!navController.popBackStack()) {
+                        navController.navigate(Routes.BYOK_TOOLS) { launchSingleTop = true }
+                    }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -267,6 +390,17 @@ private fun ChatHost(
                     onOpenDrawer = { drawerOpen = true },
                     onOpenSettings = onOpenSettings,
                     onAuthExpired = onAuthExpired,
+                    onNewChatWithModel = { modelId, providerId, kind ->
+                        scope.launch {
+                            val conversation = container.sessionRepository.create(
+                                title = "新对话",
+                                model = modelId,
+                                providerId = providerId,
+                                providerKind = kind,
+                            )
+                            currentSessionId = conversation.sessionId
+                        }
+                    },
                     // 侧边栏推入时，聊天页保留轻微右移视差。
                     modifier = Modifier
                         .fillMaxSize()

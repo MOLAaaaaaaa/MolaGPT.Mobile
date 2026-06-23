@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -57,6 +58,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.EnabledTools
 import com.molagpt.app.core.model.FileInfo
+import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.UploadStatus
 
@@ -65,10 +67,12 @@ import com.molagpt.app.core.model.UploadStatus
  * 打字不触发列表重组，流式刷新也不重置输入框。
  *
  * 工具行（可横向滚动）：
- *  - 「网络访问」一键开关，同时控制联网搜索 + 网页阅读；
+ *  - 「联网搜索」「网页拉取」：与设置页两个独立开关对应；BYOK 需所选模型支持工具调用；
  *  - 「推理」开关：仅当所选模型 [ProviderModel.supportsThinking] 时显示；
+ *  - BYOK 专属「MCP / 视觉 / 图像」：MCP 按服务器配置门控；视觉作为外挂视觉工具，
+ *    只要模型支持工具调用即可启用；图像由独立的图像用途 provider 提供，当前聊天模型只要支持工具调用即可调用。
  *  - 推理强度（低/中/高）：仅当开了推理且模型 [ProviderModel.supportsReasoningEffort] 时显示。
- * 底部加号 = 选图上传（代码执行等开关已移至设置页）。
+ * 底部加号 = 选图上传（代码执行仅 MolaGPT 账户，开关在设置页）。
  */
 @Composable
 fun Composer(
@@ -77,10 +81,15 @@ fun Composer(
     enterToSend: Boolean,
     enabledTools: EnabledTools,
     selectedModel: ProviderModel?,
+    hasMcpServers: Boolean,
     useThinking: Boolean,
     reasoningEffort: String,
     pendingAttachments: List<FileInfo>,
-    onSetNetworkAccess: (Boolean) -> Unit,
+    onSetNetwork: (Boolean) -> Unit,
+    onSetSteel: (Boolean) -> Unit,
+    onSetMcp: (Boolean) -> Unit,
+    onSetVision: (Boolean) -> Unit,
+    onSetImageGeneration: (Boolean) -> Unit,
     onToggleThinking: (Boolean) -> Unit,
     onSetReasoningEffort: (String) -> Unit,
     onPickImage: () -> Unit,
@@ -90,15 +99,32 @@ fun Composer(
     modifier: Modifier = Modifier,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
-    val canSend = enabled && text.isNotBlank()
+    val hasReadyAttachment = pendingAttachments.any {
+        it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank())
+    }
+    val canSend = enabled && (text.isNotBlank() || hasReadyAttachment)
     val colorScheme = MaterialTheme.colorScheme
     val toolsEnabled = enabled && !isStreaming
     val showThinking = selectedModel?.supportsThinking == true
-    val showEffort = showThinking && useThinking && selectedModel?.supportsReasoningEffort == true
+    // 推理档位：BYOK 模型按 thinkingConfig.effortLevels 动态渲染；MolaGPT/未配置走 low/medium/high 兜底。
+    val tc = selectedModel?.thinkingConfig
+    val effortOptions: List<Pair<String, String>> = when {
+        tc != null && tc.kind != com.molagpt.app.core.model.ThinkingParamKind.NONE && tc.effortLevels.isNotEmpty() ->
+            tc.effortLevels.map { it to effortLabel(it) }
+        selectedModel?.supportsReasoningEffort == true ->
+            listOf("low" to "低", "medium" to "中", "high" to "高")
+        else -> emptyList()
+    }
+    val showEffort = showThinking && useThinking && effortOptions.isNotEmpty()
+    val isByok = selectedModel?.providerKind == ProviderKind.BYOK
+    // BYOK 工具的通用前提：模型声明支持工具调用。
+    val byokToolEnabled = toolsEnabled && (selectedModel?.supportsToolCalling == true)
+    // 网络访问（搜索/网页）：MolaGPT 始终可用；BYOK 需模型支持工具调用。
+    val networkEnabled = if (isByok) byokToolEnabled else toolsEnabled
 
     fun submit() {
         val content = text.trim()
-        if (content.isNotEmpty() && enabled) {
+        if ((content.isNotEmpty() || hasReadyAttachment) && enabled) {
             onSend(content)
             text = ""
         }
@@ -121,15 +147,23 @@ fun Composer(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // 固定高度：推理开关切换时 SegmentedControl（36dp）出现/消失不再改变整行高度（避免上方按钮抖动）。
+                    .height(40.dp)
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 ToolChip(
-                    label = "网络访问",
+                    label = "联网搜索",
                     checked = enabledTools.network,
-                    enabled = toolsEnabled,
-                    onCheckedChange = onSetNetworkAccess,
+                    enabled = networkEnabled,
+                    onCheckedChange = onSetNetwork,
+                )
+                ToolChip(
+                    label = "网页拉取",
+                    checked = enabledTools.steelBrowser,
+                    enabled = networkEnabled,
+                    onCheckedChange = onSetSteel,
                 )
                 if (showThinking) {
                     ToolChip(
@@ -138,14 +172,15 @@ fun Composer(
                         enabled = toolsEnabled,
                         onCheckedChange = onToggleThinking,
                     )
-                }
-                if (showEffort) {
-                    com.molagpt.app.core.render.SegmentedControl(
-                        options = listOf("low" to "低", "medium" to "中", "high" to "高"),
-                        selected = reasoningEffort,
-                        onSelect = onSetReasoningEffort,
-                        modifier = Modifier.width(132.dp),
-                    )
+                    // 推理强度（低/中/高）紧贴推理开关右侧；MCP/视觉/图像 在设置页对应开关里控制，不在此暴露。
+                    if (showEffort) {
+                        com.molagpt.app.core.render.SegmentedControl(
+                            options = effortOptions,
+                            selected = reasoningEffort,
+                            onSelect = onSetReasoningEffort,
+                            modifier = Modifier.width((effortOptions.size * 46).dp),
+                        )
+                    }
                 }
             }
 
@@ -188,7 +223,7 @@ fun Composer(
             ) {
                 RoundIconButton(
                     icon = Icons.Filled.Add,
-                    contentDescription = "添加图片",
+                    contentDescription = "添加附件",
                     selected = false,
                     enabled = toolsEnabled,
                     onClick = onPickImage,
@@ -231,6 +266,18 @@ fun Composer(
             }
         }
     }
+}
+
+/** 推理档位符号 → 中文标签。 */
+private fun effortLabel(effort: String): String = when (effort.lowercase()) {
+    "low" -> "低"
+    "medium" -> "中"
+    "high" -> "高"
+    "xhigh" -> "超高"
+    "max" -> "最高"
+    "auto" -> "自动"
+    "off" -> "关"
+    else -> effort
 }
 
 /** 待发送图片条：上传中转圈、失败标红，右侧叉可移除。 */

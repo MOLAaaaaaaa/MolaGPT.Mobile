@@ -11,8 +11,9 @@ sealed interface MdBlock {
     data class Heading(val level: Int, val inlines: List<MdInline>) : MdBlock
     data class Paragraph(val inlines: List<MdInline>) : MdBlock
     data class Quote(val blocks: List<MdBlock>) : MdBlock
-    data class BulletList(val items: List<List<MdInline>>) : MdBlock
-    data class OrderedList(val start: Int, val items: List<List<MdInline>>) : MdBlock
+    /** 列表项现在支持嵌套块（段落 + 子列表）。 */
+    data class BulletList(val items: List<ListItemContent>) : MdBlock
+    data class OrderedList(val start: Int, val items: List<ListItemContent>) : MdBlock
     data class Table(
         val header: List<List<MdInline>>,
         val rows: List<List<List<MdInline>>>,
@@ -23,6 +24,9 @@ sealed interface MdBlock {
     data class MathBlock(val expr: String) : MdBlock
     data object Divider : MdBlock
 }
+
+/** 列表项内容：可包含多个块（段落、子列表等）。 */
+data class ListItemContent(val blocks: List<MdBlock>)
 
 /** 行内片段。普通文本携带强调样式；行内公式（$...$）与行内代码单列。 */
 sealed interface MdInline {

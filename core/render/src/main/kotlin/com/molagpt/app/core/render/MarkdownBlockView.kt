@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
@@ -88,17 +89,27 @@ fun MarkdownBlockView(
         }
         is MdBlock.BulletList -> Column(modifier = modifier.padding(vertical = 2.dp)) {
             block.items.forEach { item ->
-                Row {
-                    Text("•  ")
-                    InlineContentText(item, bodyLarge, Modifier)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Text("•  ", style = bodyLarge)
+                    Column(modifier = Modifier.weight(1f)) {
+                        item.blocks.forEach { MarkdownBlockView(it, textScale = textScale) }
+                    }
                 }
             }
         }
         is MdBlock.OrderedList -> Column(modifier = modifier.padding(vertical = 2.dp)) {
             block.items.forEachIndexed { i, item ->
-                Row {
-                    Text("${block.start + i}.  ")
-                    InlineContentText(item, bodyLarge, Modifier)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Text("${block.start + i}.  ", style = bodyLarge)
+                    Column(modifier = Modifier.weight(1f)) {
+                        item.blocks.forEach { MarkdownBlockView(it, textScale = textScale) }
+                    }
                 }
             }
         }

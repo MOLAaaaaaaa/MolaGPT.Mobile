@@ -23,9 +23,11 @@ import com.molagpt.app.core.render.shimmer
 @Composable
 fun RemoteImage(url: String, modifier: Modifier = Modifier, contentDescription: String? = null) {
     var loaded by remember(url) { mutableStateOf(false) }
+    // 超大 base64 data URI 直喂 Coil 渲染不稳——解码为 ByteArray 再交给 Coil；file://、http 原样。
+    val model = remember(url) { decodeImageModel(url) }
     Box(modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))) {
         AsyncImage(
-            model = url,
+            model = model,
             contentDescription = contentDescription,
             contentScale = ContentScale.FillWidth,
             onState = { state -> if (state is AsyncImagePainter.State.Success) loaded = true },
@@ -44,4 +46,14 @@ fun RemoteImage(url: String, modifier: Modifier = Modifier, contentDescription: 
             )
         }
     }
+}
+
+/** `data:[mime];base64,xxx` → ByteArray（Coil3 直出稳定）；其它（file://、http）原样返回。 */
+private fun decodeImageModel(url: String): Any {
+    if (!url.startsWith("data:", ignoreCase = true)) return url
+    val comma = url.indexOf(',')
+    if (comma < 0 || !url.substring(0, comma).contains("base64", ignoreCase = true)) return url
+    return runCatching {
+        android.util.Base64.decode(url.substring(comma + 1), android.util.Base64.DEFAULT)
+    }.getOrDefault(url)
 }

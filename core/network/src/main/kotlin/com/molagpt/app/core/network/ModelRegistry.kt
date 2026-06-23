@@ -17,18 +17,41 @@ class ModelRegistry {
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
     private val byId = HashMap<String, ProviderModel>()
+    private var molaGptModels: List<ProviderModel> = emptyList()
+    private var byokModels: List<ProviderModel> = emptyList()
     private var activeRefreshes = 0
 
     @Synchronized
     fun update(list: List<ProviderModel>) {
+        updateMolaGpt(list)
+    }
+
+    @Synchronized
+    fun updateMolaGpt(list: List<ProviderModel>) {
+        molaGptModels = list
+        publish()
+    }
+
+    @Synchronized
+    fun updateByok(list: List<ProviderModel>) {
+        byokModels = list
+        publish()
+    }
+
+    private fun publish() {
+        val list = molaGptModels + byokModels
         byId.clear()
-        list.forEach { byId[it.id] = it }
+        list.forEach { byId[registryKey(it.providerId, it.id)] = it }
+        list.forEach { byId.putIfAbsent(it.id, it) }
         _models.value = list
     }
 
     fun all(): List<ProviderModel> = _models.value
 
     fun find(modelId: String): ProviderModel? = byId[modelId]
+
+    fun find(providerId: String?, modelId: String): ProviderModel? =
+        byId[registryKey(providerId, modelId)] ?: byId[modelId]
 
     @Synchronized
     fun beginRefresh() {
@@ -45,4 +68,11 @@ class ModelRegistry {
     /** modelId 对应的相对 apiUrl；未知时回退自动路由端点。 */
     fun apiUrlFor(modelId: String): String =
         byId[modelId]?.apiUrl ?: MolaEndpoints.DEFAULT_CHAT_API
+
+    /** providerId + modelId 对应的相对 apiUrl；BYOK 同名模型优先按 provider 精确命中。 */
+    fun apiUrlFor(providerId: String?, modelId: String): String =
+        find(providerId, modelId)?.apiUrl ?: MolaEndpoints.DEFAULT_CHAT_API
+
+    private fun registryKey(providerId: String?, modelId: String): String =
+        "${providerId.orEmpty()}::$modelId"
 }

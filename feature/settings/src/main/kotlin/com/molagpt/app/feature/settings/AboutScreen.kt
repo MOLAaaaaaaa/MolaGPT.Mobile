@@ -24,8 +24,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -38,6 +40,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -65,7 +68,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
-private const val GitHubUrl = "https://github.com/MOLAaaaaaaa/MolaGPT-Mobile"
+private const val GitHubUrl = "https://github.com/MOLAaaaaaaa/MolaGPT.Mobile"
 
 // GitHub 官方 mark 轮廓（SVG path data，viewBox 0 0 24 24）
 private const val GitHubMarkPath =
@@ -82,6 +85,27 @@ fun AboutScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
+    var checking by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+
+    updateInfo?.let { info ->
+        AlertDialog(
+            onDismissRequest = { updateInfo = null },
+            title = { Text("发现新版本 ${info.version}") },
+            text = info.notes?.let { notes ->
+                { Text(notes, modifier = Modifier.verticalScroll(rememberScrollState())) }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching { uriHandler.openUri(info.url) }
+                    updateInfo = null
+                }) { Text("前往下载") }
+            },
+            dismissButton = {
+                TextButton(onClick = { updateInfo = null }) { Text("关闭") }
+            },
+        )
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -110,8 +134,15 @@ fun AboutScreen(
             ProductHeader(versionName = versionName, buildTime = buildTime)
 
             ActionButtons(
+                checking = checking,
                 onCheckUpdate = {
-                    scope.launch { snackbarHostState.showSnackbar("移动端自动更新入口预留中") }
+                    scope.launch {
+                        checking = true
+                        val info = checkForUpdate(versionName)
+                        checking = false
+                        if (info != null) updateInfo = info
+                        else snackbarHostState.showSnackbar("已是最新版本")
+                    }
                 },
                 onOpenGitHub = {
                     runCatching { uriHandler.openUri(GitHubUrl) }
@@ -197,17 +228,22 @@ private fun AppLogo() {
 }
 
 @Composable
-private fun ActionButtons(onCheckUpdate: () -> Unit, onOpenGitHub: () -> Unit) {
+private fun ActionButtons(checking: Boolean, onCheckUpdate: () -> Unit, onOpenGitHub: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(bottom = 22.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Button(
             onClick = onCheckUpdate,
+            enabled = !checking,
             modifier = Modifier.weight(1f),
             shape = RoundedCornerShape(999.dp),
         ) {
-            RefreshGlyph(modifier = Modifier.size(17.dp))
+            if (checking) CircularProgressIndicator(
+                modifier = Modifier.size(17.dp),
+                strokeWidth = 2.dp,
+                color = LocalContentColor.current,
+            ) else RefreshGlyph(modifier = Modifier.size(17.dp))
             Text("检查更新", modifier = Modifier.padding(start = 8.dp))
         }
         OutlinedButton(

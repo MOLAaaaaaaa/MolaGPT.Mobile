@@ -8,6 +8,8 @@ data class Conversation(
     val sessionId: String,
     val title: String,
     val model: String? = null,
+    val providerId: String? = ProviderIds.MOLAGPT,
+    val providerKind: ProviderKind = ProviderKind.MOLAGPT,
     val createdAt: Long,
     val updatedAt: Long,
     val pinned: Boolean = false,

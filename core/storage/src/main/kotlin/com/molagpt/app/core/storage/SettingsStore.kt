@@ -9,9 +9,12 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.molagpt.app.core.model.ByokMcpServer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "mola_settings")
 
@@ -29,6 +32,31 @@ data class AppSettings(
     val toolNetwork: Boolean = false,
     val toolSteel: Boolean = false,
     val toolCode: Boolean = true,
+    val byokToolMcp: Boolean = false,
+    val byokToolVision: Boolean = false,
+    val byokToolImage: Boolean = false,
+    val byokMcpServers: List<ByokMcpServer> = emptyList(),
+    /** 联网搜索服务商 id（duckduckgo/tavily/exa）；key 单独经 CredentialStore 加密存储。 */
+    val webSearchProvider: String = "duckduckgo",
+    /** 联网搜索结果数量上限（1..10）。 */
+    val webSearchMaxResults: Int = 6,
+    /** 外挂视觉：当前模型不支持视觉时，代理到此视觉模型。总开关沿用 byokToolVision，下面是目标/参数。 */
+    val visionProxyEnabled: Boolean = false,
+    /** 视觉代理目标 "<providerId>::<modelId>"。 */
+    val visionProxyModelKey: String? = null,
+    /** 图像生成：支持工具调用的 BYOK 模型可调用此图像服务。总开关沿用 byokToolImage。 */
+    val imageGenEnabled: Boolean = false,
+    /** 图像生成目标 "<providerId>::<modelId>"。 */
+    val imageGenModelKey: String? = null,
+    /** 出图尺寸：chat-image 格式为 image_size 档位（0.5K/1K/2K/4K）；OPENAI_IMAGES 格式忽略此值。 */
+    val imageGenSize: String = "1K",
+    val imageGenStyle: String? = null,
+    /** 出图宽高比（image_config.aspect_ratio），仅 chat-image 格式生效。 */
+    val imageGenAspectRatio: String = "1:1",
+    /** 出图推理开关（仅 GPT-5 Image / Gemini 3 Image 系列生效）。 */
+    val imageGenReasoning: Boolean = false,
+    /** 出图推理强度（reasoning.effort）。 */
+    val imageGenReasoningEffort: String = "medium",
     /** 云同步开关（个人中心）。 */
     val cloudSyncEnabled: Boolean = false,
     /** MolaGPT Tracks（个性化记忆）开关。 */
@@ -41,6 +69,11 @@ data class AppSettings(
 
 /** DataStore 设置存储。 */
 class SettingsStore(private val context: Context) {
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        explicitNulls = false
+    }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data.map { p ->
         AppSettings(
@@ -54,6 +87,24 @@ class SettingsStore(private val context: Context) {
             toolNetwork = p[Keys.TOOL_NETWORK] ?: false,
             toolSteel = p[Keys.TOOL_STEEL] ?: false,
             toolCode = p[Keys.TOOL_CODE] ?: true,
+            byokToolMcp = p[Keys.BYOK_TOOL_MCP] ?: false,
+            byokToolVision = p[Keys.BYOK_TOOL_VISION] ?: false,
+            byokToolImage = p[Keys.BYOK_TOOL_IMAGE] ?: false,
+            byokMcpServers = decodeMcpServers(p[Keys.BYOK_MCP_SERVERS]),
+            webSearchProvider = p[Keys.WEB_SEARCH_PROVIDER] ?: "duckduckgo",
+            webSearchMaxResults = (p[Keys.WEB_SEARCH_MAX_RESULTS] ?: 6L).toInt(),
+            visionProxyEnabled = p[Keys.VISION_PROXY_ENABLED] ?: false,
+            visionProxyModelKey = p[Keys.VISION_PROXY_MODEL_KEY],
+            imageGenEnabled = p[Keys.IMAGE_GEN_ENABLED] ?: false,
+            imageGenModelKey = p[Keys.IMAGE_GEN_MODEL_KEY],
+            imageGenSize = (p[Keys.IMAGE_GEN_SIZE] ?: "1K").let { v ->
+                // 迁移：旧版存的是 "1024x1024" 等 WxH，chat-image 出图需要档位（0.5K/1K/2K/4K）。
+                if (v in setOf("0.5K", "1K", "2K", "4K")) v else "1K"
+            },
+            imageGenStyle = p[Keys.IMAGE_GEN_STYLE],
+            imageGenAspectRatio = p[Keys.IMAGE_GEN_ASPECT_RATIO] ?: "1:1",
+            imageGenReasoning = p[Keys.IMAGE_GEN_REASONING] ?: false,
+            imageGenReasoningEffort = p[Keys.IMAGE_GEN_REASONING_EFFORT] ?: "medium",
             cloudSyncEnabled = p[Keys.CLOUD_SYNC] ?: false,
             tracksEnabled = p[Keys.TRACKS] ?: false,
             lastSyncAt = p[Keys.LAST_SYNC_AT] ?: 0L,
@@ -73,6 +124,37 @@ class SettingsStore(private val context: Context) {
         it[Keys.TOOL_STEEL] = steel
         it[Keys.TOOL_CODE] = code
     }
+    suspend fun setByokTools(mcp: Boolean, vision: Boolean, image: Boolean) = edit {
+        it[Keys.BYOK_TOOL_MCP] = mcp
+        it[Keys.BYOK_TOOL_VISION] = vision
+        it[Keys.BYOK_TOOL_IMAGE] = image
+    }
+    suspend fun setByokMcpServers(servers: List<ByokMcpServer>) = edit {
+        it[Keys.BYOK_MCP_SERVERS] = json.encodeToString(servers)
+    }
+    suspend fun setWebSearchProvider(provider: String) = edit { it[Keys.WEB_SEARCH_PROVIDER] = provider }
+    suspend fun setWebSearchMaxResults(max: Int) = edit { it[Keys.WEB_SEARCH_MAX_RESULTS] = max.coerceIn(1, 10).toLong() }
+    suspend fun setVisionProxy(enabled: Boolean, modelKey: String?) = edit {
+        it[Keys.VISION_PROXY_ENABLED] = enabled
+        if (modelKey.isNullOrBlank()) it.remove(Keys.VISION_PROXY_MODEL_KEY) else it[Keys.VISION_PROXY_MODEL_KEY] = modelKey
+    }
+    suspend fun setImageGenConfig(
+        enabled: Boolean,
+        modelKey: String?,
+        size: String,
+        style: String?,
+        aspectRatio: String = "1:1",
+        reasoning: Boolean = false,
+        reasoningEffort: String = "medium",
+    ) = edit {
+        it[Keys.IMAGE_GEN_ENABLED] = enabled
+        if (modelKey.isNullOrBlank()) it.remove(Keys.IMAGE_GEN_MODEL_KEY) else it[Keys.IMAGE_GEN_MODEL_KEY] = modelKey
+        it[Keys.IMAGE_GEN_SIZE] = size.ifBlank { "1K" }
+        if (style.isNullOrBlank()) it.remove(Keys.IMAGE_GEN_STYLE) else it[Keys.IMAGE_GEN_STYLE] = style
+        it[Keys.IMAGE_GEN_ASPECT_RATIO] = aspectRatio.ifBlank { "1:1" }
+        it[Keys.IMAGE_GEN_REASONING] = reasoning
+        it[Keys.IMAGE_GEN_REASONING_EFFORT] = reasoningEffort.ifBlank { "medium" }
+    }
     suspend fun setCloudSyncEnabled(v: Boolean) = edit { it[Keys.CLOUD_SYNC] = v }
     suspend fun setTracksEnabled(v: Boolean) = edit { it[Keys.TRACKS] = v }
     suspend fun setLastSyncAt(v: Long) = edit { it[Keys.LAST_SYNC_AT] = v }
@@ -91,6 +173,11 @@ class SettingsStore(private val context: Context) {
         context.settingsDataStore.edit(block)
     }
 
+    private fun decodeMcpServers(raw: String?): List<ByokMcpServer> =
+        raw?.takeIf { it.isNotBlank() }?.let {
+            runCatching { json.decodeFromString<List<ByokMcpServer>>(it) }.getOrDefault(emptyList())
+        }.orEmpty()
+
     private object Keys {
         val THEME = stringPreferencesKey("theme_mode")
         val DEFAULT_MODEL = stringPreferencesKey("default_model")
@@ -102,6 +189,21 @@ class SettingsStore(private val context: Context) {
         val TOOL_NETWORK = booleanPreferencesKey("tool_network")
         val TOOL_STEEL = booleanPreferencesKey("tool_steel")
         val TOOL_CODE = booleanPreferencesKey("tool_code")
+        val BYOK_TOOL_MCP = booleanPreferencesKey("byok_tool_mcp")
+        val BYOK_TOOL_VISION = booleanPreferencesKey("byok_tool_vision")
+        val BYOK_TOOL_IMAGE = booleanPreferencesKey("byok_tool_image")
+        val BYOK_MCP_SERVERS = stringPreferencesKey("byok_mcp_servers")
+        val WEB_SEARCH_PROVIDER = stringPreferencesKey("web_search_provider")
+        val WEB_SEARCH_MAX_RESULTS = longPreferencesKey("web_search_max_results")
+        val VISION_PROXY_ENABLED = booleanPreferencesKey("vision_proxy_enabled")
+        val VISION_PROXY_MODEL_KEY = stringPreferencesKey("vision_proxy_model_key")
+        val IMAGE_GEN_ENABLED = booleanPreferencesKey("image_gen_enabled")
+        val IMAGE_GEN_MODEL_KEY = stringPreferencesKey("image_gen_model_key")
+        val IMAGE_GEN_SIZE = stringPreferencesKey("image_gen_size")
+        val IMAGE_GEN_STYLE = stringPreferencesKey("image_gen_style")
+        val IMAGE_GEN_ASPECT_RATIO = stringPreferencesKey("image_gen_aspect_ratio")
+        val IMAGE_GEN_REASONING = booleanPreferencesKey("image_gen_reasoning")
+        val IMAGE_GEN_REASONING_EFFORT = stringPreferencesKey("image_gen_reasoning_effort")
         val CLOUD_SYNC = booleanPreferencesKey("cloud_sync_enabled")
         val TRACKS = booleanPreferencesKey("tracks_enabled")
         val LAST_SYNC_AT = longPreferencesKey("last_sync_at")
