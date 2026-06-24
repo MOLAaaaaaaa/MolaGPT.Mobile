@@ -66,13 +66,12 @@ object ViewModelFactories {
             modelRefresher = { providerKind -> refreshModels(container, providerKind) },
             settingsFlow = container.settingsFlow,
             defaultModelId = settings.defaultModel,
+            // composer 运行时工具开关初值（network/网页拉取/代码执行）。
+            // mcp/vision/imageGeneration 在对话内无开关，由 BYOK 工具设置页实时驱动（见 resolveRequestTools），不在此初始化。
             tools = EnabledTools(
                 network = settings.toolNetwork,
                 steelBrowser = settings.toolSteel,
                 codeExecution = settings.toolCode,
-                mcp = settings.byokToolMcp,
-                vision = settings.byokToolVision,
-                imageGeneration = settings.byokToolImage,
             ),
             useThinking = settings.useThinking,
             reasoningEffort = settings.reasoningEffort,

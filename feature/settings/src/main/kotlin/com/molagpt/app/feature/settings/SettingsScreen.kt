@@ -189,9 +189,9 @@ fun SettingsScreen(
                 onChange = viewModel::setTools,
             )
             ByokToolsEntryCard(
-                mcp = s.byokToolMcp,
-                vision = s.byokToolVision,
-                image = s.byokToolImage,
+                mcp = s.byokMcpServers.any { it.enabled },
+                vision = s.visionProxyEnabled,
+                image = s.imageGenEnabled,
                 servers = s.byokMcpServers,
                 onClick = onOpenByokTools,
             )

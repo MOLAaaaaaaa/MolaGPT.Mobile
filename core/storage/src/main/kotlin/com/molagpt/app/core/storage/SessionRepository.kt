@@ -34,7 +34,7 @@ class SessionRepository(
         ).flow.map { pagingData -> pagingData.map { it.toDomain() } }
 
     suspend fun create(
-        title: String = "新对话",
+        title: String = DEFAULT_TITLE,
         model: String? = null,
         providerId: String? = ProviderIds.MOLAGPT,
         providerKind: ProviderKind = ProviderKind.MOLAGPT,
@@ -62,7 +62,8 @@ class SessionRepository(
         providerId: String? = ProviderIds.MOLAGPT,
         providerKind: ProviderKind = ProviderKind.MOLAGPT,
     ) = withContext(dispatchers.io) {
-        if (conversationDao.getById(sessionId) == null) {
+        val existing = conversationDao.getById(sessionId)
+        if (existing == null) {
             val now = System.currentTimeMillis()
             conversationDao.upsert(
                 Conversation(
@@ -75,6 +76,10 @@ class SessionRepository(
                     updatedAt = now,
                 ).toEntity(),
             )
+        } else if (existing.title == DEFAULT_TITLE && title != DEFAULT_TITLE) {
+            // 会话已被预创建为占位标题（如跨阵营切换进入 BYOK），首条消息发送时把占位标题换成消息内容，
+            // 使顶栏在流式回复期间即显示临时标题，与 MolaGPT 默认入口的懒创建行为一致。
+            conversationDao.rename(sessionId, title, System.currentTimeMillis())
         }
     }
 
@@ -119,9 +124,13 @@ class SessionRepository(
             messageDao.getPaged(sessionId, size, page * size).map { it.toDomain() }
         }
 
-    private companion object {
+    companion object {
         // Data-layer page size only. Initial load and prefetch distance use Paging defaults,
         // so this policy is not tied to one device, account size, or measured session count.
-        const val SESSION_ROWS_PER_PAGE = 48
+        private const val SESSION_ROWS_PER_PAGE = 48
+
+        // 新会话的占位标题：预创建行（如跨阵营切换进入 BYOK）以此标题落库，
+        // 首条消息发送时由 ensure 替换为消息内容。
+        const val DEFAULT_TITLE = "新对话"
     }
 }

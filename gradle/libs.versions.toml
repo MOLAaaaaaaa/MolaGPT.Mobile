@@ -39,7 +39,7 @@ securityCrypto = "1.1.0-alpha06"
 
 # —— 图片：Coil 3 + Telephoto ——
 coil = "3.0.4"
-telephoto = "0.13.0"
+telephoto = "0.14.0"
 
 # —— 渲染：LaTeX(JLaTeXMath 安卓移植) + Markdown(commonmark) ——
 jlatexmath = "0.2.0"

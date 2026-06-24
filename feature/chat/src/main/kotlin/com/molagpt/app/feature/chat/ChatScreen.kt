@@ -1,8 +1,14 @@
 package com.molagpt.app.feature.chat
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,16 +32,20 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -51,12 +62,16 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.feature.file.ImagePreviewOverlay
+import com.molagpt.app.feature.file.LocalAnimatedVisibilityScope
+import com.molagpt.app.feature.file.LocalImagePreviewUrl
+import com.molagpt.app.feature.file.LocalSharedTransitionScope
 
 /**
  * 聊天页（单 Activity 内的主屏）。顶栏：菜单(打开会话抽屉) + 模型选择下拉；
  * 中间消息列表；底部输入框。主聊天体验使用原生 Compose。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.animation.ExperimentalSharedTransitionApi::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
@@ -65,6 +80,8 @@ fun ChatScreen(
     onOpenSettings: () -> Unit,
     onAuthExpired: () -> Unit,
     onNewChatWithModel: (modelId: String, providerId: String?, kind: ProviderKind) -> Unit,
+    onNewChat: () -> Unit,
+    drawerOpen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -88,6 +105,17 @@ fun ChatScreen(
         "选择模型"
     }
     val conversationTitle = state.title.ifBlank { "新对话" }
+    /** 空白会话：无消息、无未发送附件、且不在加载历史中；此时跨阵营切换模型不弹确认窗。 */
+    val isBlankConversation = state.messages.isEmpty() &&
+        state.pendingAttachments.isEmpty() &&
+        !state.isLoadingHistory
+    /** 已加载具体对话：有消息历史。此时返回应开启新对话，顶栏显示新建按钮。 */
+    val isActiveConversation = state.messages.isNotEmpty() && !state.isLoadingHistory
+    val context = LocalContext.current
+    val startNewChat = {
+        Toast.makeText(context, "已开启新对话", Toast.LENGTH_SHORT).show()
+        onNewChat()
+    }
     val pickFile = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri -> uri?.let(viewModel::attachFile) }
@@ -96,12 +124,14 @@ fun ChatScreen(
         androidx.compose.runtime.LaunchedEffect(Unit) { onAuthExpired() }
     }
 
-    BackHandler(enabled = imeVisible || modelMenuOpen) {
+    BackHandler(enabled = !drawerOpen && (imeVisible || modelMenuOpen || isActiveConversation)) {
         if (modelMenuOpen) {
             modelMenuOpen = false
-        } else {
+        } else if (imeVisible) {
             keyboard?.hide()
             focusManager.clearFocus()
+        } else if (isActiveConversation) {
+            startNewChat()
         }
     }
 
@@ -121,15 +151,23 @@ fun ChatScreen(
         )
     }
 
-    Scaffold(
-        modifier = modifier.fillMaxSize(),
-        // 底部 inset 交给 bottomBar 内部的 windowInsetsPadding(ime ∪ navigationBars) 全权处理，
-        // 这里只保留顶部/侧边的 systemBars，避免 Scaffold 再给 bottomBar 垫一次导航栏（双重 padding）。
-        contentWindowInsets = WindowInsets.systemBars.only(
-            WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
-        ),
-        topBar = {
-            TopAppBar(
+    // SharedTransitionLayout 包在最外层（Scaffold 外），使图片全屏 overlay 能覆盖顶栏/输入框区域，
+    // 缩略图（RemoteImage 内各自 AnimatedVisibility）与全屏图用同 key（img-$url）在两端 bounds 间非线性过渡。
+    SharedTransitionLayout(modifier = modifier.fillMaxSize()) {
+        val sharedScope = this
+        val previewHolder = rememberPreviewUrlHolder()
+        CompositionLocalProvider(
+            LocalSharedTransitionScope provides sharedScope,
+            LocalImagePreviewUrl provides previewHolder,
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    contentWindowInsets = WindowInsets.systemBars.only(
+                        WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
+                    ),
+                    topBar = {
+                        TopAppBar(
                 title = {
                     Column {
                         Text(
@@ -194,7 +232,8 @@ fun ChatScreen(
                                         text = { Text(model.displayName) },
                                         onClick = {
                                             modelMenuOpen = false
-                                            if (sameKind) {
+                                            if (sameKind || isBlankConversation) {
+                                                // 同阵营直接切换；空白会话跨阵营切换也直接生效，不弹新建确认。
                                                 viewModel.selectModel(model.id, model.providerId)
                                             } else {
                                                 // 跨阵营：历史不互通，弹确认后新建对话。
@@ -213,6 +252,11 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    if (isActiveConversation) {
+                        IconButton(onClick = onNewChat) {
+                            Icon(Icons.Filled.Add, contentDescription = "新对话")
+                        }
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")
                     }
@@ -244,15 +288,11 @@ fun ChatScreen(
                     enterToSend = enterToSend,
                     enabledTools = state.enabledTools,
                     selectedModel = state.selectedModel,
-                    hasMcpServers = state.hasMcpServers,
                     useThinking = state.useThinking,
                     reasoningEffort = state.reasoningEffort,
                     pendingAttachments = state.pendingAttachments,
                     onSetNetwork = viewModel::setNetworkTool,
                     onSetSteel = viewModel::setSteelTool,
-                    onSetMcp = viewModel::setMcpTool,
-                    onSetVision = viewModel::setVisionTool,
-                    onSetImageGeneration = viewModel::setImageGenerationTool,
                     onToggleThinking = viewModel::setUseThinking,
                     onSetReasoningEffort = viewModel::setReasoningEffort,
                     onPickImage = { pickFile.launch(arrayOf("*/*")) },
@@ -263,6 +303,7 @@ fun ChatScreen(
             }
         },
     ) { inner ->
+        // 消息列表区域仅撑满 Scaffold 内容区（顶栏/底栏之间的区域），加上 inner 内边距。
         Box(modifier = Modifier.fillMaxSize().padding(inner)) {
             MessageList(
                 messages = state.messages,
@@ -270,17 +311,55 @@ fun ChatScreen(
                 onRegenerate = viewModel::regenerateLast,
                 onNavVersion = viewModel::navVersion,
             )
-            // 占位会话从云端拉取消息正文时，居中转圈（消息到位后 isLoadingHistory 翻 false、列表渲染）。
             if (state.isLoadingHistory && state.messages.isEmpty()) {
-                androidx.compose.material3.CircularProgressIndicator(
-                    modifier = Modifier.align(androidx.compose.ui.Alignment.Center),
+                CircularProgressIndicator(
+                    modifier = Modifier.align(Alignment.Center),
                 )
             }
             if (state.isModelRefreshing) {
-                androidx.compose.material3.LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().align(androidx.compose.ui.Alignment.TopCenter),
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
                 )
             }
+        }
+    } // Scaffold content lambda
+
+                // ── 全屏图片预览 overlay ──
+                // 位于 SharedTransitionLayout 的顶层 Box 中、Scaffold 外 → 覆盖顶栏/输入框区域的全屏沉浸。
+                // AnimatedVisibility 驱动显隐；其 scope（this@AnimatedVisibility）下发给 overlay 内的全屏图，
+                // 与缩略图（RemoteImage 内各自的 AnimatedVisibility）用同 key（img-$url）配对过渡。
+                val previewUrl = previewHolder.current
+                with(sharedScope) {
+                    AnimatedVisibility(
+                        visible = previewUrl != null,
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                    ) {
+                        CompositionLocalProvider(
+                            LocalAnimatedVisibilityScope provides this@AnimatedVisibility,
+                        ) {
+                            previewUrl?.let { url ->
+                                sharedScope.ImagePreviewOverlay(
+                                    url = url,
+                                    onDismiss = { previewHolder.request(null) },
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                        }
+                    }
+                }
+            } // outer Box
+        } // CompositionLocalProvider
+    } // SharedTransitionLayout
+}
+@Composable
+private fun rememberPreviewUrlHolder(): com.molagpt.app.feature.file.ImagePreviewUrlHolder {
+    var url by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+    BackHandler(enabled = url != null) { url = null }
+    return androidx.compose.runtime.remember(url) {
+        object : com.molagpt.app.feature.file.ImagePreviewUrlHolder {
+            override val current: String? get() = url
+            override fun request(value: String?) { url = value }
         }
     }
 }

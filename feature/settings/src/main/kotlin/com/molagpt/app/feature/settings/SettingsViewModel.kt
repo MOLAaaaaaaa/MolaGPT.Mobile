@@ -83,8 +83,6 @@ class SettingsViewModel(
     fun setReasoningEffort(v: String) = viewModelScope.launch { store.setReasoningEffort(v) }
     fun setTools(network: Boolean, steel: Boolean, code: Boolean) =
         viewModelScope.launch { store.setTools(network, steel, code) }
-    fun setByokTools(mcp: Boolean, vision: Boolean, image: Boolean) =
-        viewModelScope.launch { store.setByokTools(mcp, vision, image) }
 
     /** 清空一次性状态文案（新页面 Snackbar 消费后调用，避免重复弹出）。 */
     fun clearByokStatus() { _byokStatus.value = null }

@@ -2,6 +2,7 @@ package com.molagpt.app.feature.chat
 
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -107,9 +109,21 @@ fun MessageList(
                     is MessageListRow.User -> MessageBubble(message = row.message, modifier = rowModifier)
                     is MessageListRow.Pending -> AssistantPendingText(row.text, rowModifier)
                     is MessageListRow.Fragment -> FragmentRenderer(fragment = row.fragment, modifier = rowModifier)
-                    is MessageListRow.MarkdownBlock -> when (val block = row.block) {
-                        is MdBlock.Mermaid -> MermaidWebView(block.source, rowModifier)
-                        else -> MarkdownBlockView(block = block, modifier = rowModifier)
+                    is MessageListRow.AssistantText -> SelectionContainer(modifier = rowModifier) {
+                        Column {
+                            row.blocks.forEach { block ->
+                                when (block) {
+                                    is MdBlock.Mermaid -> MermaidWebView(
+                                        block.source,
+                                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    )
+                                    else -> MarkdownBlockView(
+                                        block = block,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                            }
+                        }
                     }
                     is MessageListRow.StreamingPlaceholder -> AssistantStreamingPlaceholder(rowModifier)
                     is MessageListRow.Actions -> MessageActionBar(
@@ -179,15 +193,15 @@ private sealed interface MessageListRow {
         override val contentType = fragment::class.simpleName ?: "fragment"
     }
 
-    data class MarkdownBlock(
+    /** 助手正文：单个 Text fragment 解析出的全部 markdown block，合并渲染以支持跨段选择。 */
+    data class AssistantText(
         val messageId: String,
         val fragmentId: String,
-        val blockIndex: Int,
-        val block: MdBlock,
+        val blocks: List<MdBlock>,
         override val topPaddingDp: Int,
     ) : MessageListRow {
-        override val key = "$messageId:markdown:$fragmentId:$blockIndex"
-        override val contentType = block::class.simpleName ?: "markdown"
+        override val key = "$messageId:text:$fragmentId"
+        override val contentType = "assistant-text"
     }
 
     data class StreamingPlaceholder(
@@ -260,16 +274,17 @@ private fun List<ChatMessage>.toMessageRows(
 
         message.fragments.forEach { fragment ->
             if (parseMarkdown && fragment is MessageFragment.Text) {
-                RenderCache.blocks(fragment.markdown).forEachIndexed { index, block ->
-                    addMessageRow { top ->
-                        MessageListRow.MarkdownBlock(
-                            messageId = message.messageId,
-                            fragmentId = fragment.id,
-                            blockIndex = index,
-                            block = block,
-                            topPaddingDp = top,
-                        )
-                    }
+                // 正文 markdown 的所有 block 合并进单个 row，外层套 SelectionContainer：
+                // 这样跨段落可连选（长按拖拽 → 系统复制 toolbar）。拆成多行（每 block 一个 LazyColumn
+                // item）会让 SelectionContainer 止于单 block，无法跨段选择。
+                val blocks = RenderCache.blocks(fragment.markdown)
+                addMessageRow { top ->
+                    MessageListRow.AssistantText(
+                        messageId = message.messageId,
+                        fragmentId = fragment.id,
+                        blocks = blocks,
+                        topPaddingDp = top,
+                    )
                 }
             } else {
                 addMessageRow { top -> MessageListRow.Fragment(message.messageId, fragment, top) }

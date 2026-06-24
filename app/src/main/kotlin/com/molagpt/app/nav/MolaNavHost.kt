@@ -35,6 +35,7 @@ import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.storage.AppSettings
+import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.feature.auth.AuthViewModel
 import com.molagpt.app.feature.auth.LoginScreen
 import com.molagpt.app.feature.chat.ChatScreen
@@ -393,7 +394,7 @@ private fun ChatHost(
                     onNewChatWithModel = { modelId, providerId, kind ->
                         scope.launch {
                             val conversation = container.sessionRepository.create(
-                                title = "新对话",
+                                title = SessionRepository.DEFAULT_TITLE,
                                 model = modelId,
                                 providerId = providerId,
                                 providerKind = kind,
@@ -401,6 +402,11 @@ private fun ChatHost(
                             currentSessionId = conversation.sessionId
                         }
                     },
+                    onNewChat = {
+                        currentSessionId = Ids.newSessionId()
+                        drawerOpen = false
+                    },
+                    drawerOpen = drawerOpen,
                     // 侧边栏推入时，聊天页保留轻微右移视差。
                     modifier = Modifier
                         .fillMaxSize()

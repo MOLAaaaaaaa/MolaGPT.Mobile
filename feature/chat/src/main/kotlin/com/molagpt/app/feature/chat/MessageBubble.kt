@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -54,11 +55,13 @@ fun MessageBubble(message: ChatMessage, modifier: Modifier = Modifier) {
             }
             val text = message.rawText.orEmpty()
             if (text.isNotBlank()) {
-                Text(
-                    text = text,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    style = MaterialTheme.typography.bodyLarge,
-                )
+                SelectionContainer {
+                    Text(
+                        text = text,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
             }
         }
     }

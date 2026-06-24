@@ -28,8 +28,6 @@ data class ChatUiState(
     val providerKind: ProviderKind = ProviderKind.MOLAGPT,
     val hasMolaGptModels: Boolean = false,
     val hasByokModels: Boolean = false,
-    /** 是否配置了已启用的 MCP 服务器（用于门控对话内 MCP 工具开关）。 */
-    val hasMcpServers: Boolean = false,
     val isModelRefreshing: Boolean = false,
     val isStreaming: Boolean = false,
     val inputEnabled: Boolean = true,

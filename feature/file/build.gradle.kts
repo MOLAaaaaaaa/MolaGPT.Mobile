@@ -30,5 +30,7 @@ dependencies {
     implementation(libs.bundles.compose)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
+    implementation(libs.telephoto.zoomable.image.coil)
+    implementation(libs.androidx.core.ktx)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

@@ -104,25 +104,30 @@ class ChatViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val providerState = combine(
-        _conversationProviderId, _conversationProviderKind, hasMcpServersFlow,
-    ) { providerId, providerKind, hasMcp -> ConversationProviderState(providerId, providerKind, hasMcp) }
+        _conversationProviderId, _conversationProviderKind,
+    ) { providerId, providerKind -> ConversationProviderState(providerId, providerKind) }
 
     /** 当前会话标题（随重命名实时刷新）；空/缺省回退「新对话」。 */
     private val conversationTitleFlow: StateFlow<String> = sessionRepository.observe(sessionId)
         .map { it?.title?.takeIf { t -> t.isNotBlank() } ?: "新对话" }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "新对话")
 
-    private val uiMeta = combine(
-        controls, _pendingAttachments, modelRefreshingFlow, _loadingHistory, providerState, conversationTitleFlow,
-    ) { values ->
-        @Suppress("UNCHECKED_CAST")
-        val controls = values[0] as ChatControlState
-        val pending = values[1] as List<FileInfo>
-        val refreshing = values[2] as Boolean
-        val loadingHistory = values[3] as Boolean
-        val provider = values[4] as ConversationProviderState
-        val title = values[5] as String
-        ChatUiMeta(controls, pending, refreshing, loadingHistory, provider.providerId, provider.providerKind, provider.hasMcpServers, title)
+    private val uiMetaCore = combine(
+        controls, modelRefreshingFlow, _loadingHistory, providerState, conversationTitleFlow,
+    ) { controls, refreshing, loadingHistory, provider, title ->
+        ChatUiMetaCore(controls, refreshing, loadingHistory, provider.providerId, provider.providerKind, title)
+    }
+
+    private val uiMeta = combine(uiMetaCore, _pendingAttachments) { meta, pending ->
+        ChatUiMeta(
+            controls = meta.controls,
+            pendingAttachments = pending,
+            isModelRefreshing = meta.isModelRefreshing,
+            isLoadingHistory = meta.isLoadingHistory,
+            providerId = meta.providerId,
+            providerKind = meta.providerKind,
+            title = meta.title,
+        )
     }
 
     val uiState: StateFlow<ChatUiState> = combine(
@@ -152,7 +157,6 @@ class ChatViewModel(
             providerKind = meta.providerKind,
             hasMolaGptModels = models.any { it.providerKind == ProviderKind.MOLAGPT && it.supportsChat },
             hasByokModels = models.any { it.providerKind == ProviderKind.BYOK && it.supportsChat },
-            hasMcpServers = meta.hasMcpServers,
             isModelRefreshing = meta.isModelRefreshing,
             isStreaming = streamState.isStreaming,
             inputEnabled = !streamState.isStreaming,
@@ -166,32 +170,32 @@ class ChatViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ChatUiState(sessionId))
 
-    /** 把全量模型按阵营→提供商分组：MolaGPT 一组在前，每个 BYOK provider 各一组。 */
+    /** 把全量模型按阵营→提供商分组：若用户已配置 BYOK，则 BYOK 各提供商置顶，MolaGPT 随后；否则仅显示 MolaGPT。 */
     private fun buildModelGroups(models: List<ProviderModel>): List<ModelGroup> {
         val chatModels = models.filter { it.supportsChat }
         val groups = mutableListOf<ModelGroup>()
-        chatModels.filter { it.providerKind == ProviderKind.MOLAGPT }
-            .takeIf { it.isNotEmpty() }
-            ?.let { groups.add(ModelGroup(ProviderKind.MOLAGPT, null, "MolaGPT", it)) }
-        chatModels.filter { it.providerKind == ProviderKind.BYOK }
+        val byokGroups = chatModels.filter { it.providerKind == ProviderKind.BYOK }
             .groupBy { it.providerId }
-            .forEach { (providerId, list) ->
-                groups.add(
-                    ModelGroup(
-                        kind = ProviderKind.BYOK,
-                        providerId = providerId,
-                        title = "自定义 API · ${list.firstOrNull()?.providerName ?: providerId}",
-                        models = list,
-                    ),
+            .map { (providerId, list) ->
+                ModelGroup(
+                    kind = ProviderKind.BYOK,
+                    providerId = providerId,
+                    title = "自定义 API · ${list.firstOrNull()?.providerName ?: providerId}",
+                    models = list,
                 )
             }
+        val molaGroup = chatModels.filter { it.providerKind == ProviderKind.MOLAGPT }
+            .takeIf { it.isNotEmpty() }
+            ?.let { ModelGroup(ProviderKind.MOLAGPT, null, "MolaGPT", it) }
+        groups.addAll(byokGroups)
+        molaGroup?.let { groups.add(it) }
         return groups
     }
 
     fun selectModel(modelId: String, providerId: String? = null) {
-        val visible = modelsFlow.value.filter { it.providerKind == _conversationProviderKind.value && it.supportsChat }
-        val selected = visible.firstOrNull { it.id == modelId && (providerId == null || it.providerId == providerId) }
-            ?: visible.firstOrNull { it.id == modelId }
+        val chatModels = modelsFlow.value.filter { it.supportsChat }
+        val selected = chatModels.firstOrNull { it.id == modelId && (providerId == null || it.providerId == providerId) }
+            ?: chatModels.firstOrNull { it.id == modelId }
             ?: return
         _selectedModel.value = selected.id
         _conversationProviderId.value = selected.providerId
@@ -249,18 +253,6 @@ class ChatViewModel(
 
     fun setCodeTool(enabled: Boolean) {
         _enabledTools.value = _enabledTools.value.copy(codeExecution = enabled)
-    }
-
-    fun setMcpTool(enabled: Boolean) {
-        _enabledTools.value = _enabledTools.value.copy(mcp = enabled)
-    }
-
-    fun setVisionTool(enabled: Boolean) {
-        _enabledTools.value = _enabledTools.value.copy(vision = enabled)
-    }
-
-    fun setImageGenerationTool(enabled: Boolean) {
-        _enabledTools.value = _enabledTools.value.copy(imageGeneration = enabled)
     }
 
     fun setUseThinking(enabled: Boolean) {
@@ -407,9 +399,9 @@ class ChatViewModel(
         if (selectedModel.providerKind == ProviderKind.BYOK &&
             hasImageAttachment &&
             selectedModel.supportsVision != true &&
-            !_enabledTools.value.vision
+            !settingsFlow.value.visionProxyEnabled
         ) {
-            _error.value = "当前 BYOK 模型不支持视觉输入，请开启「视觉」工具或切换到支持视觉的模型"
+            _error.value = "当前 BYOK 模型不支持视觉输入，请在「BYOK 工具」设置中开启外挂视觉，或切换到支持视觉的模型"
             return
         }
 
@@ -686,9 +678,9 @@ class ChatViewModel(
      * 杜绝「设置里开了但当前阵营/模型不支持」造成的静默失效。
      * - MolaGPT：清零 mcp/vision/imageGeneration（wire 层本就不传，避免脏状态）。
      * - BYOK：清零 codeExecution（无执行路径）；工具类需模型 supportsToolCalling；
-     *   vision 作为外挂视觉工具，只要模型支持工具调用即可启用，不依赖模型原生视觉能力；
-     *   imageGeneration 由独立的「图像用途」provider 提供（purpose=IMAGE），不依赖当前聊天模型，
-     *   只要模型支持工具调用即可在对话内调用 generate_image 工具；mcp 需已配置启用的服务器。
+     *   network/网页拉取沿用 composer 开关；mcp/vision/imageGeneration **已无 composer 开关**，
+     *   改由 BYOK 工具设置页实时驱动（visionProxyEnabled / imageGenEnabled / 已启用的 MCP 服务器），
+     *   实时读 [settingsFlow] 而非创建时的 [_enabledTools] 快照——避免对话存在期间去设置页开启后不生效。
      */
     private fun resolveRequestTools(providerModel: ProviderModel?): EnabledTools {
         val enabled = _enabledTools.value
@@ -696,13 +688,14 @@ class ChatViewModel(
             ProviderKind.MOLAGPT -> enabled.copy(mcp = false, vision = false, imageGeneration = false)
             ProviderKind.BYOK -> {
                 val canTool = providerModel?.supportsToolCalling == true
+                val settings = settingsFlow.value
                 enabled.copy(
                     codeExecution = false,
                     network = enabled.network && canTool,
                     steelBrowser = enabled.steelBrowser && canTool,
-                    mcp = enabled.mcp && canTool && hasMcpServersFlow.value,
-                    vision = enabled.vision && canTool,
-                    imageGeneration = enabled.imageGeneration && canTool,
+                    mcp = canTool && hasMcpServersFlow.value,
+                    vision = settings.visionProxyEnabled && canTool,
+                    imageGeneration = settings.imageGenEnabled && canTool,
                 )
             }
         }
@@ -795,6 +788,15 @@ private data class ChatControlState(
     val reasoningEffort: String,
 )
 
+private data class ChatUiMetaCore(
+    val controls: ChatControlState,
+    val isModelRefreshing: Boolean,
+    val isLoadingHistory: Boolean,
+    val providerId: String?,
+    val providerKind: ProviderKind,
+    val title: String,
+)
+
 private data class ChatUiMeta(
     val controls: ChatControlState,
     val pendingAttachments: List<FileInfo>,
@@ -802,12 +804,10 @@ private data class ChatUiMeta(
     val isLoadingHistory: Boolean,
     val providerId: String?,
     val providerKind: ProviderKind,
-    val hasMcpServers: Boolean,
     val title: String,
 )
 
 private data class ConversationProviderState(
     val providerId: String?,
     val providerKind: ProviderKind,
-    val hasMcpServers: Boolean,
 )

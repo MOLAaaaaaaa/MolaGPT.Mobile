@@ -32,19 +32,16 @@ data class AppSettings(
     val toolNetwork: Boolean = false,
     val toolSteel: Boolean = false,
     val toolCode: Boolean = true,
-    val byokToolMcp: Boolean = false,
-    val byokToolVision: Boolean = false,
-    val byokToolImage: Boolean = false,
     val byokMcpServers: List<ByokMcpServer> = emptyList(),
     /** 联网搜索服务商 id（duckduckgo/tavily/exa）；key 单独经 CredentialStore 加密存储。 */
     val webSearchProvider: String = "duckduckgo",
     /** 联网搜索结果数量上限（1..10）。 */
     val webSearchMaxResults: Int = 6,
-    /** 外挂视觉：当前模型不支持视觉时，代理到此视觉模型。总开关沿用 byokToolVision，下面是目标/参数。 */
+    /** 外挂视觉：当前模型不支持视觉时，代理到此视觉模型。 */
     val visionProxyEnabled: Boolean = false,
     /** 视觉代理目标 "<providerId>::<modelId>"。 */
     val visionProxyModelKey: String? = null,
-    /** 图像生成：支持工具调用的 BYOK 模型可调用此图像服务。总开关沿用 byokToolImage。 */
+    /** 图像生成：支持工具调用的 BYOK 模型可调用此图像服务。 */
     val imageGenEnabled: Boolean = false,
     /** 图像生成目标 "<providerId>::<modelId>"。 */
     val imageGenModelKey: String? = null,
@@ -87,9 +84,6 @@ class SettingsStore(private val context: Context) {
             toolNetwork = p[Keys.TOOL_NETWORK] ?: false,
             toolSteel = p[Keys.TOOL_STEEL] ?: false,
             toolCode = p[Keys.TOOL_CODE] ?: true,
-            byokToolMcp = p[Keys.BYOK_TOOL_MCP] ?: false,
-            byokToolVision = p[Keys.BYOK_TOOL_VISION] ?: false,
-            byokToolImage = p[Keys.BYOK_TOOL_IMAGE] ?: false,
             byokMcpServers = decodeMcpServers(p[Keys.BYOK_MCP_SERVERS]),
             webSearchProvider = p[Keys.WEB_SEARCH_PROVIDER] ?: "duckduckgo",
             webSearchMaxResults = (p[Keys.WEB_SEARCH_MAX_RESULTS] ?: 6L).toInt(),
@@ -123,11 +117,6 @@ class SettingsStore(private val context: Context) {
         it[Keys.TOOL_NETWORK] = network
         it[Keys.TOOL_STEEL] = steel
         it[Keys.TOOL_CODE] = code
-    }
-    suspend fun setByokTools(mcp: Boolean, vision: Boolean, image: Boolean) = edit {
-        it[Keys.BYOK_TOOL_MCP] = mcp
-        it[Keys.BYOK_TOOL_VISION] = vision
-        it[Keys.BYOK_TOOL_IMAGE] = image
     }
     suspend fun setByokMcpServers(servers: List<ByokMcpServer>) = edit {
         it[Keys.BYOK_MCP_SERVERS] = json.encodeToString(servers)
@@ -189,9 +178,6 @@ class SettingsStore(private val context: Context) {
         val TOOL_NETWORK = booleanPreferencesKey("tool_network")
         val TOOL_STEEL = booleanPreferencesKey("tool_steel")
         val TOOL_CODE = booleanPreferencesKey("tool_code")
-        val BYOK_TOOL_MCP = booleanPreferencesKey("byok_tool_mcp")
-        val BYOK_TOOL_VISION = booleanPreferencesKey("byok_tool_vision")
-        val BYOK_TOOL_IMAGE = booleanPreferencesKey("byok_tool_image")
         val BYOK_MCP_SERVERS = stringPreferencesKey("byok_mcp_servers")
         val WEB_SEARCH_PROVIDER = stringPreferencesKey("web_search_provider")
         val WEB_SEARCH_MAX_RESULTS = longPreferencesKey("web_search_max_results")
