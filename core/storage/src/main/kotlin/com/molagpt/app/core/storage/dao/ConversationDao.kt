@@ -43,6 +43,10 @@ interface ConversationDao {
     @Query("UPDATE conversations SET model = :model, providerId = :providerId, providerKind = :providerKind, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun updateModel(sessionId: String, model: String?, providerId: String?, providerKind: String, now: Long)
 
+    /** 绑定 / 切换会话角色（仅 BYOK）。 */
+    @Query("UPDATE conversations SET personaId = :personaId, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId")
+    suspend fun updatePersona(sessionId: String, personaId: String?, now: Long)
+
     @Query("UPDATE conversations SET pinned = :pinned, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun setPinned(sessionId: String, pinned: Boolean)
 

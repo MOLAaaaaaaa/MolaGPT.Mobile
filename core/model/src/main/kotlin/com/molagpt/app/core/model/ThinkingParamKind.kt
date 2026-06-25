@@ -5,8 +5,6 @@ import kotlinx.serialization.Serializable
 /**
  * 推理/思考参数的种类。不同模型家族的推理参数名、语义、取值完全不同，
  * 统一用 [reasoningEffort]（符号档位 low/medium/high）在 UI 层表达，由网络层按 [kind] 翻译成各家 API 参数。
- *
- * 调研来源：MolaGPT Desktop (ThinkingParamKind)、Cherry Studio (reasoning.ts)、RikkaHub (Reasoning/ChatCompletionsAPI)。
  */
 @Serializable
 enum class ThinkingParamKind {
@@ -49,7 +47,7 @@ data class ThinkingConfig(
 
 /** 推理参数推断与档位映射。 */
 object ThinkingKinds {
-    /** RikkaHub 风格的统一符号档位。 */
+    /** UI 层使用的统一符号档位。 */
     const val LOW = "low"
     const val MEDIUM = "medium"
     const val HIGH = "high"
@@ -94,7 +92,7 @@ object ThinkingKinds {
         if (lower.contains("qwen3") || lower.contains("qwq")) return ThinkingParamKind.QWEN_THINKING_BUDGET
         // Gemini
         if (lower.contains("gemini")) return ThinkingParamKind.GEMINI
-        // 其余推理模型 → 标准 reasoning_effort（与 looksLikeByokReasoningModel 对齐）。
+        // 其余推理模型 → 标准 reasoning_effort（与 looksLikeByokReasoningModel 保持一致）。
         if (leaf.startsWith("o1") || leaf.startsWith("o3") || leaf.startsWith("o4") ||
             leaf.startsWith("gpt-5") || lower.contains("gpt-oss") ||
             lower.contains("reasoning") || lower.contains("reasoner") ||

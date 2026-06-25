@@ -38,6 +38,7 @@ class SessionRepository(
         model: String? = null,
         providerId: String? = ProviderIds.MOLAGPT,
         providerKind: ProviderKind = ProviderKind.MOLAGPT,
+        personaId: String? = null,
     ): Conversation =
         withContext(dispatchers.io) {
             val now = System.currentTimeMillis()
@@ -49,6 +50,7 @@ class SessionRepository(
                 providerKind = providerKind,
                 createdAt = now,
                 updatedAt = now,
+                personaId = personaId,
             )
             conversationDao.upsert(c.toEntity())
             c
@@ -61,6 +63,7 @@ class SessionRepository(
         model: String?,
         providerId: String? = ProviderIds.MOLAGPT,
         providerKind: ProviderKind = ProviderKind.MOLAGPT,
+        personaId: String? = null,
     ) = withContext(dispatchers.io) {
         val existing = conversationDao.getById(sessionId)
         if (existing == null) {
@@ -74,12 +77,18 @@ class SessionRepository(
                     providerKind = providerKind,
                     createdAt = now,
                     updatedAt = now,
+                    personaId = personaId,
                 ).toEntity(),
             )
-        } else if (existing.title == DEFAULT_TITLE && title != DEFAULT_TITLE) {
-            // 会话已被预创建为占位标题（如跨阵营切换进入 BYOK），首条消息发送时把占位标题换成消息内容，
-            // 使顶栏在流式回复期间即显示临时标题，与 MolaGPT 默认入口的懒创建行为一致。
-            conversationDao.rename(sessionId, title, System.currentTimeMillis())
+        } else {
+            if (existing.title == DEFAULT_TITLE && title != DEFAULT_TITLE) {
+                // 会话已被预创建为占位标题（如跨阵营切换进入 BYOK），首条消息发送时把占位标题换成消息内容，
+                // 使顶栏在流式回复期间即显示临时标题，与 MolaGPT 默认入口的懒创建行为一致。
+                conversationDao.rename(sessionId, title, System.currentTimeMillis())
+            }
+            if (providerKind == ProviderKind.BYOK && personaId != null && existing.personaId != personaId) {
+                conversationDao.updatePersona(sessionId, personaId, System.currentTimeMillis())
+            }
         }
     }
 
@@ -101,6 +110,12 @@ class SessionRepository(
     ) = withContext(dispatchers.io) {
         conversationDao.updateModel(sessionId, model, providerId, providerKind.name, System.currentTimeMillis())
     }
+
+    /** 绑定 / 切换会话角色（仅 BYOK 会话调用）。 */
+    suspend fun updatePersona(sessionId: String, personaId: String?) =
+        withContext(dispatchers.io) {
+            conversationDao.updatePersona(sessionId, personaId, System.currentTimeMillis())
+        }
 
     suspend fun setPinned(sessionId: String, pinned: Boolean) =
         withContext(dispatchers.io) { conversationDao.setPinned(sessionId, pinned) }

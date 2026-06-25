@@ -47,6 +47,9 @@ import com.molagpt.app.feature.settings.ByokProvidersScreen
 import com.molagpt.app.feature.settings.ByokToolsScreen
 import com.molagpt.app.feature.settings.ImageWorkbenchScreen
 import com.molagpt.app.feature.settings.McpServerDetailScreen
+import com.molagpt.app.feature.settings.PersonaEditScreen
+import com.molagpt.app.feature.settings.PersonaManagementScreen
+import com.molagpt.app.feature.settings.PersonaViewScreen
 import com.molagpt.app.feature.settings.PersonalizationScreen
 import com.molagpt.app.feature.settings.PersonalizationViewModel
 import com.molagpt.app.feature.settings.SettingsScreen
@@ -65,6 +68,9 @@ private object Routes {
     const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
     const val BYOK_TOOLS = "byok_tools"
     const val MCP_SERVER_DETAIL = "mcp_server_detail"
+    const val PERSONA_MANAGEMENT = "persona_management"
+    const val PERSONA_VIEW = "persona_view"
+    const val PERSONA_EDIT = "persona_edit"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -127,6 +133,11 @@ fun MolaNavHost(
                         }
                     }
                 },
+                onOpenPersonaManagement = {
+                    if (navController.currentDestination?.route != Routes.PERSONA_MANAGEMENT) {
+                        navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
+                    }
+                },
                 onAuthExpired = {
                     // 游客模式无「登录过期」概念；短 token 失败已由聊天错误条提示，不强制跳登录。
                 },
@@ -180,6 +191,11 @@ fun MolaNavHost(
                 onOpenByokTools = {
                     if (navController.currentDestination?.route != Routes.BYOK_TOOLS) {
                         navController.navigate(Routes.BYOK_TOOLS) { launchSingleTop = true }
+                    }
+                },
+                onOpenPersonaManagement = {
+                    if (navController.currentDestination?.route != Routes.PERSONA_MANAGEMENT) {
+                        navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
                     }
                 },
                 buildLabel = "MolaGPT v${com.molagpt.app.BuildConfig.VERSION_NAME} · 构建 ${com.molagpt.app.BuildConfig.BUILD_TIME}",
@@ -311,6 +327,69 @@ fun MolaNavHost(
                 modifier = Modifier.fillMaxSize(),
             )
         }
+
+        composable(Routes.PERSONA_MANAGEMENT) {
+            PersonaManagementScreen(
+                repository = container.personaRepository,
+                onOpenView = { id ->
+                    navController.navigate("${Routes.PERSONA_VIEW}/$id") { launchSingleTop = true }
+                },
+                onOpenEdit = { id ->
+                    navController.navigate("${Routes.PERSONA_EDIT}?personaId=$id") { launchSingleTop = true }
+                },
+                onNewPersona = {
+                    navController.navigate(Routes.PERSONA_EDIT) { launchSingleTop = true }
+                },
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.PERSONA_MANAGEMENT) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(
+            route = "${Routes.PERSONA_VIEW}/{id}",
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) { backStackEntry ->
+            PersonaViewScreen(
+                repository = container.personaRepository,
+                personaId = backStackEntry.arguments?.getString("id").orEmpty(),
+                onBack = { navController.popBackStack() },
+                onDuplicate = {
+                    val id = backStackEntry.arguments?.getString("id").orEmpty()
+                    // 复制后进入编辑页，并把查看页弹出栈：返回直接回列表，符合「复制即编辑」语义。
+                    navController.navigate("${Routes.PERSONA_EDIT}?copyFromId=$id") {
+                        popUpTo("${Routes.PERSONA_VIEW}/{id}") { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(
+            route = "${Routes.PERSONA_EDIT}?personaId={personaId}&copyFromId={copyFromId}",
+            arguments = listOf(
+                navArgument("personaId") { type = NavType.StringType; nullable = true; defaultValue = null },
+                navArgument("copyFromId") { type = NavType.StringType; nullable = true; defaultValue = null },
+            ),
+        ) { backStackEntry ->
+            PersonaEditScreen(
+                repository = container.personaRepository,
+                personaId = backStackEntry.arguments?.getString("personaId"),
+                copyFromId = backStackEntry.arguments?.getString("copyFromId"),
+                onClose = {
+                    if (!navController.popBackStack()) {
+                        navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
     }
 }
 
@@ -319,6 +398,7 @@ fun MolaNavHost(
 private fun ChatHost(
     settings: AppSettings,
     onOpenSettings: () -> Unit,
+    onOpenPersonaManagement: () -> Unit,
     onAuthExpired: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -390,14 +470,16 @@ private fun ChatHost(
                     enterToSend = settings.enterToSend,
                     onOpenDrawer = { drawerOpen = true },
                     onOpenSettings = onOpenSettings,
+                    onOpenPersonaManagement = onOpenPersonaManagement,
                     onAuthExpired = onAuthExpired,
-                    onNewChatWithModel = { modelId, providerId, kind ->
+                    onNewChatWithModel = { modelId, providerId, kind, personaId ->
                         scope.launch {
                             val conversation = container.sessionRepository.create(
                                 title = SessionRepository.DEFAULT_TITLE,
                                 model = modelId,
                                 providerId = providerId,
                                 providerKind = kind,
+                                personaId = personaId,
                             )
                             currentSessionId = conversation.sessionId
                         }

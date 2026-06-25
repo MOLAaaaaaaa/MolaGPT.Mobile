@@ -36,7 +36,7 @@ import java.util.TimeZone
  * 每条 `{id:"chat_…", title, time(ISO), updated_at(ISO), model}`。
  *
  * 服务端 content 是 Markdown/HTML 混合串；拉到 Android 时需要把 `<think>`、
- * tool-status/DSanalysis、`<ref>` 与 meta.sources/meta.retry 尽量还原成原生 fragments。
+ * tool-status、分析标签、`<ref>` 与 meta.sources/meta.retry 尽量还原成原生 fragments。
  */
 object SyncMapper {
     const val EPOCH_ISO = "1970-01-01T00:00:00.000Z"

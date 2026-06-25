@@ -37,7 +37,7 @@ class ByokModelApi(private val http: MolaHttp) {
 
     /**
      * 按 purpose 分流解析：image 用途只取图像模型，chat 用途只取聊天模型。
-     * 对齐桌面端 FetchModelListAsync 的 purpose 分流做法。
+     * 与桌面端模型列表的 purpose 分流语义保持一致。
      */
     internal fun parseByokModels(root: JsonObject, provider: ByokProvider): List<ProviderModel> {
         if (provider.purpose == ByokPurpose.IMAGE) return parseImageModels(root, provider)
@@ -258,7 +258,7 @@ internal fun looksLikeByokImageModel(id: String): Boolean {
 }
 
 /**
- * 推理/思考模型启发式判定。借鉴 Cherry Studio 的 REASONING_REGEX + 厂商标识：
+ * 推理/思考模型启发式判定。按常见模型命名规则与厂商标识识别：
  *  - o 系列推理模型（o1/o3/o4，排除 o1-preview/o1-mini 仍按推理）
  *  - 含 reasoning/reasoner/thinking/think 的 id
  *  - "-R\d" 后缀（如 -r1）
@@ -275,7 +275,7 @@ internal fun looksLikeByokReasoningModel(id: String): Boolean {
     if (lower.contains("-non-reasoning")) return false
     val leaf = lower.substringAfterLast('/')
 
-    // DeepSeek 混合推理：deepseek-v3.2（含 .x 子版本）、deepseek-v4+、deepseek-chat、reasoner、r1。
+    // DeepSeek 系列推理模型：v3.2（含 .x 子版本）、v4+、chat、reasoner、r1。
     if (Regex("(\\w+-)?deepseek-v(?:3(?:\\.\\d|\\d)|[4-9]\\d*|[1-9]\\d{1,})(?:[.-]\\w+)*").containsMatchIn(lower) ||
         lower.contains("deepseek-chat") || lower.contains("deepseek-reasoner") ||
         lower.contains("deepseek-r1")) return true

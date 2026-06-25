@@ -6,7 +6,7 @@ import kotlinx.serialization.json.Json
 
 /**
  * 重试版本的编解码 + metadata 键。版本（含多态 fragments）序列化成字符串塞进消息 metadata，
- * 零 Room 迁移。用同款 `classDiscriminator="type"` 以复用 MessageFragment 的 sealed 多态。
+ * 零 Room 迁移。使用相同 `classDiscriminator="type"` 以复用 MessageFragment 的 sealed 多态。
  */
 object RetryAttempts {
     const val KEY_ATTEMPTS = "retryAttempts"

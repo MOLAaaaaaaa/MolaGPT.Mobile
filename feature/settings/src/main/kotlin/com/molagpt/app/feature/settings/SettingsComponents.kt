@@ -122,7 +122,7 @@ internal fun SelectPill(
     }
 }
 
-internal enum class TracksIconKind { Sparkles, Info }
+internal enum class TracksIconKind { Sparkles, Info, Persona }
 
 /** Canvas 绘制的 30dp 主色调圆角图标块。用于设置/BYOK 入口卡片的前导图标。 */
 @Composable
@@ -152,6 +152,18 @@ internal fun TracksRowIcon(kind: TracksIconKind) {
                     drawCircle(tint, radius = size.minDimension * 0.42f, center = center, style = Stroke(stroke))
                     drawCircle(tint, radius = size.minDimension * 0.045f, center = Offset(center.x, size.height * 0.31f))
                     drawLine(tint, Offset(center.x, size.height * 0.45f), Offset(center.x, size.height * 0.70f), stroke)
+                }
+                TracksIconKind.Persona -> {
+                    drawCircle(tint, radius = size.minDimension * 0.16f, center = Offset(center.x, size.height * 0.30f), style = Stroke(stroke))
+                    drawArc(
+                        tint,
+                        startAngle = 180f,
+                        sweepAngle = 180f,
+                        useCenter = false,
+                        topLeft = Offset(size.width * 0.12f, size.height * 0.48f),
+                        size = androidx.compose.ui.geometry.Size(size.width * 0.76f, size.height * 0.50f),
+                        style = Stroke(stroke),
+                    )
                 }
             }
         }

@@ -36,6 +36,7 @@ import com.molagpt.app.core.storage.ByokProviderRepository
 import com.molagpt.app.core.storage.ChatRepository
 import com.molagpt.app.core.storage.CredentialStore
 import com.molagpt.app.core.storage.MolaDatabase
+import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.core.storage.SettingsStore
 import com.molagpt.app.core.storage.SyncEngine
@@ -91,6 +92,10 @@ class AppContainer(
     val byokProviderRepository = ByokProviderRepository(
         dao = database.byokProviderDao(),
         credentialStore = credentialStore,
+        dispatchers = dispatchers,
+    )
+    val personaRepository = PersonaRepository(
+        personaDao = database.personaDao(),
         dispatchers = dispatchers,
     )
 
@@ -312,6 +317,7 @@ class AppContainer(
             latestSettings = runCatching { settingsStore.settings.first() }.getOrDefault(AppSettings())
             runCatching { modelApi.refresh() }
             reconcileStreamTasks()
+            runCatching { personaRepository.ensureSeeded() }
             if (authService.isLoggedIn && latestSettings.cloudSyncEnabled) {
                 runCatching { syncEngine.syncNow() }
             }

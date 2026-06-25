@@ -59,6 +59,7 @@ object ViewModelFactories {
             chatRepository = container.chatRepository,
             backgroundStreams = container.backgroundStreamManager,
             sessionRepository = container.sessionRepository,
+            personaRepository = container.personaRepository,
             syncEngine = container.syncEngine,
             dispatchers = container.dispatchers,
             modelsFlow = container.modelRegistry.models,

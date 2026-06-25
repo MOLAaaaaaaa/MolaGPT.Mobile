@@ -1,11 +1,14 @@
 package com.molagpt.app.core.storage
 
+import com.molagpt.app.core.model.Attachment
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ByokImageFormat
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.model.FileInfo
+import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
@@ -34,24 +37,53 @@ internal fun MessageEntity.toDomain(): ChatMessage {
     )
 }
 
-internal fun ChatMessage.toEntity(): MessageEntity = MessageEntity(
-    messageId = messageId,
-    sessionId = sessionId,
-    role = role.name,
-    status = status.name,
-    createdAt = createdAt,
-    updatedAt = updatedAt,
-    fragmentsJson = MessageJson.encodeFragments(fragments),
-    rawText = rawText,
-    model = model,
-    metadataJson = MessageJson.encodeMeta(
-        if (attachments.isEmpty()) {
-            metadata
-        } else {
-            metadata + ("attachments" to MessageJson.encodeAttachments(attachments))
-        },
-    ),
-)
+internal fun ChatMessage.toEntity(): MessageEntity {
+    val storedFragments = fragments.map { it.stripInlineDataForStorage() }
+    val storedAttachments = attachments.map { it.stripInlineDataForStorage() }
+    return MessageEntity(
+        messageId = messageId,
+        sessionId = sessionId,
+        role = role.name,
+        status = status.name,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+        fragmentsJson = MessageJson.encodeFragments(storedFragments),
+        rawText = rawText?.take(MAX_STORED_TEXT_CHARS),
+        model = model,
+        metadataJson = MessageJson.encodeMeta(
+            if (storedAttachments.isEmpty()) {
+                metadata
+            } else {
+                metadata + ("attachments" to MessageJson.encodeAttachments(storedAttachments))
+            },
+        ),
+    )
+}
+
+private const val MAX_STORED_TEXT_CHARS = 200_000
+
+private fun MessageFragment.stripInlineDataForStorage(): MessageFragment =
+    when (this) {
+        is MessageFragment.FileCard -> copy(file = file.stripInlineDataForStorage())
+        is MessageFragment.Image -> copy(url = url.stripInlineDataUrl() ?: "")
+        else -> this
+    }
+
+private fun FileInfo.stripInlineDataForStorage(): FileInfo =
+    copy(url = url.stripInlineDataUrl())
+
+private fun Attachment.stripInlineDataForStorage(): Attachment =
+    copy(
+        remoteUrl = remoteUrl.stripInlineDataUrl(),
+        thumbnailUrl = thumbnailUrl.stripInlineDataUrl(),
+    )
+
+private fun String?.stripInlineDataUrl(): String? =
+    when {
+        this == null -> null
+        startsWith("data:", ignoreCase = true) && contains(";base64", ignoreCase = true) -> null
+        else -> this
+    }
 
 internal fun ConversationEntity.toDomain(): Conversation = Conversation(
     sessionId = sessionId,
@@ -64,6 +96,9 @@ internal fun ConversationEntity.toDomain(): Conversation = Conversation(
     pinned = pinned,
     favorite = favorite,
     lastMessagePreview = lastMessagePreview,
+    personaId = personaId,
+    systemPrompt = systemPrompt,
+    systemPromptMode = systemPromptMode,
 )
 
 internal fun Conversation.toEntity(): ConversationEntity = ConversationEntity(
@@ -83,6 +118,9 @@ internal fun Conversation.toEntity(): ConversationEntity = ConversationEntity(
     dirty = true,
     deletedAt = null,
     placeholder = false,
+    personaId = personaId,
+    systemPrompt = systemPrompt,
+    systemPromptMode = systemPromptMode,
 )
 
 internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvider {

@@ -2,12 +2,9 @@ package com.molagpt.app.feature.settings
 
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -53,7 +50,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
@@ -61,11 +57,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.molagpt.app.core.render.MolaLogo
 import kotlinx.coroutines.launch
 
 private const val GitHubUrl = "https://github.com/MOLAaaaaaaa/MolaGPT.Mobile"
@@ -181,7 +177,7 @@ private fun ProductHeader(versionName: String, buildTime: String) {
         modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        AppLogo()
+        MolaLogo()
         Text(
             text = "MolaGPT Android",
             style = MaterialTheme.typography.headlineSmall,
@@ -201,28 +197,6 @@ private fun ProductHeader(versionName: String, buildTime: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 16.dp),
             textAlign = TextAlign.Center,
-        )
-    }
-}
-
-@Composable
-private fun AppLogo() {
-    val primary = MaterialTheme.colorScheme.primary
-    Box(
-        modifier = Modifier
-            .size(88.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .background(primary.copy(alpha = 0.13f))
-            .border(1.dp, primary.copy(alpha = 0.18f), RoundedCornerShape(22.dp)),
-        contentAlignment = Alignment.Center,
-    ) {
-        // 启动图标前景自带自适应图标安全边距（鱼实际只占画布约一半），放大以铺满方块
-        Image(
-            painter = painterResource(R.drawable.molagpt_logo),
-            contentDescription = null,
-            modifier = Modifier
-                .size(88.dp)
-                .scale(1.3f),
         )
     }
 }

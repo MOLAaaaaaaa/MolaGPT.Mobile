@@ -138,7 +138,9 @@ class StreamParser(private val json: Json) {
         val deltaText = root["delta"]?.prim()?.contentOrNull
         return when (eventType) {
             "response.output_text.delta", "response.refusal.delta" -> deltaText
-            "response.output_text.done" -> root["text"]?.prim()?.contentOrNull
+            // output_text.done 的 text 是完整累积文本；增量 delta 已覆盖全部内容，
+            // 再取全量会导致 AppendText 把全文再拼一次 → 重复渲染。
+            "response.output_text.done" -> null
             else -> null
         }
     }

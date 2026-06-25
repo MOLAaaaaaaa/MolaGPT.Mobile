@@ -16,11 +16,15 @@ import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderIds
 import com.molagpt.app.core.model.ProviderKind
+import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.model.PromptVariables
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
+import com.molagpt.app.core.model.SystemPromptComposer
 import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.core.storage.ChatRepository
+import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.RetryAttempts
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.core.storage.SyncEngine
@@ -48,6 +52,7 @@ class ChatViewModel(
     private val chatRepository: ChatRepository,
     private val backgroundStreams: BackgroundStreamManager,
     private val sessionRepository: SessionRepository,
+    private val personaRepository: PersonaRepository,
     private val syncEngine: SyncEngine,
     private val dispatchers: DispatcherProvider,
     private val modelsFlow: StateFlow<List<ProviderModel>>,
@@ -67,6 +72,9 @@ class ChatViewModel(
     private val _selectedModel = MutableStateFlow(defaultModelId)
     private val _conversationProviderId = MutableStateFlow<String?>(ProviderIds.MOLAGPT)
     private val _conversationProviderKind = MutableStateFlow(ProviderKind.MOLAGPT)
+    private val _conversationPersonaId = MutableStateFlow<String?>(null)
+    private val _conversationSystemPrompt = MutableStateFlow<String?>(null)
+    private val _conversationSystemPromptMode = MutableStateFlow<String?>(null)
     private val _error = MutableStateFlow<String?>(null)
     private val _authExpired = MutableStateFlow(false)
     private val _enabledTools = MutableStateFlow(tools)
@@ -106,6 +114,25 @@ class ChatViewModel(
     private val providerState = combine(
         _conversationProviderId, _conversationProviderKind,
     ) { providerId, providerKind -> ConversationProviderState(providerId, providerKind) }
+
+    /** 应用级角色列表（包含内置 + 用户自定义），供选择器展示。 */
+    val personas: StateFlow<List<Persona>> = personaRepository
+        .observeAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 当前会话绑定的角色（仅 BYOK 生效）。personaId 为空时回退内置「通用助手」；随角色编辑/删除自动刷新。 */
+    val activePersona: StateFlow<Persona?> = combine(
+        _conversationPersonaId, personas,
+    ) { id, all ->
+        val target = id ?: Persona.BUILTIN_DEFAULT_ID
+        all.firstOrNull { it.id == target } ?: all.firstOrNull { it.id == Persona.BUILTIN_DEFAULT_ID }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** 切换当前会话角色：更新内存态并写本地会话 personaId（仅 BYOK 会话使用）。 */
+    fun selectPersona(personaId: String?) {
+        _conversationPersonaId.value = personaId
+        viewModelScope.launch { sessionRepository.updatePersona(sessionId, personaId) }
+    }
 
     /** 当前会话标题（随重命名实时刷新）；空/缺省回退「新对话」。 */
     private val conversationTitleFlow: StateFlow<String> = sessionRepository.observe(sessionId)
@@ -263,7 +290,7 @@ class ChatViewModel(
         _reasoningEffort.value = effort
     }
 
-    /** 选取附件后即时处理：MolaGPT 走上传，BYOK 留在本地并以内联 data URL 发送。 */
+    /** 选取附件后即时处理：MolaGPT 走上传，BYOK 只在发送前临时转 data URL，落库永远只存轻量 URI。 */
     fun attachFile(uri: Uri) {
         val tempId = Ids.newFragmentId()
         viewModelScope.launch {
@@ -297,12 +324,12 @@ class ChatViewModel(
                 )
             }
             if (isByokAttachment) {
-                val dataUrl = "data:$mime;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
                 _pendingAttachments.update { list ->
                     list.map {
                         if (it.id == tempId) {
                             it.copy(
-                                url = dataUrl,
+                                url = uri.toString(),
+                                localPath = uri.toString(),
                                 uploadStatus = UploadStatus.UPLOADED,
                             )
                         } else {
@@ -414,12 +441,13 @@ class ChatViewModel(
                 model = modelId,
                 providerId = selectedModel.providerId,
                 providerKind = selectedModel.providerKind,
+                personaId = _conversationPersonaId.value.takeIf { selectedModel.providerKind == ProviderKind.BYOK },
             )
             sessionRepository.updateModel(sessionId, modelId, selectedModel.providerId, selectedModel.providerKind)
             _conversationProviderId.value = selectedModel.providerId
             _conversationProviderKind.value = selectedModel.providerKind
             val now = System.currentTimeMillis()
-            val ready = _pendingAttachments.value
+            val storedReady = _pendingAttachments.value
                 .filter { it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank()) }
                 .map {
                     Attachment(
@@ -433,7 +461,12 @@ class ChatViewModel(
                         sizeBytes = it.sizeBytes,
                     )
                 }
-            val attachmentHint = buildAttachmentHint(ready, selectedModel.providerKind)
+            val requestReady = if (selectedModel.providerKind == ProviderKind.BYOK) {
+                withContext(dispatchers.io) { hydrateByokAttachments(storedReady) }
+            } else {
+                storedReady
+            }
+            val attachmentHint = buildAttachmentHint(requestReady, selectedModel.providerKind)
             val sendContent = attachmentHint?.let { appendHiddenSystemHint(content, it) } ?: content
             val messageMetadata = buildMap {
                 if (sendContent != content) {
@@ -454,7 +487,7 @@ class ChatViewModel(
                 } else {
                     listOf(com.molagpt.app.core.model.MessageFragment.Text(Ids.newFragmentId(), content))
                 },
-                attachments = ready,
+                attachments = storedReady,
                 metadata = messageMetadata,
             )
             chatRepository.persistUserMessage(userMsg)
@@ -462,7 +495,7 @@ class ChatViewModel(
             _pendingAttachments.value = emptyList()
             startStream(
                 modelId = modelId,
-                latestUserMessage = userMsg,
+                latestUserMessage = userMsg.copy(attachments = requestReady),
                 titleUserMessage = titleSeed.takeIf { shouldGenerateTitle },
             )
         }
@@ -541,6 +574,26 @@ class ChatViewModel(
 
     private fun isByokSupportedAttachmentMime(mimeType: String): Boolean =
         mimeType.startsWith("image/") || isTextLikeMime(mimeType) || isPdfMime(mimeType)
+
+    private fun hydrateByokAttachments(attachments: List<Attachment>): List<Attachment> =
+        attachments.map { attachment ->
+            val source = attachment.remoteUrl?.takeIf { it.isNotBlank() } ?: return@map attachment
+            if (source.startsWith("data:", ignoreCase = true) || source.startsWith("http", ignoreCase = true)) {
+                return@map attachment
+            }
+            val bytes = readUriBytes(source) ?: return@map attachment.copy(remoteUrl = null, thumbnailUrl = null)
+            val dataUrl = "data:${attachment.mimeType};base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+            attachment.copy(remoteUrl = dataUrl, thumbnailUrl = null)
+        }
+
+    private fun readUriBytes(value: String): ByteArray? = runCatching {
+        val uri = Uri.parse(value)
+        when (uri.scheme?.lowercase(Locale.US)) {
+            "content", "android.resource" -> appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            "file" -> java.io.File(requireNotNull(uri.path)).takeIf { it.exists() }?.readBytes()
+            else -> null
+        }
+    }.getOrNull()
 
     private fun Attachment.typeLabel(): String =
         when {
@@ -633,44 +686,97 @@ class ChatViewModel(
         titleUserMessage: String? = null,
         priorAttempts: List<RetryAttempt> = emptyList(),
     ) {
-        // 取代同会话上一条流由 backgroundStreams.start() 内部完成（取消旧 job + 停旧服务端流 + 落新任务记录）；
-        // 此处不再额外 stop()，否则其异步 removeStreamTask 会与 start 的 persistStreamTask 竞争、误删新任务。
-        // 拉历史 + 刚落库的用户消息作为上下文。
-        val historySnapshot = uiState.value.messages.filter { it.role != Role.SYSTEM }
-        val history = if (latestUserMessage == null) {
-            historySnapshot
-        } else {
-            historySnapshot.filterNot { it.messageId == latestUserMessage.messageId } + latestUserMessage
+        viewModelScope.launch {
+            // 取代同会话上一条流由 backgroundStreams.start() 内部完成（取消旧 job + 停旧服务端流 + 落新任务记录）；
+            // 此处不再额外 stop()，否则其异步 removeStreamTask 会与 start 的 persistStreamTask 竞争、误删新任务。
+            // 拉历史 + 刚落库的用户消息作为上下文。
+            val historySnapshot = uiState.value.messages.filter { it.role != Role.SYSTEM }
+            val history = if (latestUserMessage == null) {
+                historySnapshot
+            } else {
+                historySnapshot.filterNot { it.messageId == latestUserMessage.messageId } + latestUserMessage
+            }
+            val assistantId = Ids.newMessageId()
+            val streamSessionId = Ids.newSessionId()
+            val providerModel = modelsFlow.value.firstOrNull {
+                it.id == modelId &&
+                    it.providerKind == _conversationProviderKind.value &&
+                    (_conversationProviderId.value == null || it.providerId == _conversationProviderId.value)
+            } ?: modelsFlow.value.firstOrNull {
+                it.id == modelId && it.providerKind == _conversationProviderKind.value
+            }
+            val modelDisplayName = providerModel?.displayName ?: modelId
+            val requestTools = resolveRequestTools(providerModel)
+            // 角色注入：仅 BYOK 模型，把当前角色的 system prompt（插值后）作为首条 system 消息 prepend。
+            // 官方账号模型不注入（服务端已有系统提示 + 个性化记忆）。该 system 消息不落库，仅用于本次请求。
+            val effectiveKind = providerModel?.providerKind ?: _conversationProviderKind.value
+            val requestHistory = if (effectiveKind == ProviderKind.BYOK) {
+                withContext(dispatchers.io) {
+                    history.map { message ->
+                        if (message.attachments.isEmpty()) message
+                        else message.copy(attachments = hydrateByokAttachments(message.attachments))
+                    }
+                }
+            } else {
+                history
+            }
+            val messages = if (effectiveKind == ProviderKind.BYOK) {
+                val sysText = SystemPromptComposer.compose(
+                    personaPrompt = activePersona.value?.systemPrompt,
+                    conversationPrompt = _conversationSystemPrompt.value,
+                    mode = _conversationSystemPromptMode.value,
+                    vars = buildPromptVariables(providerModel, modelDisplayName),
+                )
+                if (!sysText.isNullOrBlank()) listOf(systemMessage(sysText)) + requestHistory else requestHistory
+            } else {
+                requestHistory
+            }
+            val request = ChatRequest(
+                modelId = modelId,
+                modelDisplayName = modelDisplayName,
+                providerId = providerModel?.providerId ?: _conversationProviderId.value ?: ProviderIds.MOLAGPT,
+                providerKind = providerModel?.providerKind ?: _conversationProviderKind.value,
+                messages = messages,
+                sessionId = sessionId,
+                streamSessionId = streamSessionId,
+                conversationId = conversationId,
+                temperature = temperature,
+                useThinking = _useThinking.value,
+                reasoningEffort = _reasoningEffort.value,
+                enabledTools = requestTools,
+            )
+            backgroundStreams.start(request, assistantId, throttleMs, priorAttempts)
+            observeTitleAfterFirstTurn(assistantId, titleUserMessage)
+            // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，
+            // Room 落库的同一条消息不会与之重复显示，也避免“清空→回灌”的瞬时闪烁。
         }
-        val assistantId = Ids.newMessageId()
-        val streamSessionId = Ids.newSessionId()
-        val providerModel = modelsFlow.value.firstOrNull {
-            it.id == modelId &&
-                it.providerKind == _conversationProviderKind.value &&
-                (_conversationProviderId.value == null || it.providerId == _conversationProviderId.value)
-        } ?: modelsFlow.value.firstOrNull {
-            it.id == modelId && it.providerKind == _conversationProviderKind.value
-        }
-        val modelDisplayName = providerModel?.displayName ?: modelId
-        val requestTools = resolveRequestTools(providerModel)
-        val request = ChatRequest(
-            modelId = modelId,
+    }
+
+    /** 角色注入用的 system 消息（仅本次请求，不落库）。各 BYOK provider 均读 rawText。 */
+    private fun systemMessage(text: String): ChatMessage = ChatMessage(
+        messageId = "persona-system-$sessionId",
+        sessionId = sessionId,
+        role = Role.SYSTEM,
+        status = MessageStatus.COMPLETE,
+        createdAt = 0L,
+        updatedAt = 0L,
+        rawText = text,
+    )
+
+    /** 组装 {{var}} 插值上下文：本地日期/时间 + 当前模型/服务商。username 首版暂不接（→「用户」）。 */
+    private fun buildPromptVariables(providerModel: ProviderModel?, modelDisplayName: String): PromptVariables {
+        val now = java.util.Date()
+        val date = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(now)
+        val time = java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(now)
+        return PromptVariables(
+            date = date,
+            time = time,
+            datetime = "$date $time",
             modelDisplayName = modelDisplayName,
-            providerId = providerModel?.providerId ?: _conversationProviderId.value ?: ProviderIds.MOLAGPT,
-            providerKind = providerModel?.providerKind ?: _conversationProviderKind.value,
-            messages = history,
-            sessionId = sessionId,
-            streamSessionId = streamSessionId,
-            conversationId = conversationId,
-            temperature = temperature,
-            useThinking = _useThinking.value,
-            reasoningEffort = _reasoningEffort.value,
-            enabledTools = requestTools,
+            modelId = providerModel?.id,
+            providerName = providerModel?.providerName,
+            username = null,
         )
-        backgroundStreams.start(request, assistantId, throttleMs, priorAttempts)
-        observeTitleAfterFirstTurn(assistantId, titleUserMessage)
-        // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，
-        // Room 落库的同一条消息不会与之重复显示，也避免“清空→回灌”的瞬时闪烁。
     }
 
     /**
@@ -751,6 +857,9 @@ class ChatViewModel(
         val conversation = sessionRepository.get(sessionId) ?: return
         _conversationProviderId.value = conversation.providerId ?: ProviderIds.MOLAGPT
         _conversationProviderKind.value = conversation.providerKind
+        _conversationPersonaId.value = conversation.personaId
+        _conversationSystemPrompt.value = conversation.systemPrompt
+        _conversationSystemPromptMode.value = conversation.systemPromptMode
         conversation.model?.takeIf { it.isNotBlank() }?.let { _selectedModel.value = it }
         // 恢复后把推理档位适配到该模型（模型列表可能已加载）。
         val model = modelsFlow.value.firstOrNull {

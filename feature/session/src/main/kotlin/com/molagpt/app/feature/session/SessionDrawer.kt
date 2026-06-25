@@ -2,13 +2,11 @@ package com.molagpt.app.feature.session
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -63,7 +61,6 @@ import androidx.paging.compose.itemContentType
 import androidx.paging.compose.itemKey
 import kotlinx.coroutines.flow.Flow
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SessionDrawer(
     sessions: Flow<PagingData<SessionListItem>>,
@@ -85,14 +82,12 @@ fun SessionDrawer(
         DrawerHeader()
         NewChatButton(onClick = onNewChat)
 
-        BoxWithConstraints(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
         ) {
-            val listState = rememberLazyListState(
-                cacheWindow = SessionDrawerListPolicy.cacheWindow(maxHeight),
-            )
+            val listState = rememberLazyListState()
             val refreshing = items.loadState.refresh is LoadState.Loading
 
             LazyColumn(

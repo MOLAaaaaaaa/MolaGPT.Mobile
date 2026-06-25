@@ -60,8 +60,11 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.feature.chat.persona.PersonaPickerSheet
+import com.molagpt.app.feature.chat.persona.PersonaWelcome
 import com.molagpt.app.feature.file.ImagePreviewOverlay
 import com.molagpt.app.feature.file.LocalAnimatedVisibilityScope
 import com.molagpt.app.feature.file.LocalImagePreviewUrl
@@ -78,14 +81,18 @@ fun ChatScreen(
     enterToSend: Boolean,
     onOpenDrawer: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenPersonaManagement: () -> Unit,
     onAuthExpired: () -> Unit,
-    onNewChatWithModel: (modelId: String, providerId: String?, kind: ProviderKind) -> Unit,
+    onNewChatWithModel: (modelId: String, providerId: String?, kind: ProviderKind, personaId: String?) -> Unit,
     onNewChat: () -> Unit,
     drawerOpen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val activePersona by viewModel.activePersona.collectAsStateWithLifecycle()
+    val personas by viewModel.personas.collectAsStateWithLifecycle()
     var modelMenuOpen by remember { mutableStateOf(false) }
+    var personaSheetOpen by remember { mutableStateOf(false) }
     var pendingCrossModel by remember { mutableStateOf<ProviderModel?>(null) }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -144,10 +151,25 @@ fun ChatScreen(
             confirmButton = {
                 TextButton(onClick = {
                     pendingCrossModel = null
-                    onNewChatWithModel(model.id, model.providerId, model.providerKind)
+                    onNewChatWithModel(
+                        model.id,
+                        model.providerId,
+                        model.providerKind,
+                        activePersona?.id.takeIf { model.providerKind == ProviderKind.BYOK },
+                    )
                 }) { Text("新建对话") }
             },
             dismissButton = { TextButton(onClick = { pendingCrossModel = null }) { Text("取消") } },
+        )
+    }
+
+    if (personaSheetOpen) {
+        PersonaPickerSheet(
+            personas = personas,
+            selectedPersona = activePersona,
+            onSelect = { viewModel.selectPersona(it.id) },
+            onManage = onOpenPersonaManagement,
+            onDismiss = { personaSheetOpen = false },
         )
     }
 
@@ -291,10 +313,13 @@ fun ChatScreen(
                     useThinking = state.useThinking,
                     reasoningEffort = state.reasoningEffort,
                     pendingAttachments = state.pendingAttachments,
+                    activePersona = activePersona,
+                    showPersonaChip = isActiveConversation,
                     onSetNetwork = viewModel::setNetworkTool,
                     onSetSteel = viewModel::setSteelTool,
                     onToggleThinking = viewModel::setUseThinking,
                     onSetReasoningEffort = viewModel::setReasoningEffort,
+                    onOpenPersonaPicker = { personaSheetOpen = true },
                     onPickImage = { pickFile.launch(arrayOf("*/*")) },
                     onRemoveAttachment = viewModel::removeAttachment,
                     onSend = viewModel::send,
@@ -305,12 +330,21 @@ fun ChatScreen(
     ) { inner ->
         // 消息列表区域仅撑满 Scaffold 内容区（顶栏/底栏之间的区域），加上 inner 内边距。
         Box(modifier = Modifier.fillMaxSize().padding(inner)) {
-            MessageList(
-                messages = state.messages,
-                models = state.models,
-                onRegenerate = viewModel::regenerateLast,
-                onNavVersion = viewModel::navVersion,
-            )
+            if (!state.isLoadingHistory && state.messages.isEmpty()) {
+                PersonaWelcome(
+                    activePersona = activePersona,
+                    isByok = state.providerKind == ProviderKind.BYOK,
+                    onOpenPersonaPicker = { personaSheetOpen = true },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                MessageList(
+                    messages = state.messages,
+                    models = state.models,
+                    onRegenerate = viewModel::regenerateLast,
+                    onNavVersion = viewModel::navVersion,
+                )
+            }
             if (state.isLoadingHistory && state.messages.isEmpty()) {
                 CircularProgressIndicator(
                     modifier = Modifier.align(Alignment.Center),

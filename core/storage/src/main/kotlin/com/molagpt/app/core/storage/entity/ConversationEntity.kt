@@ -37,4 +37,10 @@ data class ConversationEntity(
      * 侧边栏照常显示；点开时才 fetch_conversation 拉消息并置回 false。登出时占位会被清理。
      */
     val placeholder: Boolean = false,
+    /** 绑定的角色 id（仅 BYOK 会话有意义）。 */
+    val personaId: String? = null,
+    /** 会话级系统提示覆盖（预留）。 */
+    val systemPrompt: String? = null,
+    /** 角色与会话级提示词的合并模式 override/append（预留）。 */
+    val systemPromptMode: String? = null,
 )

@@ -31,6 +31,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,9 +59,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.EnabledTools
 import com.molagpt.app.core.model.FileInfo
+import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.core.render.PersonaIcons
 
 /**
  * 输入区。输入态用 [rememberSaveable] 持有在本 Composable 内，与消息列表状态分离——
@@ -84,10 +87,13 @@ fun Composer(
     useThinking: Boolean,
     reasoningEffort: String,
     pendingAttachments: List<FileInfo>,
+    activePersona: Persona?,
+    showPersonaChip: Boolean,
     onSetNetwork: (Boolean) -> Unit,
     onSetSteel: (Boolean) -> Unit,
     onToggleThinking: (Boolean) -> Unit,
     onSetReasoningEffort: (String) -> Unit,
+    onOpenPersonaPicker: () -> Unit,
     onPickImage: () -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onSend: (String) -> Unit,
@@ -149,6 +155,13 @@ fun Composer(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (isByok && showPersonaChip) {
+                    PersonaChip(
+                        persona = activePersona,
+                        enabled = toolsEnabled,
+                        onClick = onOpenPersonaPicker,
+                    )
+                }
                 ToolChip(
                     label = "联网搜索",
                     checked = enabledTools.network,
@@ -386,6 +399,53 @@ private fun ToolChip(
             style = MaterialTheme.typography.labelMedium,
             fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Medium,
             maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun PersonaChip(
+    persona: Persona?,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(50)
+    Row(
+        modifier = Modifier
+            .heightIn(min = 32.dp)
+            .clip(shape)
+            .background(cs.primary.copy(alpha = 0.14f))
+            .border(1.dp, cs.primary.copy(alpha = 0.32f), shape)
+            .clickable(
+                enabled = enabled,
+                role = Role.Button,
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = onClick,
+            )
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = PersonaIcons.resolve(persona?.icon),
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = cs.primary,
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(
+            text = persona?.name ?: "通用助手",
+            color = cs.primary,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+        Icon(
+            imageVector = Icons.Filled.ArrowDropDown,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = cs.primary,
         )
     }
 }

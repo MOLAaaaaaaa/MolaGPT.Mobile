@@ -84,6 +84,7 @@ fun SettingsScreen(
     onOpenImageWorkbench: () -> Unit,
     onOpenByokProviders: () -> Unit,
     onOpenByokTools: () -> Unit,
+    onOpenPersonaManagement: () -> Unit,
     buildLabel: String,
     modifier: Modifier = Modifier,
 ) {
@@ -129,11 +130,12 @@ fun SettingsScreen(
                 onLogout = onLogout,
             )
 
-            SectionTitle("模型服务")
-            ByokEntryCard(
+            SectionTitle("自定义模型")
+            ModelServiceCard(
                 providerCount = byokProviders.size,
                 modelCount = byokProviders.sumOf { it.models.size },
-                onClick = onOpenByokProviders,
+                onOpenByokProviders = onOpenByokProviders,
+                onOpenPersonaManagement = onOpenPersonaManagement,
             )
 
             SectionTitle("配额用量 · 今日")
@@ -222,6 +224,74 @@ fun SettingsScreen(
     }
 }
 
+/**
+ * 「自定义模型」域卡片：把 BYOK 模型的「来源」与「行为」收进同一张卡，用分隔线分面。
+ * - 上行 `自定义 API 模型`：模型从哪来（provider / 模型清单）。
+ * - 下行 `角色管理`：这些模型怎么说话（系统提示 / 角色，仅 BYOK 生效）。
+ * 结构对齐本页 [TracksCard]（开关/入口两行同卡）的既有范式。
+ */
+@Composable
+private fun ModelServiceCard(
+    providerCount: Int,
+    modelCount: Int,
+    onOpenByokProviders: () -> Unit,
+    onOpenPersonaManagement: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenByokProviders)
+                    .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TracksRowIcon(kind = TracksIconKind.Sparkles)
+                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                    Text("自定义 API 模型", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        if (providerCount == 0) "接入你自己的 OpenAI / Claude / Gemini 服务"
+                        else "$providerCount 个服务 · $modelCount 个模型",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                ForwardChevron()
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 58.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenPersonaManagement)
+                    .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TracksRowIcon(kind = TracksIconKind.Persona)
+                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                    Text("角色管理", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "管理自定义模型使用的系统提示词",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                ForwardChevron()
+            }
+        }
+    }
+}
+
 @Composable
 private fun AboutEntryCard(onOpenAbout: () -> Unit) {
     Surface(
@@ -252,40 +322,6 @@ private fun AboutEntryCard(onOpenAbout: () -> Unit) {
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(20.dp).rotate(180f),
             )
-        }
-    }
-}
-
-@Composable
-private fun ByokEntryCard(
-    providerCount: Int,
-    modelCount: Int,
-    onClick: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onClick)
-                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TracksRowIcon(kind = TracksIconKind.Sparkles)
-            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text("自定义 API 模型", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    if (providerCount == 0) "接入你自己的 OpenAI / Claude / Gemini 服务"
-                    else "$providerCount 个服务 · $modelCount 个模型",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
-            ForwardChevron()
         }
     }
 }

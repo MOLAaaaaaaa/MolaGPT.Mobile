@@ -59,7 +59,7 @@ import java.util.UUID
 /**
  * BYOK 提供商列表页（独立子页面，从设置页进入）。
  * 卡片展示每个自定义服务，点击进详情；FAB 打开预设选择底部弹层，选中即落库并跳详情。
- * 借鉴 rikkahub 的「列表 → 详情」结构，设计语言沿用 MolaGPT（玫瑰粉、圆角卡片、M3）。
+ * 列表与详情分层管理，设计语言沿用 MolaGPT（玫瑰粉、圆角卡片、M3）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -86,7 +86,7 @@ fun ByokProvidersScreen(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
             TopAppBar(
-                title = { Text("自定义 API 模型") },
+                title = { Text("BYOK 模型配置") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")

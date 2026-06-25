@@ -110,7 +110,7 @@ fun ByokToolsScreen(
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
             ) {
                 Text(
-                    "以下工具仅对自定义 API 模型生效，由 App 本机执行，与 MolaGPT 账户工具相互独立。",
+                    "以下工具仅对自定义模型生效。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.86f),
                     modifier = Modifier.padding(14.dp),

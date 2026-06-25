@@ -20,7 +20,7 @@ internal class WebToolArtifactSplitter {
     private var activeDs: DsState? = null
     /**
      * 最近一个仍在进行的工具卡片（tool-status / steel-step）。
-     * 裸 `<DSanalysis>` 可能没有 data-tool-type，因此完成态按位置关联到最近卡片。
+     * 裸分析标签可能没有 data-tool-type，因此完成态按位置关联到最近卡片。
      */
     private var lastRunningTool: ToolRef? = null
     private var sequence = 0
@@ -99,7 +99,7 @@ internal class WebToolArtifactSplitter {
         val toolType = attr(tag, "data-tool-type")?.ifBlank { null } ?: "analysis"
         val phase = attr(tag, "data-analysis-phase")?.lowercase()
         val showContent = toolType.lowercase() in CONTENT_VISIBLE_TOOL_TYPES
-        // DSanalysis 完成时，优先更新最近一个仍在进行的工具卡片。
+        // 分析标签完成时，优先更新最近一个仍在进行的工具卡片。
         val prev = lastRunningTool
         val state = when {
             // 需要显示内容的工具：有前置卡片则复用，否则独立新建。
@@ -315,7 +315,7 @@ internal class WebToolArtifactSplitter {
         val provider: String,
         val phase: String?,
         /**
-         * 是否把 DSanalysis 内容展开显示在卡片里。
+         * 是否把分析标签内容展开显示在卡片里。
          * 图片生成等工具已有独立结果视图时不展开内容；完成态仍通过共享 id 更新工具卡片。
          */
         val showContent: Boolean,
@@ -357,7 +357,7 @@ internal class WebToolArtifactSplitter {
         val index: Int = -1,
     )
 
-    /** 最近进行中工具卡片的身份（供 DSanalysis 位置关联复用）。 */
+    /** 最近进行中工具卡片的身份（供分析标签位置关联复用）。 */
     private data class ToolRef(
         val id: String,
         val key: String,
@@ -370,7 +370,7 @@ internal class WebToolArtifactSplitter {
 
     private companion object {
         /**
-         * DSanalysis 内容显示白名单（data-tool-type 取值）。
+         * 分析标签内容显示白名单（data-tool-type 取值）。
          * 其余类型只更新工具卡片状态，不展开原始分析内容。
          */
         val CONTENT_VISIBLE_TOOL_TYPES = setOf("python", "mcp", "image-action")

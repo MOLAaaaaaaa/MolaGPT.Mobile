@@ -9,15 +9,17 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.molagpt.app.core.storage.dao.ConversationDao
 import com.molagpt.app.core.storage.dao.ByokProviderDao
 import com.molagpt.app.core.storage.dao.MessageDao
+import com.molagpt.app.core.storage.dao.PersonaDao
 import com.molagpt.app.core.storage.dao.StreamTaskDao
 import com.molagpt.app.core.storage.entity.ByokProviderEntity
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
+import com.molagpt.app.core.storage.entity.PersonaEntity
 import com.molagpt.app.core.storage.entity.StreamTaskEntity
 
 @Database(
-    entities = [ConversationEntity::class, MessageEntity::class, StreamTaskEntity::class, ByokProviderEntity::class],
-    version = 8,
+    entities = [ConversationEntity::class, MessageEntity::class, StreamTaskEntity::class, ByokProviderEntity::class, PersonaEntity::class],
+    version = 10,
     exportSchema = false,
 )
 abstract class MolaDatabase : RoomDatabase() {
@@ -25,11 +27,12 @@ abstract class MolaDatabase : RoomDatabase() {
     abstract fun byokProviderDao(): ByokProviderDao
     abstract fun messageDao(): MessageDao
     abstract fun streamTaskDao(): StreamTaskDao
+    abstract fun personaDao(): PersonaDao
 
     companion object {
         fun build(context: Context): MolaDatabase =
             Room.databaseBuilder(context.applicationContext, MolaDatabase::class.java, "mola.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -131,6 +134,61 @@ abstract class MolaDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE byok_providers ADD COLUMN purpose TEXT NOT NULL DEFAULT 'CHAT'")
                 db.execSQL("ALTER TABLE byok_providers ADD COLUMN imageFormat TEXT NOT NULL DEFAULT 'OPENAI_IMAGES'")
                 db.execSQL("ALTER TABLE byok_providers ADD COLUMN imageEditPath TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 会话挂角色绑定 + 会话级提示词（systemPrompt/mode 预留）。
+                db.execSQL("ALTER TABLE conversations ADD COLUMN personaId TEXT")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN systemPrompt TEXT")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN systemPromptMode TEXT")
+                // 角色表（仅 BYOK 使用）。index 名须与 PersonaEntity 的 @Index 一致，否则 Room schema 校验失败。
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS personas (
+                        id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        icon TEXT,
+                        systemPrompt TEXT NOT NULL DEFAULT '',
+                        defaultEnableNetwork INTEGER,
+                        defaultEnableWebFetch INTEGER,
+                        defaultThinking INTEGER,
+                        defaultReasoningEffort TEXT,
+                        sortOrder INTEGER NOT NULL DEFAULT 0,
+                        pinned INTEGER NOT NULL DEFAULT 0,
+                        isBuiltin INTEGER NOT NULL DEFAULT 0,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        deletedAt INTEGER,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_personas_deletedAt_pinned_sortOrder ON personas(deletedAt, pinned, sortOrder)")
+            }
+        }
+
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 防御历史异常行：BYOK 附件曾可能把 data:base64 写进单条消息 JSON，
+                // 导致 SELECT * 填充 CursorWindow 时抛 SQLiteBlobTooBigException。
+                db.execSQL(
+                    """
+                    UPDATE messages
+                    SET fragmentsJson = '[]',
+                        metadataJson = '{}',
+                        rawText = CASE
+                            WHEN rawText IS NULL THEN NULL
+                            ELSE substr(rawText, 1, 20000)
+                        END
+                    WHERE (
+                        length(fragmentsJson) +
+                        length(metadataJson) +
+                        coalesce(length(rawText), 0)
+                    ) > 1000000
+                    """.trimIndent(),
+                )
             }
         }
     }

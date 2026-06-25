@@ -50,7 +50,7 @@ fun MessageList(
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
     var autoFollow by remember { mutableStateOf(true) }
-    // modelId → 选择器同款 displayName(历史消息/原始 id 也映射成友好名)；models 变化时一并重算。
+    // modelId → 选择器 displayName（历史消息/原始 id 也映射成友好名）；models 变化时一并重算。
     val modelNameOf: (String) -> String = { id -> models.firstOrNull { it.id == id }?.displayName ?: id }
     val rows by produceState(
         initialValue = messages.toMessageRows(parseMarkdown = false, modelDisplayNameOf = modelNameOf),
@@ -332,7 +332,7 @@ private fun ChatMessage.assistantHeaderLabel(modelDisplayNameOf: (String) -> Str
     if (role != Role.ASSISTANT) return null
     val hasContent = fragments.isNotEmpty()
     // 候选取 metadata 里的(可能是路由后名/原始名)或消息的 model;再统一过一遍映射,
-    // 把原始 id 转成选择器同款 displayName(已是友好名则原样返回)。
+    // 把原始 id 转成选择器 displayName（已是友好名则原样返回）。
     val raw = metadata["modelDisplayName"]?.takeIf { it.isNotBlank() } ?: model?.takeIf { it.isNotBlank() }
     val modelLabel = raw?.let(modelDisplayNameOf)
     return if (hasContent) {
