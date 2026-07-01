@@ -86,6 +86,7 @@ class ModelApi(
             }
         Logger.d("ModelApi", "models total=${cfg.models.size} visible=${list.size} filtered=${availability != null}")
         registry.update(list)
+        registry.markConfigLoaded() // config fetch + decode succeeded (even if list filtered to 0)
         return list
     }
 

@@ -157,6 +157,13 @@ fun AboutScreen(
             )
             DependencyCard(dependencies = Dependencies)
 
+            Text(
+                text = "「远程 Agent 控制」的桥接 / 中继架构与 CLI 控制协议设计参考了开源项目 Remodex（Apache-2.0，github.com/Emanuele-web04/remodex），本实现为独立编写，未直接复制其源码，在此一并致谢。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 8.dp).padding(bottom = 12.dp),
+            )
+
             SectionLabel("开放源代码协议")
             LicenseExpander()
 

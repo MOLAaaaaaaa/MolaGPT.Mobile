@@ -16,10 +16,21 @@ class ModelRegistry {
     val models: StateFlow<List<ProviderModel>> = _models.asStateFlow()
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+    // True once the MolaGPT model_config fetch has SUCCEEDED at least once (even if the
+    // per-account availability filter then leaves 0 official models). Lets retry logic
+    // tell "fetch failed" (keep retrying) from "fetched, just empty/filtered" (stop).
+    // BYOK models load from the local DB and never touch this flag.
+    private val _configLoaded = MutableStateFlow(false)
+    val configLoaded: StateFlow<Boolean> = _configLoaded.asStateFlow()
     private val byId = HashMap<String, ProviderModel>()
     private var molaGptModels: List<ProviderModel> = emptyList()
     private var byokModels: List<ProviderModel> = emptyList()
     private var activeRefreshes = 0
+
+    /** Mark that the MolaGPT model_config fetch succeeded (called by ModelApi). */
+    fun markConfigLoaded() {
+        _configLoaded.value = true
+    }
 
     @Synchronized
     fun update(list: List<ProviderModel>) {

@@ -1,5 +1,7 @@
 package com.molagpt.app.core.render
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -12,6 +14,8 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -67,6 +71,16 @@ object MolaMotion {
     fun <T> standardDecelerate(durationMillis: Int = Medium) = tween<T>(durationMillis, easing = StandardDecelerate)
     /** 带回弹的 spring（开关圆点、对勾弹入等）。 */
     fun <T> springy() = spring<T>(dampingRatio = 0.6f, stiffness = Spring.StiffnessMediumLow)
+
+    // ---- 统一二级页转场（NavHost 的 push/pop 与页内 Hub⇄会话共用同一套，手感一致）----
+    /** 二级页推入：从右侧滑入。 */
+    val PushEnter: EnterTransition = slideInHorizontally(standardDecelerate()) { it }
+    /** 推入时下层页轻微左移视差。 */
+    val PushExit: ExitTransition = slideOutHorizontally(standardDecelerate()) { -it / 4 }
+    /** 返回：下层页从左侧轻微视差归位。 */
+    val PopEnter: EnterTransition = slideInHorizontally(standardDecelerate()) { -it / 4 }
+    /** 返回：当前页向右滑出。 */
+    val PopExit: ExitTransition = slideOutHorizontally(standardDecelerate()) { it }
 }
 
 /** 骨架屏微光（加载占位）。给元素定好尺寸+圆角后调用即可：`Box(Modifier.height(14.dp).clip(..).shimmer())`。 */

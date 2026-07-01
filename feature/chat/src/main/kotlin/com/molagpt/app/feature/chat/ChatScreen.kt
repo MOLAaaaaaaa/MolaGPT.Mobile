@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -85,6 +86,7 @@ fun ChatScreen(
     onAuthExpired: () -> Unit,
     onNewChatWithModel: (modelId: String, providerId: String?, kind: ProviderKind, personaId: String?) -> Unit,
     onNewChat: () -> Unit,
+    onOpenAgentControl: () -> Unit = {},
     drawerOpen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -228,10 +230,10 @@ fun ChatScreen(
                         if (state.modelGroups.isEmpty()) {
                             DropdownMenuItem(
                                 text = {
-                                    Text(if (state.isModelRefreshing) "正在获取模型列表..." else "未获取到模型列表")
+                                    Text(if (state.isModelRefreshing) "正在获取 MolaGPT 模型..." else "未获取到 MolaGPT 模型 · 点此重试")
                                 },
-                                onClick = {},
-                                enabled = false,
+                                onClick = { if (!state.isModelRefreshing) viewModel.refreshModels() },
+                                enabled = !state.isModelRefreshing,
                             )
                         } else {
                             state.modelGroups.forEachIndexed { index, group ->
@@ -265,6 +267,14 @@ fun ChatScreen(
                                     )
                                 }
                             }
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = {
+                                    Text(if (state.isModelRefreshing) "正在获取 MolaGPT 模型..." else "刷新 MolaGPT 模型列表")
+                                },
+                                onClick = { if (!state.isModelRefreshing) viewModel.refreshModels() },
+                                enabled = !state.isModelRefreshing,
+                            )
                         }
                     }
                 },
@@ -278,6 +288,9 @@ fun ChatScreen(
                         IconButton(onClick = onNewChat) {
                             Icon(Icons.Filled.Add, contentDescription = "新对话")
                         }
+                    }
+                    IconButton(onClick = onOpenAgentControl) {
+                        AgentMonitorIcon(MaterialTheme.colorScheme.onSurface)
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")
@@ -395,5 +408,28 @@ private fun rememberPreviewUrlHolder(): com.molagpt.app.feature.file.ImagePrevie
             override val current: String? get() = url
             override fun request(value: String?) { url = value }
         }
+    }
+}
+
+/** 顶栏「远程 Agent」入口图标——一个显示器轮廓，把 Agent 控制提到首屏一级。 */
+@Composable
+private fun AgentMonitorIcon(tint: androidx.compose.ui.graphics.Color) {
+    androidx.compose.foundation.Canvas(modifier = Modifier.size(22.dp)) {
+        val w = size.width
+        val h = size.height
+        val sw = 2.dp.toPx()
+        val cap = androidx.compose.ui.graphics.StrokeCap.Round
+        val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+            width = sw, cap = cap, join = androidx.compose.ui.graphics.StrokeJoin.Round,
+        )
+        drawRoundRect(
+            color = tint,
+            topLeft = androidx.compose.ui.geometry.Offset(w * 0.12f, h * 0.20f),
+            size = androidx.compose.ui.geometry.Size(w * 0.76f, h * 0.46f),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(3.dp.toPx()),
+            style = stroke,
+        )
+        drawLine(tint, androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.66f), androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.80f), strokeWidth = sw, cap = cap)
+        drawLine(tint, androidx.compose.ui.geometry.Offset(w * 0.34f, h * 0.84f), androidx.compose.ui.geometry.Offset(w * 0.66f, h * 0.84f), strokeWidth = sw, cap = cap)
     }
 }

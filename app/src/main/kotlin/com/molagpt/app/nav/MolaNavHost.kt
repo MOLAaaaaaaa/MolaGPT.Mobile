@@ -2,8 +2,6 @@ package com.molagpt.app.nav
 
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -36,6 +34,8 @@ import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.core.storage.SessionRepository
+import com.molagpt.app.feature.agentcontrol.AgentControlScreen
+import com.molagpt.app.feature.agentcontrol.AgentControlViewModel
 import com.molagpt.app.feature.auth.AuthViewModel
 import com.molagpt.app.feature.auth.LoginScreen
 import com.molagpt.app.feature.chat.ChatScreen
@@ -64,6 +64,7 @@ private object Routes {
     const val PERSONALIZATION = "personalization"
     const val ABOUT = "about"
     const val IMAGE_WORKBENCH = "image_workbench"
+    const val AGENT_CONTROL = "agent_control"
     const val BYOK_PROVIDERS = "byok_providers"
     const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
     const val BYOK_TOOLS = "byok_tools"
@@ -88,12 +89,12 @@ fun MolaNavHost(
         navController = navController,
         startDestination = start,
         modifier = modifier.fillMaxSize(),
-        // 全局转场：二级页面从右侧推入，返回时当前页滑出，下层页面带轻微视差。
+        // 全局转场：二级页面从右侧推入，返回时当前页滑出，下层页面带轻微视差（统一声明见 MolaMotion）。
         // 返回手势会驱动 popExitTransition 的进度；目标页面不应额外拦截 BackHandler。
-        enterTransition = { slideInHorizontally(MolaMotion.standardDecelerate()) { it } },
-        exitTransition = { slideOutHorizontally(MolaMotion.standardDecelerate()) { -it / 4 } },
-        popEnterTransition = { slideInHorizontally(MolaMotion.standardDecelerate()) { -it / 4 } },
-        popExitTransition = { slideOutHorizontally(MolaMotion.standardDecelerate()) { it } },
+        enterTransition = { MolaMotion.PushEnter },
+        exitTransition = { MolaMotion.PushExit },
+        popEnterTransition = { MolaMotion.PopEnter },
+        popExitTransition = { MolaMotion.PopExit },
     ) {
         composable(Routes.LOGIN) {
             val vm: AuthViewModel = viewModel(factory = ViewModelFactories.auth(container))
@@ -119,8 +120,14 @@ fun MolaNavHost(
 
         composable(Routes.CHAT) {
             LaunchedEffect(Unit) {
-                if (container.modelRegistry.all().isEmpty()) {
+                // 重试到官方 model_config **拉取成功**为止（不是"列表非空"——BYOK 是本地的，
+                // 官方拉挂了列表照样非空）。带退避,冷启动/网络抖动/临时失败可自恢复。
+                var attempt = 0
+                while (!container.modelRegistry.configLoaded.value && attempt < 5) {
                     runCatching { container.modelApi.refresh() }
+                    attempt++
+                    if (container.modelRegistry.configLoaded.value || attempt >= 5) break
+                    kotlinx.coroutines.delay(1500L * attempt) // 1.5s, 3s, 4.5s, 6s
                 }
             }
 
@@ -131,6 +138,11 @@ fun MolaNavHost(
                         navController.navigate(Routes.SETTINGS) {
                             launchSingleTop = true
                         }
+                    }
+                },
+                onOpenAgentControl = {
+                    if (navController.currentDestination?.route != Routes.AGENT_CONTROL) {
+                        navController.navigate(Routes.AGENT_CONTROL) { launchSingleTop = true }
                     }
                 },
                 onOpenPersonaManagement = {
@@ -183,6 +195,11 @@ fun MolaNavHost(
                         navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
                     }
                 },
+                onOpenAgentControl = {
+                    if (navController.currentDestination?.route != Routes.AGENT_CONTROL) {
+                        navController.navigate(Routes.AGENT_CONTROL) { launchSingleTop = true }
+                    }
+                },
                 onOpenByokProviders = {
                     if (navController.currentDestination?.route != Routes.BYOK_PROVIDERS) {
                         navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
@@ -215,6 +232,20 @@ fun MolaNavHost(
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.AGENT_CONTROL) {
+            val vm: AgentControlViewModel = viewModel(factory = ViewModelFactories.agentControl(container))
+            AgentControlScreen(
+                vm = vm,
+                onExit = {
+                    if (navController.currentDestination?.route == Routes.AGENT_CONTROL) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.CHAT) { launchSingleTop = true }
+                        }
+                    }
+                },
             )
         }
 
@@ -398,6 +429,7 @@ fun MolaNavHost(
 private fun ChatHost(
     settings: AppSettings,
     onOpenSettings: () -> Unit,
+    onOpenAgentControl: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
     onAuthExpired: () -> Unit,
     modifier: Modifier = Modifier,
@@ -472,6 +504,7 @@ private fun ChatHost(
                     onOpenSettings = onOpenSettings,
                     onOpenPersonaManagement = onOpenPersonaManagement,
                     onAuthExpired = onAuthExpired,
+                    onOpenAgentControl = onOpenAgentControl,
                     onNewChatWithModel = { modelId, providerId, kind, personaId ->
                         scope.launch {
                             val conversation = container.sessionRepository.create(

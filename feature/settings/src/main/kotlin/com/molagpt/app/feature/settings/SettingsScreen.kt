@@ -3,6 +3,7 @@ package com.molagpt.app.feature.settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import com.molagpt.app.core.common.Logger
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -82,6 +83,7 @@ fun SettingsScreen(
     onOpenPersonalization: () -> Unit,
     onOpenAbout: () -> Unit,
     onOpenImageWorkbench: () -> Unit,
+    onOpenAgentControl: () -> Unit,
     onOpenByokProviders: () -> Unit,
     onOpenByokTools: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
@@ -209,6 +211,10 @@ fun SettingsScreen(
             ToggleRow("Enter 发送（关闭则换行）", s.enterToSend, viewModel::setEnterToSend)
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            SectionTitle("远程控制")
+            AgentControlEntryCard(onOpenAgentControl = onOpenAgentControl)
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             SectionTitle("关于")
             AboutEntryCard(onOpenAbout = onOpenAbout)
 
@@ -288,6 +294,43 @@ private fun ModelServiceCard(
                 }
                 ForwardChevron()
             }
+        }
+    }
+}
+
+@Composable
+private fun AgentControlEntryCard(onOpenAgentControl: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    Logger.d("AgentControl", "Agent control entry card clicked!")
+                    onOpenAgentControl()
+                }
+                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TracksRowIcon(kind = TracksIconKind.Info)
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("Agent 控制", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "远程查看与控制电脑上的 Claude Code / Codex 会话",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp).rotate(180f),
+            )
         }
     }
 }

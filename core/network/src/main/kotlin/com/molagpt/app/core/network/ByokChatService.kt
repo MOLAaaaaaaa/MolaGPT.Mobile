@@ -55,6 +55,12 @@ class ByokChatService(
     private val webSearchOptionsProvider: () -> WebSearchOptions = { WebSearchOptions() },
     /** 用于在聊天内 generate_image 工具中查找图像用途 provider（purpose=IMAGE）。 */
     private val imageProviderResolver: suspend () -> ByokProvider? = { null },
+    /**
+     * 外挂视觉目标解析：读「BYOK 工具 → 视觉理解」配置的 `<providerId>::<modelId>`，
+     * 解析成 (目标 provider, 目标 modelId)。**可跨 provider**——视觉模型不必与当前聊天模型同属一个 provider。
+     * 返回 null 表示未配置/解析不到（[analyzeImage] 会明确报错，绝不把图片发给不支持视觉的模型）。
+     */
+    private val visionProviderResolver: suspend () -> Pair<ByokProvider, String>? = { null },
     /** 聊天内 generate_image 出图参数（来自 BYOK 工具设置的「图像生成」卡）。 */
     private val imageGenConfigProvider: suspend () -> ImageGenerationConfig = { ImageGenerationConfig() },
     /** 复用工作台同一出图路径（按 imageFormat 分派，OpenRouter 走 chat/completions）。 */
@@ -811,7 +817,7 @@ class ByokChatService(
         else -> "Unsupported tool: ${call.name}"
     }
 
-    private fun viewImage(provider: ByokProvider, request: ChatRequest, call: ToolCall): String {
+    private suspend fun viewImage(provider: ByokProvider, request: ChatRequest, call: ToolCall): String {
         val index = call.arg("image_index")?.toIntOrNull() ?: return "Missing image_index"
         val query = call.arg("query")
         val allImages = request.messages
@@ -876,16 +882,35 @@ class ByokChatService(
         return "[图像已生成并展示给用户]"
     }
 
-    private fun analyzeImage(provider: ByokProvider, request: ChatRequest, imageUrl: String?, question: String?): String {
+    private suspend fun analyzeImage(provider: ByokProvider, request: ChatRequest, imageUrl: String?, question: String?): String {
         val url = imageUrl?.takeIf { it.isNotBlank() } ?: return "Missing image URL"
         val prompt = question?.takeIf { it.isNotBlank() } ?: "请分析这张图片。"
-        val visionModelId = selectByokVisionModel(provider, request.modelId)
-        return when (provider.type) {
-            ByokProviderType.OPENAI_COMPAT -> analyzeOpenAiImage(provider, visionModelId, url, prompt)
-            ByokProviderType.OPENAI_RESPONSE -> analyzeResponseImage(provider, visionModelId, url, prompt)
-            ByokProviderType.ANTHROPIC -> analyzeAnthropicImage(provider, visionModelId, url, prompt)
-            ByokProviderType.GEMINI -> analyzeGeminiImage(provider, visionModelId, url, prompt)
+        // 解析外挂视觉目标：优先用「BYOK 工具 → 视觉理解」里配置的目标模型（**可跨 provider**），
+        // 未配置时回退当前 provider 自带的视觉模型。解析不到则明确报错——绝不把图片发给不支持视觉的模型
+        // （否则上游会以 "unknown variant image_url, expected text" 拒收）。
+        val target = resolveVisionTarget(provider, request.modelId)
+            ?: return "外挂视觉未配置可用的视觉模型：请在「设置 → BYOK 工具 → 视觉理解」中选择一个支持视觉的模型。"
+        val (visionProvider, visionModelId) = target
+        return when (visionProvider.type) {
+            ByokProviderType.OPENAI_COMPAT -> analyzeOpenAiImage(visionProvider, visionModelId, url, prompt)
+            ByokProviderType.OPENAI_RESPONSE -> analyzeResponseImage(visionProvider, visionModelId, url, prompt)
+            ByokProviderType.ANTHROPIC -> analyzeAnthropicImage(visionProvider, visionModelId, url, prompt)
+            ByokProviderType.GEMINI -> analyzeGeminiImage(visionProvider, visionModelId, url, prompt)
         }
+    }
+
+    /**
+     * 解析外挂视觉目标 `(provider, modelId)`：
+     * 1. 用户在设置里显式配置的目标（`visionProviderResolver`，可跨 provider）优先；
+     * 2. 否则在**当前 provider** 内挑视觉模型（[selectByokVisionModel]），并**校验挑中的确实支持视觉**——
+     *    修掉旧逻辑「找不到就静默退回当前文本模型」导致把图发给文本模型的坑；
+     * 3. 都没有 → null（调用方据此报错）。
+     */
+    private suspend fun resolveVisionTarget(current: ByokProvider, currentModelId: String): Pair<ByokProvider, String>? {
+        visionProviderResolver()?.let { return it }
+        val picked = selectByokVisionModel(current, currentModelId)
+        if (current.models.any { it.id == picked && it.supportsVision }) return current to picked
+        return null
     }
 
     private fun analyzeOpenAiImage(provider: ByokProvider, modelId: String, url: String, prompt: String): String {

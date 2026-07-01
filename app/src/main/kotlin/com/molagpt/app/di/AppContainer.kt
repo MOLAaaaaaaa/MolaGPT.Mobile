@@ -1,6 +1,7 @@
 package com.molagpt.app.di
 
 import android.content.Context
+import android.os.Build
 import com.molagpt.app.NotificationController
 import com.molagpt.app.StreamForegroundService
 import com.molagpt.app.core.common.DefaultDispatchers
@@ -14,6 +15,7 @@ import com.molagpt.app.core.model.WebSearchProvider
 import com.molagpt.app.core.model.webSearchApiKeyKey
 import com.molagpt.app.core.network.AltchaSolver
 import com.molagpt.app.core.network.AccountStatusCache
+import com.molagpt.app.core.network.AgentControlService
 import com.molagpt.app.core.network.AuthApi
 import com.molagpt.app.core.network.ByokChatService
 import com.molagpt.app.core.network.ByokImageApi
@@ -78,6 +80,22 @@ class AppContainer(
 
     val credentialStore = CredentialStore(context)
     val settingsStore = SettingsStore(context)
+    private val agentDeviceId: String = run {
+        val androidId = runCatching {
+            android.provider.Settings.Secure.getString(
+                appContext.contentResolver,
+                android.provider.Settings.Secure.ANDROID_ID,
+            )
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+        androidId?.let { "android-$it" }
+            ?: credentialStore.loadSecret("agent.device_id")
+            ?: "app-${java.util.UUID.randomUUID()}".also { credentialStore.saveSecret("agent.device_id", it) }
+    }
+    private val agentDeviceName: String = listOf(Build.MANUFACTURER, Build.MODEL)
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .joinToString(" ")
+        .ifBlank { "Android" }
 
     /** 最近一次设置快照，供同步/通知/删除策略做无挂起读取；由 init 的收集器持续更新。 */
     @Volatile
@@ -178,6 +196,18 @@ class AppContainer(
         imageProviderResolver = {
             byokProviderRepository.list().firstOrNull { it.enabled && it.purpose == ByokPurpose.IMAGE }
         },
+        visionProviderResolver = {
+            // 「BYOK 工具 → 视觉理解」配置的目标 `<providerId>::<modelId>`（可跨 provider）→ (目标 provider, modelId)。
+            latestSettings.visionProxyModelKey
+                ?.takeIf { it.contains("::") }
+                ?.let { key ->
+                    val providerId = key.substringBefore("::")
+                    val modelId = key.substringAfter("::")
+                    byokProviderRepository.get(providerId)
+                        ?.takeIf { it.enabled }
+                        ?.let { it to modelId }
+                }
+        },
         imageGenConfigProvider = {
             ImageGenerationConfig(
                 imageSize = latestSettings.imageGenSize,
@@ -226,6 +256,18 @@ class AppContainer(
 
     /** 个性化数据接口（人格洞察 / 对话风格偏好）；设置页与个性化管理页共用。 */
     val userDataApi = UserDataApi(http)
+
+    /**
+     * Agent 控制 relay 客户端——手机遥控桌面 Claude Code / Codex 会话。复用登录**长 JWT**
+     * （免 ALTCHA/短 token），连 `agent_*.php` 中继。详见 :core:network AgentControlService。
+     */
+    val agentControlService = AgentControlService(
+        http = http,
+        dispatchers = dispatchers,
+        jwtProvider = { credentialStore.jwt },
+        deviceIdProvider = { agentDeviceId },
+        deviceNameProvider = { agentDeviceName },
+    )
 
     /** 云同步引擎（个人中心“立即同步”、登录、每轮完成均触发）。 */
     val syncEngine = SyncEngine(

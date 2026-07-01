@@ -10,6 +10,7 @@ import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.core.storage.allModels
 import com.molagpt.app.di.AppContainer
 import com.molagpt.app.feature.auth.AuthViewModel
+import com.molagpt.app.feature.agentcontrol.AgentControlViewModel
 import com.molagpt.app.feature.chat.ChatViewModel
 import com.molagpt.app.feature.session.SessionViewModel
 import com.molagpt.app.feature.settings.PersonalizationViewModel
@@ -24,6 +25,12 @@ object ViewModelFactories {
 
     fun session(container: AppContainer) = factory {
         SessionViewModel(container.sessionRepository)
+    }
+
+    fun agentControl(container: AppContainer) = factory {
+        AgentControlViewModel(
+            service = container.agentControlService,
+        )
     }
 
     fun settings(container: AppContainer) = factory {

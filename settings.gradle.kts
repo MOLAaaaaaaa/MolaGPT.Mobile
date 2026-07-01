@@ -37,6 +37,7 @@ include(":core:render")
 
 // ——— feature 层 ———
 include(":feature:chat")
+include(":feature:agent-control")
 include(":feature:session")
 include(":feature:settings")
 include(":feature:auth")
