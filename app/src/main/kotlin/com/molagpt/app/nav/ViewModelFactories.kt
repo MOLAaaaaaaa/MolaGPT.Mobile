@@ -101,24 +101,14 @@ object ViewModelFactories {
         if (providerKind == ProviderKind.MOLAGPT) {
             container.modelApi.refresh()
         } else {
-            container.modelRegistry.beginRefresh()
-            try {
-                val providers = container.byokProviderRepository.list().filter { it.enabled }
-                providers.forEach { provider ->
-                    runCatching {
-                        val fetched = container.byokModelApi.fetchModels(provider)
-                        val merged = (fetched.associateBy { it.id } + provider.models.associateBy { it.id })
-                            .values
-                            .sortedWith(compareByDescending<com.molagpt.app.core.model.ProviderModel> { it.supportsChat }.thenBy { it.id })
-                        container.byokProviderRepository.upsert(provider.copy(models = merged))
-                    }
-                }
-                container.byokProviderRepository.list()
-                    .filter { it.enabled }
-                    .flatMap { it.allModels() }
-            } finally {
-                container.modelRegistry.endRefresh()
-            }
+            // BYOK 模型由用户在服务详情页显式勾选管理（见 ByokProviderDetailScreen 的选择 sheet），
+            // 且注册表已通过 byokProviderRepository.providers 响应式跟踪落库列表（见 AppContainer）。
+            // 这里只回读当前落库模型，绝不联网拉取后全量落库——否则像 OpenRouter 这类有数百个模型的
+            // provider 会被一次性写入，覆盖用户精选。「刷新 MolaGPT 模型列表」不应改动 BYOK 精选集；
+            // 要新增 BYOK 模型请走服务详情页的「自动获取」选择流程。
+            container.byokProviderRepository.list()
+                .filter { it.enabled }
+                .flatMap { it.allModels() }
         }
 
     private inline fun <reified VM : ViewModel> factory(crossinline create: () -> VM) =

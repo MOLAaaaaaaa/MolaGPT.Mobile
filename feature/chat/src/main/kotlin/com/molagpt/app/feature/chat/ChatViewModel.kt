@@ -256,13 +256,13 @@ class ChatViewModel(
     fun refreshModels() {
         if (modelRefreshingFlow.value) return
         viewModelScope.launch {
-            // 同时刷新两阵营：保证选择器打开时 MolaGPT 与 BYOK 模型都即时可见，
-            // hasMolaGptModels/hasByokModels 不会因只刷新当前阵营而长期失真。
+            // 只刷新 MolaGPT 可用模型：refresh 内部按当前账户（登录走 registered_user_limits、
+            // 游客走 guest_limits）过滤可见模型。BYOK 模型由用户在服务详情页精选管理、且注册表
+            // 已响应式跟踪落库列表，刷新按钮不应改动它——故不再调 modelRefresher(BYOK)。
             // 成功后 registry 的 StateFlow 自动 emit，uiState 实时重组——无需手动 tick。
             runCatching {
                 withContext(dispatchers.io) {
                     modelRefresher(ProviderKind.MOLAGPT)
-                    modelRefresher(ProviderKind.BYOK)
                 }
             }.onFailure { e ->
                 _error.value = e.message ?: "模型列表刷新失败"
