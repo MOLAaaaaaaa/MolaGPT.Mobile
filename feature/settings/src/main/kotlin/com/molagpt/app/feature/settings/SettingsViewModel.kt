@@ -13,9 +13,13 @@ import com.molagpt.app.core.model.webSearchApiKeyKey
 import com.molagpt.app.core.model.withoutToken
 import com.molagpt.app.core.network.AccountStatusCache
 import com.molagpt.app.core.network.ByokImageApi
+import com.molagpt.app.core.network.ByokImageAttachment
+import com.molagpt.app.core.network.ByokImageWorkbenchConfig
+import com.molagpt.app.core.network.ByokImageWorkbenchResult
 import com.molagpt.app.core.network.ByokImageResult
 import com.molagpt.app.core.network.ByokModelApi
 import com.molagpt.app.core.network.McpToolListApi
+import com.molagpt.app.core.network.MolaApiException
 import com.molagpt.app.core.network.SyncApi
 import com.molagpt.app.core.storage.ByokProviderRepository
 import com.molagpt.app.core.storage.AppSettings
@@ -312,6 +316,35 @@ class SettingsViewModel(
             )
         }.onFailure { e ->
             _imageWorkbench.value = ImageWorkbenchState(error = e.message ?: "图像生成失败")
+        }
+    }
+
+    suspend fun runImageWorkbenchRequest(
+        providerId: String,
+        modelId: String,
+        prompt: String,
+        config: ByokImageWorkbenchConfig,
+        attachments: List<ByokImageAttachment>,
+    ): ByokImageWorkbenchResult {
+        val provider = byokProviders.get(providerId)
+            ?: throw MolaApiException(400, "请选择服务")
+        if (!provider.enabled) {
+            throw MolaApiException(400, "服务已停用")
+        }
+        if (provider.purpose != com.molagpt.app.core.model.ByokPurpose.IMAGE) {
+            throw MolaApiException(400, "请选择图像用途的服务")
+        }
+        if (provider.models.none { it.id == modelId && it.supportsImageGeneration }) {
+            throw MolaApiException(400, "请选择图像模型")
+        }
+        return withContext(dispatchers.io) {
+            byokImageApi.runWorkbench(
+                provider = provider,
+                modelId = modelId,
+                prompt = prompt,
+                config = config,
+                attachments = attachments,
+            )
         }
     }
 
