@@ -145,6 +145,11 @@ fun MolaNavHost(
                         navController.navigate(Routes.AGENT_CONTROL) { launchSingleTop = true }
                     }
                 },
+                onOpenImageWorkbench = {
+                    if (navController.currentDestination?.route != Routes.IMAGE_WORKBENCH) {
+                        navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
+                    }
+                },
                 onOpenPersonaManagement = {
                     if (navController.currentDestination?.route != Routes.PERSONA_MANAGEMENT) {
                         navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
@@ -430,6 +435,7 @@ private fun ChatHost(
     settings: AppSettings,
     onOpenSettings: () -> Unit,
     onOpenAgentControl: () -> Unit,
+    onOpenImageWorkbench: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
     onAuthExpired: () -> Unit,
     modifier: Modifier = Modifier,
@@ -505,6 +511,7 @@ private fun ChatHost(
                     onOpenPersonaManagement = onOpenPersonaManagement,
                     onAuthExpired = onAuthExpired,
                     onOpenAgentControl = onOpenAgentControl,
+                    onOpenImageWorkbench = onOpenImageWorkbench,
                     onNewChatWithModel = { modelId, providerId, kind, personaId ->
                         scope.launch {
                             val conversation = container.sessionRepository.create(
