@@ -236,6 +236,10 @@ fun MolaNavHost(
                         }
                     }
                 },
+                onManageModels = { providerId ->
+                    val target = if (!providerId.isNullOrBlank()) "${Routes.BYOK_PROVIDER_DETAIL}/$providerId" else Routes.BYOK_PROVIDERS
+                    navController.navigate(target) { launchSingleTop = true }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
         }

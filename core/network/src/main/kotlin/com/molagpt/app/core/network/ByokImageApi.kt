@@ -85,10 +85,10 @@ class ByokImageApi(private val http: MolaHttp) {
                 putOpenAiImageExtras(config)
             }
             val raw = executeJson(provider, provider.imagePath.ifBlank { "v1/images/generations" }, body, config.timeoutSeconds)
-            raws += raw
             hits += extractImageHits(raw).mapIndexed { hitIndex, hit ->
                 hit.copy(label = if (count > 1) "${index + 1}.${hitIndex + 1}" else hit.label)
             }
+            raws += previewResponse(raw)
         }
         return ByokImageWorkbenchResult(
             hits = hits,
@@ -128,7 +128,7 @@ class ByokImageApi(private val http: MolaHttp) {
         val hits = extractImageHits(result.raw)
         return ByokImageWorkbenchResult(
             hits = hits,
-            raw = result.raw,
+            raw = previewResponse(result.raw),
             usedFallback = result.usedFallback,
             requestCount = 1,
             status = if (hits.isEmpty()) "未识别到图片" else "生成完成",
@@ -183,10 +183,10 @@ class ByokImageApi(private val http: MolaHttp) {
                 buildChatEditBody(modelId, prompt, config, attachments)
             }
             val raw = executeJson(provider, provider.chatPath.ifBlank { "v1/chat/completions" }, body, config.timeoutSeconds)
-            raws += raw
             hits += extractImageHits(raw).mapIndexed { hitIndex, hit ->
                 hit.copy(label = if (count > 1) "${index + 1}.${hitIndex + 1}" else hit.label)
             }
+            raws += previewResponse(raw)
         }
         return ByokImageWorkbenchResult(
             hits = hits,
@@ -298,7 +298,7 @@ class ByokImageApi(private val http: MolaHttp) {
             if (!resp.isSuccessful) {
                 throw MolaApiException(resp.code, "图像请求失败：HTTP ${resp.code} ${extractErrorMessage(text)}")
             }
-            return text.take(100_000)
+            return text
         }
     }
 
@@ -316,8 +316,15 @@ class ByokImageApi(private val http: MolaHttp) {
             if (!resp.isSuccessful) {
                 throw MolaApiException(resp.code, "图像编辑失败：HTTP ${resp.code} ${extractErrorMessage(text)}")
             }
-            return text.take(100_000)
+            return text
         }
+    }
+
+    private fun previewResponse(text: String, limit: Int = 20_000): String {
+        if (text.length <= limit) return text
+        val head = text.take(12_000)
+        val tail = text.takeLast(2_000)
+        return "$head\n\n… 已省略 ${text.length - 14_000} 个字符，仅保留调试摘要 …\n\n$tail"
     }
 
     private fun buildEditMultipart(

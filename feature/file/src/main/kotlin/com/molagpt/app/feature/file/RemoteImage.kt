@@ -23,6 +23,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
+import com.molagpt.app.core.render.decodeImageModel
 import com.molagpt.app.core.render.fadeScaleIn
 import com.molagpt.app.core.render.shimmer
 
@@ -96,14 +97,4 @@ fun RemoteImage(url: String, modifier: Modifier = Modifier, contentDescription: 
             )
         }
     }
-}
-
-/** `data:[mime];base64,xxx` → ByteArray（Coil3 直出稳定）；其它（file://、http）原样返回。 */
-internal fun decodeImageModel(url: String): Any {
-    if (!url.startsWith("data:", ignoreCase = true)) return url
-    val comma = url.indexOf(',')
-    if (comma < 0 || !url.substring(0, comma).contains("base64", ignoreCase = true)) return url
-    return runCatching {
-        android.util.Base64.decode(url.substring(comma + 1), android.util.Base64.DEFAULT)
-    }.getOrDefault(url)
 }

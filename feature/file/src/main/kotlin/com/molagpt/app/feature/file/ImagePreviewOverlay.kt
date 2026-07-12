@@ -48,6 +48,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import com.molagpt.app.core.render.decodeImageModel
 import coil3.ImageLoader
 import coil3.asDrawable
 import coil3.imageLoader

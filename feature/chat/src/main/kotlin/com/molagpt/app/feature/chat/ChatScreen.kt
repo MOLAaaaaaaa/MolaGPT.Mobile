@@ -44,7 +44,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -295,7 +295,7 @@ fun ChatScreen(
                         AgentMonitorIcon(MaterialTheme.colorScheme.onSurface)
                     }
                     IconButton(onClick = onOpenImageWorkbench) {
-                        Icon(Icons.Filled.Edit, contentDescription = "图像工作台")
+                        Icon(Icons.Filled.Palette, contentDescription = "图像工作台")
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")

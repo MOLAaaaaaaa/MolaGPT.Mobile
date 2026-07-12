@@ -16,7 +16,6 @@ import com.molagpt.app.core.network.ByokImageApi
 import com.molagpt.app.core.network.ByokImageAttachment
 import com.molagpt.app.core.network.ByokImageWorkbenchConfig
 import com.molagpt.app.core.network.ByokImageWorkbenchResult
-import com.molagpt.app.core.network.ByokImageResult
 import com.molagpt.app.core.network.ByokModelApi
 import com.molagpt.app.core.network.McpToolListApi
 import com.molagpt.app.core.network.MolaApiException
@@ -65,8 +64,6 @@ class SettingsViewModel(
         byokProviders.providers.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     private val _byokStatus = MutableStateFlow<String?>(null)
     val byokStatus: StateFlow<String?> = _byokStatus.asStateFlow()
-    private val _imageWorkbench = MutableStateFlow(ImageWorkbenchState())
-    val imageWorkbench: StateFlow<ImageWorkbenchState> = _imageWorkbench.asStateFlow()
 
     init {
         // 仅在缓存为空/过期时拉取；新鲜则直接复用，不重刷整张额度表。
@@ -273,52 +270,6 @@ class SettingsViewModel(
             }
     }
 
-    fun generateByokImage(
-        providerId: String,
-        modelId: String,
-        prompt: String,
-        style: String,
-        imageConfig: com.molagpt.app.core.model.ImageGenerationConfig,
-    ) = viewModelScope.launch {
-        val provider = byokProviders.get(providerId)
-        if (provider == null) {
-            _imageWorkbench.value = ImageWorkbenchState(error = "请选择服务")
-            return@launch
-        }
-        if (!provider.enabled) {
-            _imageWorkbench.value = ImageWorkbenchState(error = "服务已停用")
-            return@launch
-        }
-        if (provider.purpose != com.molagpt.app.core.model.ByokPurpose.IMAGE) {
-            _imageWorkbench.value = ImageWorkbenchState(error = "请选择图像用途的服务")
-            return@launch
-        }
-        if (provider.models.none { it.id == modelId && it.supportsImageGeneration }) {
-            _imageWorkbench.value = ImageWorkbenchState(error = "请选择图像模型")
-            return@launch
-        }
-        val fullPrompt = listOfNotNull(prompt.trim(), style.trim().takeIf { it.isNotBlank() })
-            .filter { it.isNotBlank() }
-            .joinToString("，")
-        if (modelId.isBlank() || fullPrompt.isBlank()) {
-            _imageWorkbench.value = ImageWorkbenchState(error = "请选择模型并填写提示词")
-            return@launch
-        }
-        _imageWorkbench.value = ImageWorkbenchState(loading = true, status = "正在绘制")
-        runCatching {
-            withContext(dispatchers.io) {
-                byokImageApi.generate(provider, modelId, fullPrompt, size = "", imageConfig = imageConfig)
-            }
-        }.onSuccess { result ->
-            _imageWorkbench.value = ImageWorkbenchState(
-                result = result,
-                status = if (result.url.isNullOrBlank()) "已返回结果" else "绘制完成",
-            )
-        }.onFailure { e ->
-            _imageWorkbench.value = ImageWorkbenchState(error = e.message ?: "图像生成失败")
-        }
-    }
-
     suspend fun runImageWorkbenchRequest(
         providerId: String,
         modelId: String,
@@ -358,10 +309,3 @@ class SettingsViewModel(
         _syncing.value = false
     }
 }
-
-data class ImageWorkbenchState(
-    val loading: Boolean = false,
-    val result: ByokImageResult? = null,
-    val status: String? = null,
-    val error: String? = null,
-)
