@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 品牌玫瑰粉，与 ui/theme/Theme.kt 的 Brand 保持一致；用于通知图标 accent -->
+    <color name="brand">#BE727F</color>
+</resources>

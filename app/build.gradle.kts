@@ -34,8 +34,8 @@ android {
         applicationId = "com.molagpt.app"
         minSdk = 23
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.3.6"
+        versionCode = 11
+        versionName = "0.3.7"
         // 开发专用构建时间戳：注入 BuildConfig.BUILD_TIME，设置页底部展示。
         // configuration-cache 已关（见 gradle.properties），每次构建都会重新求值 → 时间会变，
         // 据此可确认装到机器上的是不是刚编译的新包。

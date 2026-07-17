@@ -42,12 +42,16 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -56,6 +60,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -1700,7 +1705,8 @@ private fun WorkbenchParametersSheet(
         contentWindowInsets = { WindowInsets(0) },
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).navigationBarsPadding(),
+            // verticalScroll 在前+ime 让位：焦点框（如自定义尺寸，位置偏下）在键盘弹出时可滚动到键盘上方（对齐 ModelEditSheet）。
+            modifier = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text("生成参数", style = MaterialTheme.typography.titleLarge)
@@ -1949,7 +1955,7 @@ private fun SessionSheet(
         contentWindowInsets = { WindowInsets(0) },
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).navigationBarsPadding(),
+            modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2108,7 +2114,8 @@ private fun WorkbenchSettingsSheet(
         contentWindowInsets = { WindowInsets(0) },
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).navigationBarsPadding(),
+            // verticalScroll 在前+ime 让位：焦点框（请求超时，位置偏下）在键盘弹出时可滚动到键盘上方（对齐 ModelEditSheet）。
+            modifier = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text("画图设置", style = MaterialTheme.typography.titleLarge)

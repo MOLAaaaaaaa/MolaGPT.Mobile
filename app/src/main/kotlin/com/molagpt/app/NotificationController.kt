@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.feature.chat.BackgroundStreamManager
 import kotlinx.coroutines.CoroutineScope
@@ -59,7 +60,8 @@ class NotificationController(
         )
         val body = if (convTitle.isNullOrBlank()) "回复已完成" else "「$convTitle」回复已完成"
         val notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_molagpt)
+            .setColor(ContextCompat.getColor(appContext, R.color.brand))
             .setContentTitle(headline)
             .setContentText(body)
             .setAutoCancel(true)

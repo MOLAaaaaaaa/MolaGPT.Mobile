@@ -161,6 +161,12 @@ fun AboutScreen(
                 text = "「远程 Agent 控制」的桥接 / 中继架构与 CLI 控制协议设计参考了开源项目 Remodex（Apache-2.0，github.com/Emanuele-web04/remodex），本实现为独立编写，未直接复制其源码，在此一并致谢。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 8.dp).padding(bottom = 8.dp),
+            )
+            Text(
+                text = "「抹茶画图」工作台由 DisaWdcba 贡献，产品思路参考开源项目 SimpleAIPainting（github.com/DisaWdcba/SimpleAIPainting），在此致谢。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 8.dp).padding(bottom = 12.dp),
             )
 
@@ -411,6 +417,9 @@ private val Dependencies = listOf(
     DependencyNotice("Ktor + OkHttp", "网络请求、SSE 与代理接口通信", "Apache-2.0"),
     DependencyNotice("kotlinx.serialization", "JSON 序列化与同步数据解析", "Apache-2.0"),
     DependencyNotice("Coil", "图片加载与缓存", "Apache-2.0"),
+    DependencyNotice("Telephoto", "图片缩放与手势预览", "Apache-2.0"),
+    DependencyNotice("commonmark", "Markdown 解析与富文本渲染", "BSD-2-Clause"),
+    DependencyNotice("JLaTeXMath", "数学公式原生 Canvas 渲染", "GPL-2.0"),
 )
 
 private const val LicenseNotice = """
@@ -428,6 +437,7 @@ Apache License 2.0
   - OkHttp
   - kotlinx.serialization
   - Coil
+  - Telephoto
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use
 these files except in compliance with the License. You may obtain a copy of the
@@ -437,4 +447,36 @@ Unless required by applicable law or agreed to in writing, software distributed
 under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
 CONDITIONS OF ANY KIND, either express or implied. See the License for the
 specific language governing permissions and limitations under the License.
+
+================================================================
+BSD 2-Clause License
+================================================================
+适用组件：
+  - commonmark (commonmark-java)
+
+Copyright (c) 2015, Robin Stocker
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED.
+
+================================================================
+GNU General Public License, version 2
+================================================================
+适用组件：
+  - JLaTeXMath / jlatexmath-android (ru.noties)
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; either version 2 of the License, or (at your option) any later
+version. See https://www.gnu.org/licenses/old-licenses/gpl-2.0.html for details.
 """

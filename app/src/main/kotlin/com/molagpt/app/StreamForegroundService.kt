@@ -53,7 +53,8 @@ class StreamForegroundService : Service() {
 
     private fun buildNotification(): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_molagpt)
+            .setColor(ContextCompat.getColor(this, R.color.brand))
             .setContentTitle("MolaGPT 正在生成回复")
             .setContentText("可以切换会话或暂时离开，完成后会更新对话。")
             .setOngoing(true)

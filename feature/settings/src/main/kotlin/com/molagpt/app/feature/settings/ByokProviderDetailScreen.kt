@@ -11,22 +11,28 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -69,7 +75,8 @@ import kotlinx.coroutines.launch
 
 /**
  * BYOK 提供商详情页：配置 / 模型 两个分区（胶囊分段控件切换）。
- * 配置区编辑协议、地址、密钥、路径并保存/删除；模型区列出模型、自动获取、手动增删改（底部弹层编辑）。
+ * 配置区编辑协议、地址、密钥、路径并保存/删除；模型区列出模型、自动获取、手动增删改（底部弹层编辑），
+ * 以及已添加模型的多选 / 全选 / 批量删除。
  * 表单态以 [ByokProvider] 为单一来源，编辑直接 copy 后调 saveByokProvider 落库。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -91,11 +98,23 @@ fun ByokProviderDetailScreen(
     // 自动获取：拉取后进入选择 sheet，用户勾选再添加（不再全量自动添加）。
     var fetching by remember { mutableStateOf(false) }
     var fetchResult by remember { mutableStateOf<List<com.molagpt.app.core.model.ProviderModel>?>(null) }
+    // 模型多选态提到页面级，才能挂 Scaffold FAB（与提供商列表加号同位置）。
+    var selectingModels by remember(providerId) { mutableStateOf(false) }
+    var selectedModelIds by remember(providerId) { mutableStateOf(emptySet<String>()) }
+    var showBatchDeleteConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(status) {
         status?.let {
             snackbar.showSnackbar(it)
             viewModel.clearByokStatus()
+        }
+    }
+    // 离开「模型」Tab 时退出多选，避免配置页仍露出删除 FAB。
+    LaunchedEffect(tab) {
+        if (tab != 1) {
+            selectingModels = false
+            selectedModelIds = emptySet()
+            showBatchDeleteConfirm = false
         }
     }
 
@@ -129,6 +148,20 @@ fun ByokProviderDetailScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
+        floatingActionButton = {
+            // 与 ByokProvidersScreen 加号同款：右下角圆角 FAB + navigationBarsPadding。
+            if (tab == 1 && selectingModels && selectedModelIds.isNotEmpty()) {
+                FloatingActionButton(
+                    onClick = { showBatchDeleteConfirm = true },
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.navigationBarsPadding(),
+                ) {
+                    Icon(Icons.Filled.Delete, contentDescription = "删除已选")
+                }
+            }
+        },
     ) { inner ->
         if (provider == null) {
             Box(Modifier.fillMaxSize().padding(inner), contentAlignment = Alignment.Center) {
@@ -149,7 +182,14 @@ fun ByokProviderDetailScreen(
             )
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
+                    // weight(1f) 吃掉分段控件下方剩余高度，视口贴到屏幕底（含手势条区域），背景才能真正沉浸。
+                    // 不要 fillMaxSize：在 Column 里会按父级全高测量，叠在分段控件下溢出，底部 inset 对不齐。
+                    .weight(1f)
+                    .fillMaxWidth()
+                    // 仅 ime 在 scroll 前消费：键盘弹出时缩视口，焦点框 bringIntoView 才能顶上来。
+                    // navigationBars 放 scroll 后（与设置页一致）：内容尾部让位，视口仍铺满手势条区域 → 小白条沉浸。
+                    // 若把 ime∪nav 都放 scroll 前，无键盘时视口被抬高，底部会留出一条不沉浸的空白带。
+                    .windowInsetsPadding(WindowInsets.ime)
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp)
                     .navigationBarsPadding(),
@@ -183,6 +223,10 @@ fun ByokProviderDetailScreen(
                     ModelsSection(
                         provider = provider,
                         fetching = fetching,
+                        selecting = selectingModels,
+                        selectedIds = selectedModelIds,
+                        onSelectingChange = { selectingModels = it },
+                        onSelectedIdsChange = { selectedModelIds = it },
                         onAutoFetch = {
                             scope.launch {
                                 // 切到模型页前若有未保存的配置草稿（用途改动等），先落库再检测。
@@ -223,6 +267,45 @@ fun ByokProviderDetailScreen(
                 }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { showDeleteDialog = false }) { Text("取消") } },
+        )
+    }
+
+    if (showBatchDeleteConfirm && provider != null) {
+        val count = selectedModelIds.size
+        val total = provider.models.size
+        AlertDialog(
+            onDismissRequest = { showBatchDeleteConfirm = false },
+            title = { Text(if (count == total) "删除全部模型" else "删除已选模型") },
+            text = {
+                Text(
+                    if (count == total) "确定删除该服务下全部 $count 个模型？此操作不可撤销。"
+                    else "确定删除已选的 $count 个模型？此操作不可撤销。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val ids = selectedModelIds
+                        showBatchDeleteConfirm = false
+                        val base = saveDraftRef.value ?: provider
+                        viewModel.saveByokProvider(
+                            base.copy(models = base.models.filterNot { it.id in ids }),
+                        )
+                        saveDraftRef.value = null
+                        selectingModels = false
+                        selectedModelIds = emptySet()
+                        scope.launch {
+                            snackbar.showSnackbar(
+                                if (ids.size == 1) "已删除 1 个模型"
+                                else "已删除 ${ids.size} 个模型",
+                            )
+                        }
+                    },
+                ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchDeleteConfirm = false }) { Text("取消") }
+            },
         )
     }
 
@@ -479,18 +562,33 @@ private fun ConfigSection(
 private fun ModelsSection(
     provider: ByokProvider,
     fetching: Boolean,
+    selecting: Boolean,
+    selectedIds: Set<String>,
+    onSelectingChange: (Boolean) -> Unit,
+    onSelectedIdsChange: (Set<String>) -> Unit,
     onAutoFetch: () -> Unit,
     onAddModel: () -> Unit,
     onEditModel: (ProviderModel) -> Unit,
 ) {
+    val modelIds = remember(provider.models) { provider.models.map { it.id }.toSet() }
+    // 列表变化时清掉已不存在的勾选；删空后退出选择模式。
+    LaunchedEffect(modelIds, selecting) {
+        val pruned = selectedIds.intersect(modelIds)
+        if (pruned != selectedIds) onSelectedIdsChange(pruned)
+        if (modelIds.isEmpty() && selecting) onSelectingChange(false)
+    }
+    val allSelected = modelIds.isNotEmpty() && modelIds.all { it in selectedIds }
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = onAutoFetch, enabled = !fetching, modifier = Modifier.weight(1f)) {
-                Text(if (fetching) "获取中…" else "自动获取")
-            }
-            OutlinedButton(onClick = onAddModel, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
-                Text("手动添加")
+        if (!selecting) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(onClick = onAutoFetch, enabled = !fetching, modifier = Modifier.weight(1f)) {
+                    Text(if (fetching) "获取中…" else "自动获取")
+                }
+                OutlinedButton(onClick = onAddModel, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
+                    Text("手动添加")
+                }
             }
         }
         if (provider.models.isEmpty()) {
@@ -501,20 +599,78 @@ private fun ModelsSection(
                 modifier = Modifier.padding(vertical = 24.dp),
             )
         } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (selecting) "已选 ${selectedIds.size} · 共 ${provider.models.size}"
+                    else "已添加 ${provider.models.size} 个",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (selecting) {
+                        TextButton(
+                            onClick = {
+                                onSelectedIdsChange(if (allSelected) emptySet() else modelIds)
+                            },
+                        ) {
+                            Text(if (allSelected) "取消全选" else "全选")
+                        }
+                        TextButton(
+                            onClick = {
+                                onSelectingChange(false)
+                                onSelectedIdsChange(emptySet())
+                            },
+                        ) { Text("取消") }
+                    } else {
+                        TextButton(onClick = { onSelectingChange(true) }) { Text("选择") }
+                    }
+                }
+            }
             provider.models.forEach { model ->
-                ModelCard(model = model, onClick = { onEditModel(model) })
+                ModelCard(
+                    model = model,
+                    selectionMode = selecting,
+                    selected = model.id in selectedIds,
+                    onClick = {
+                        if (selecting) {
+                            onSelectedIdsChange(
+                                if (model.id in selectedIds) selectedIds - model.id
+                                else selectedIds + model.id,
+                            )
+                        } else {
+                            onEditModel(model)
+                        }
+                    },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ModelCard(model: ProviderModel, onClick: () -> Unit) {
+private fun ModelCard(
+    model: ProviderModel,
+    onClick: () -> Unit,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(15.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+        color = if (selectionMode && selected) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+        },
+        border = BorderStroke(
+            1.dp,
+            if (selectionMode && selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        ),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(14.dp),
@@ -546,7 +702,12 @@ private fun ModelCard(model: ProviderModel, onClick: () -> Unit) {
                     }
                 }
             }
-            ForwardChevron()
+            if (selectionMode) {
+                // onCheckedChange = null：勾选交互统一由整行 clickable 处理，避免 Checkbox 再触发一次导致连点抵消。
+                Checkbox(checked = selected, onCheckedChange = null)
+            } else {
+                ForwardChevron()
+            }
         }
     }
 }
@@ -596,7 +757,7 @@ private fun ModelEditSheet(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
-                .navigationBarsPadding(),
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(if (draft.isExisting) "编辑模型" else "添加模型", style = MaterialTheme.typography.titleLarge)
@@ -755,7 +916,7 @@ private fun ModelFetchSheet(
             modifier = Modifier
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
-                .navigationBarsPadding(),
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text("选择要添加的模型", style = MaterialTheme.typography.titleLarge)
