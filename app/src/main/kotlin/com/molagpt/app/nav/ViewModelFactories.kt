@@ -30,6 +30,7 @@ object ViewModelFactories {
     fun agentControl(container: AppContainer) = factory {
         AgentControlViewModel(
             service = container.agentControlService,
+            onTurnSubmitted = container.agentNotificationMonitor::watch,
         )
     }
 
@@ -73,6 +74,7 @@ object ViewModelFactories {
             modelRefreshingFlow = container.modelRegistry.isRefreshing,
             modelRefresher = { providerKind -> refreshModels(container, providerKind) },
             settingsFlow = container.settingsFlow,
+            byokBaseUrlResolver = { providerId -> providerId?.let { container.byokProviderBaseUrls.value[it] }.orEmpty() },
             defaultModelId = settings.defaultModel,
             // composer 运行时工具开关初值（network/网页拉取/代码执行）。
             // mcp/vision/imageGeneration 在对话内无开关，由 BYOK 工具设置页实时驱动（见 resolveRequestTools），不在此初始化。

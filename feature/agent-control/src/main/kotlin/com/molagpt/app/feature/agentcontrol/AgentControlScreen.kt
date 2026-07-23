@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -35,6 +36,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,8 +45,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.AgentBackendIds
+import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.displayWorkspace
 import com.molagpt.app.core.model.isBusy
 import com.molagpt.app.core.render.MolaMotion
@@ -59,18 +65,46 @@ import com.molagpt.app.core.render.MolaMotion
 fun AgentControlScreen(
     vm: AgentControlViewModel,
     onExit: () -> Unit,
+    onVisibleSessionChanged: (String?) -> Unit = {},
 ) {
     val sessions by vm.sessions.collectAsStateWithLifecycle()
+    val machines by vm.machines.collectAsStateWithLifecycle()
     val selectedId by vm.selectedId.collectAsStateWithLifecycle()
     val selected by vm.selected.collectAsStateWithLifecycle()
     val refreshing by vm.refreshing.collectAsStateWithLifecycle()
     val connectionState by vm.connectionState.collectAsStateWithLifecycle()
+    val commandFailure by vm.commandFailure.collectAsStateWithLifecycle()
+    val workspaceFallback by vm.workspaceFallback.collectAsStateWithLifecycle()
 
     var showNew by remember { mutableStateOf(false) }
     var showModel by remember { mutableStateOf(false) }
     var showMode by remember { mutableStateOf(false) }
 
     val inSession = selectedId != null
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(selectedId) {
+        onVisibleSessionChanged(selectedId)
+        onDispose { onVisibleSessionChanged(null) }
+    }
+
+    DisposableEffect(lifecycleOwner, inSession) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> vm.setHubActive(!inSession)
+                Lifecycle.Event.ON_STOP -> vm.setHubActive(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            vm.setHubActive(!inSession)
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            vm.setHubActive(false)
+        }
+    }
 
     // 会话态下系统返回（含侧滑手势）先回到 Hub，而不是直接弹出整个 Agent 路由跳到上一级。
     BackHandler(enabled = inSession) { vm.deselect() }
@@ -98,6 +132,7 @@ fun AgentControlScreen(
         } else {
             HubScaffold(
                 sessions = sessions,
+                machines = machines,
                 connectionState = connectionState,
                 refreshing = refreshing,
                 onSelect = vm::select,
@@ -113,10 +148,16 @@ fun AgentControlScreen(
     if (showNew) {
         NewSessionSheet(
             sessions = sessions,
+            machines = machines,
             onDismiss = { showNew = false },
-            onCreate = { backendId, cwd, title ->
+            onCreate = { backendId, cwd, title, machineId ->
                 showNew = false
-                vm.newSession(backendId = backendId, workingDirectory = cwd, title = title)
+                vm.newSession(
+                    backendId = backendId,
+                    workingDirectory = cwd,
+                    title = title,
+                    machineId = machineId,
+                )
             },
         )
     }
@@ -126,12 +167,38 @@ fun AgentControlScreen(
     if (showMode && meta != null) {
         ModeSheet(meta = meta, onDismiss = { showMode = false }, onSetPermissionMode = vm::switchPermissionMode, onSetApprovalPolicy = vm::switchApprovalPolicy)
     }
+    commandFailure?.let { failure ->
+        AlertDialog(
+            onDismissRequest = vm::dismissCommandFailure,
+            title = { Text("${failure.sessionTitle} 的命令未执行") },
+            text = { Text(failure.message) },
+            confirmButton = {
+                TextButton(onClick = vm::dismissCommandFailure) { Text("知道了") }
+            },
+        )
+    }
+    workspaceFallback?.let { notice ->
+        AlertDialog(
+            onDismissRequest = vm::dismissWorkspaceFallback,
+            title = { Text("目录不可用，已改用临时目录") },
+            text = {
+                Text(
+                    "「${notice.sessionTitle}」请求的目录在桌面端不存在：\n${notice.requestedPath}\n\n" +
+                        "会话实际创建在：\n${notice.actualPath}",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = vm::dismissWorkspaceFallback) { Text("知道了") }
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HubScaffold(
     sessions: List<com.molagpt.app.core.model.RelaySessionMeta>,
+    machines: List<RelayMachine>,
     connectionState: com.molagpt.app.core.model.RelayConnectionState,
     refreshing: Boolean,
     onSelect: (com.molagpt.app.core.model.RelaySessionMeta) -> Unit,
@@ -168,6 +235,7 @@ private fun HubScaffold(
     ) { inner ->
         AgentHub(
             sessions = sessions,
+            machines = machines,
             connectionState = connectionState,
             onSelect = onSelect,
             onReconnect = onReconnect,

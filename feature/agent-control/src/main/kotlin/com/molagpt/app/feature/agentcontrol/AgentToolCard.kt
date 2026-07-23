@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -39,6 +40,35 @@ private fun argObj(argsJson: String?): JsonObject? =
     }
 
 internal fun isAgentTodoTool(name: String): Boolean = name == "TodoWrite"
+
+/**
+ * 权限卡的决策详情：批准前必须能看到"到底要执行什么"。Bash 显示完整命令；
+ * 其余工具把参数展开成 `key: value` 行（长值截断），未知结构退回裁剪后的原始 JSON。
+ * 数据（argumentsJson）本就随 permissionPrompt 事件同步到手机，此前 UI 没有渲染——
+ * 用户在"盲批"。返回 null 表示无可展示参数。
+ */
+internal fun agentPermissionDetail(name: String, argsJson: String?): String? {
+    if (argsJson.isNullOrBlank()) return null
+    val o = argObj(argsJson) ?: return argsJson.take(1200)
+    if (o.isEmpty()) return null
+
+    if (name == "Bash" || name == "commandExecution" || name == "command") {
+        o["command"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { return it.take(1200) }
+    }
+
+    val sb = StringBuilder()
+    for ((key, value) in o) {
+        if (sb.isNotEmpty()) sb.append('\n')
+        val rendered = when (value) {
+            is JsonPrimitive -> value.contentOrNull ?: value.toString()
+            else -> value.toString()
+        }
+        sb.append(key).append(": ")
+        sb.append(if (rendered.length > 300) rendered.take(300) + "…" else rendered)
+        if (sb.length > 1200) break
+    }
+    return sb.toString().take(1400).takeIf { it.isNotBlank() }
+}
 
 /** 友好标题（含关键参数）。返回 null 表示用默认渲染（原始工具名）。 */
 internal fun agentToolLabel(name: String, argsJson: String?): String? {
@@ -62,9 +92,13 @@ internal fun agentToolLabel(name: String, argsJson: String?): String? {
         "WebFetch" -> "阅读网页"
         "WebSearch" -> "联网搜索 " + (str("query") ?: "")
         "TodoWrite" -> "更新待办清单"
-        // 部分 Codex 工具
-        "commandExecution", "command" -> "终端"
+        // Codex app-server 的 item.type（与 Claude 工具名同池渲染）
+        "commandExecution", "command" ->
+            str("command")?.let { "终端 · " + it.trim().lineSequence().firstOrNull().orEmpty().take(50) } ?: "终端"
         "fileChange", "patchApply" -> "编辑文件"
+        "webSearch" -> str("query")?.takeIf { it.isNotBlank() }?.let { "联网搜索 " + it.take(40) } ?: "联网搜索"
+        "mcpToolCall" -> "MCP 工具 · " + (str("tool", "name", "toolName") ?: "")
+        "fileRead" -> "读取 " + (path ?: "文件")
         else -> null
     }
 }

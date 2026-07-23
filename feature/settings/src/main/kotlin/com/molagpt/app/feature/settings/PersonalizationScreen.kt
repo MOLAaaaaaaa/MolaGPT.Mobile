@@ -36,6 +36,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -69,11 +70,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -826,35 +824,14 @@ private fun RefreshButton(spinning: Boolean, onClick: () -> Unit) {
         label = "refreshAngle",
     )
     TextButton(onClick = onClick, enabled = !spinning) {
-        RefreshGlyph(color = cs.primary, modifier = Modifier.size(16.dp).rotate(if (spinning) spin else 0f))
+        Icon(
+            imageVector = Icons.Filled.Refresh,
+            contentDescription = null,
+            tint = cs.primary,
+            modifier = Modifier.size(16.dp).rotate(if (spinning) spin else 0f),
+        )
         Spacer(Modifier.width(6.dp))
         Text(if (spinning) "刷新中…" else "刷新")
-    }
-}
-
-/** 自绘环形箭头（material-icons-core 无 Refresh，用 Canvas 画 3/4 圆弧 + 箭头）。 */
-@Composable
-private fun RefreshGlyph(color: Color, modifier: Modifier = Modifier) {
-    androidx.compose.foundation.Canvas(modifier = modifier) {
-        val sw = size.minDimension * 0.12f
-        val pad = sw
-        drawArc(
-            color = color,
-            startAngle = -60f,
-            sweepAngle = 300f,
-            useCenter = false,
-            topLeft = Offset(pad, pad),
-            size = Size(size.width - pad * 2, size.height - pad * 2),
-            style = Stroke(width = sw, cap = StrokeCap.Round),
-        )
-        // 箭头：弧线起点处一个小三角
-        val r = (size.minDimension - pad * 2) / 2f
-        val cx = size.width / 2f
-        val cy = size.height / 2f
-        val tip = Offset(cx + r, cy)
-        val s = size.minDimension * 0.18f
-        drawLine(color, tip, Offset(tip.x - s, tip.y - s), strokeWidth = sw, cap = StrokeCap.Round)
-        drawLine(color, tip, Offset(tip.x + s * 0.4f, tip.y - s), strokeWidth = sw, cap = StrokeCap.Round)
     }
 }
 

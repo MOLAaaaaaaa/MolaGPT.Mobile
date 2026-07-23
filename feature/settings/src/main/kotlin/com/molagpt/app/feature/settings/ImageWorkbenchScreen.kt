@@ -74,6 +74,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
@@ -1593,7 +1594,7 @@ private fun ComposerCard(
                             enabled = sending || prompt.isNotBlank(),
                             modifier = Modifier.size(40.dp),
                         ) {
-                            if (sending) Icon(Icons.Filled.Close, contentDescription = "停止生成", modifier = Modifier.size(20.dp))
+                            if (sending) Icon(Icons.Filled.Stop, contentDescription = "停止生成", modifier = Modifier.size(20.dp))
                             else Icon(Icons.Filled.Send, contentDescription = "发送", modifier = Modifier.size(20.dp))
                         }
                     } else {
@@ -1603,7 +1604,7 @@ private fun ComposerCard(
                             shape = RoundedCornerShape(50),
                         ) {
                             if (sending) {
-                                Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Text("停止", modifier = Modifier.padding(start = 6.dp))
                             } else {
                                 Icon(Icons.Filled.AutoFixHigh, contentDescription = null, modifier = Modifier.size(16.dp))

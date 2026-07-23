@@ -1,5 +1,6 @@
 package com.molagpt.app.feature.agentcontrol
 
+import com.molagpt.app.core.model.AgentToolStatus
 import com.molagpt.app.core.model.RelayEnvelope
 import com.molagpt.app.core.model.RelayEvent
 
@@ -66,7 +67,9 @@ class AgentTranscriptReducer {
             is RelayEvent.ThinkingSnapshot -> {
                 if (turnIndex < 0) turnIndex = 0
                 clearPending()
-                val key = "$turnIndex-thinking-${env.seq}"
+                // segmentId 存在时按 segment 原位替换（桌面流式期间同段反复全文快照）；
+                // 老桌面/历史投影无 segmentId，退回按 seq 分块（回合末单段，行为同旧版）。
+                val key = "$turnIndex-thinking-" + (ev.segmentId ?: env.seq.toString())
                 upsert(key) { AgentBlock.Thinking(key, ev.text) }
                 true
             }
@@ -74,7 +77,7 @@ class AgentTranscriptReducer {
             is RelayEvent.AnswerSnapshot -> {
                 if (turnIndex < 0) turnIndex = 0
                 clearPending()
-                val key = "$turnIndex-assistant-${env.seq}"
+                val key = "$turnIndex-assistant-" + (ev.segmentId ?: env.seq.toString())
                 upsert(key) { AgentBlock.AssistantText(key, ev.text) }
                 true
             }
@@ -160,6 +163,30 @@ class AgentTranscriptReducer {
     fun snapshot(): List<AgentBlock> = ArrayList(blocks)
 
     /**
+     * 让"正在处理"指示器与会话真实状态同步。
+     *
+     * relay **不传** PendingShown（桌面把它当内部节奏标记折掉），而 [beginOptimisticTurn]
+     * 的乐观 Pending 只活在本次进入会话期间——`reset()` 一进页面就清了。于是两种常见情况
+     * 完全没有指示器：回合在电脑上发起，以及发送后退出再进入。叠加伪流式要攒 2.5s 才发
+     * 第一个快照、模型思考期又可能几十秒无事件，用户看到的就是一片空白。
+     *
+     * 这里不新增协议字段，改由 phase 兜底：忙碌且末块不是"活的"内容时补一个 Pending。
+     * “活的”指进行中的工具卡（它自己有转圈动画）和待决权限卡（等用户操作，不该显示忙）。
+     * 非忙碌时移除，避免回合结束后残留。返回是否产生可见变化。
+     */
+    fun syncActivityIndicator(busy: Boolean, label: String = "正在处理…"): Boolean {
+        val last = blocks.lastOrNull()
+        if (!busy) return clearPending()
+        if (last is AgentBlock.Pending) return false
+        if (last is AgentBlock.Tool && last.status == AgentToolStatus.Started) return false
+        if (last is AgentBlock.Tool && last.status == AgentToolStatus.Running) return false
+        if (last is AgentBlock.Permission && last.resolved == null) return false
+        if (turnIndex < 0) turnIndex = 0
+        blocks.add(AgentBlock.Pending("$turnIndex-pending-live", label))
+        return true
+    }
+
+    /**
      * 用户点了审批按钮后，乐观地把该卡片标成已处理（收起按钮、显示选择）。relay 不回"已解析"
      * 事件，所以由本地立即反馈。返回更新后的快照；找不到或选择未变则返回 null。
      */
@@ -172,9 +199,10 @@ class AgentTranscriptReducer {
         return snapshot()
     }
 
-    private fun clearPending() {
-        if (blocks.lastOrNull() is AgentBlock.Pending)
-            blocks.removeAt(blocks.lastIndex)
+    private fun clearPending(): Boolean {
+        if (blocks.lastOrNull() !is AgentBlock.Pending) return false
+        blocks.removeAt(blocks.lastIndex)
+        return true
     }
 
     /** 按 key 替换已有块；不存在则追加。 */

@@ -5,6 +5,7 @@ import com.molagpt.app.core.model.ByokMcpServer
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ChatRequest
+import com.molagpt.app.core.model.CustomBodyParam
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ImageGenerationConfig
@@ -337,9 +338,10 @@ class ByokChatService(
         val inputItems = messages
             .filter { it["role"]?.jsonPrimitive?.contentOrNull != "system" }
             .map { msg ->
+                val role = msg["role"]?.jsonPrimitive?.contentOrNull ?: "user"
                 buildJsonObject {
-                    put("role", msg["role"]?.jsonPrimitive?.contentOrNull ?: "user")
-                    put("content", msg["content"] ?: JsonPrimitive(""))
+                    put("role", role)
+                    put("content", toResponseContent(role, msg["content"]))
                 }
             }
         return buildJsonObject {
@@ -348,7 +350,8 @@ class ByokChatService(
             if (systemText != null) put("instructions", systemText)
             putJsonArray("input") { inputItems.forEach { add(it) } }
             // Responses API（OpenAI 官方 /v1/responses）推理：reasoning:{effort}，按 kind 门控。
-            if (request.useThinking && effectiveThinkingKind(provider, request.modelId) != ThinkingParamKind.NONE) {
+            val thinkingOn = request.useThinking || isAlwaysOnThinking(provider, request.modelId)
+            if (thinkingOn && effectiveThinkingKind(provider, request.modelId) != ThinkingParamKind.NONE) {
                 putJsonObject("reasoning") {
                     put("effort", request.reasoningEffort.ifBlank { ThinkingKinds.MEDIUM })
                 }
@@ -356,6 +359,43 @@ class ByokChatService(
             if (includeTools && request.enabledTools.hasByokTools) {
                 putJsonArray("tools") {
                     toolSpecs(provider, request).forEach { spec -> add(buildResponseTool(spec)) }
+                }
+            }
+            applyModelCustomBody(provider, request.modelId)
+        }
+    }
+
+    /**
+     * 把 chat-completions 的 content（字符串或 text/image_url part 数组）转成 Responses API 的
+     * content 形态：字符串直传（Responses 接受 content 为字符串）；数组逐 part 映射——
+     * text → input_text（用户/系统）/ output_text（助手），image_url:{url} → {type:"input_image", image_url:url}
+     * （扁平字符串，与 [analyzeResponseImage] 一致）。修复带图附件发给 Responses 因 part 类型不符被 400 的问题。
+     */
+    private fun toResponseContent(role: String, content: JsonElement?): JsonElement {
+        if (content == null) return JsonPrimitive("")
+        (content as? JsonPrimitive)?.let { return it }
+        val arr = content as? JsonArray ?: return JsonPrimitive(content.toString())
+        val textType = if (role == "assistant") "output_text" else "input_text"
+        return buildJsonArray {
+            arr.forEach { part ->
+                val obj = part as? JsonObject ?: return@forEach
+                when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+                    "image_url" -> {
+                        val url = (obj["image_url"] as? JsonObject)?.get("url")?.jsonPrimitive?.contentOrNull
+                            ?: obj["image_url"]?.jsonPrimitive?.contentOrNull
+                        if (!url.isNullOrBlank()) addJsonObject {
+                            put("type", "input_image")
+                            put("image_url", url)
+                        }
+                    }
+                    // text 及其它 part 类型统一按文本兜底，避免整条请求 400。
+                    else -> {
+                        val text = obj["text"]?.jsonPrimitive?.contentOrNull
+                        if (!text.isNullOrBlank()) addJsonObject {
+                            put("type", textType)
+                            put("text", text)
+                        }
+                    }
                 }
             }
         }
@@ -584,19 +624,29 @@ class ByokChatService(
         }
         if (includeTools && request.enabledTools.hasByokTools) put("tools", toolDefinitions(provider, request))
         addOpenAiThinking(provider, request)
+        applyModelCustomBody(provider, request.modelId)
     }
 
     /**
      * 有效推理 kind：模型显式配置（含 NONE=关闭）优先；否则按 OpenRouter→host→模型 ID 兜底。
-     * OpenRouter 对所有模型统一走 reasoning:{effort}，忽略家族差异。
+     * 聚合网关下预算类通过 [ThinkingKinds.wireKind] 折算为 OPENAI_REASONING_EFFORT，
+     * 避免把 thinking_budget 等家族私有参数发到 OpenRouter。
      */
     private fun effectiveThinkingKind(provider: ByokProvider, modelId: String): ThinkingParamKind {
         val cfg = provider.models.firstOrNull { it.id == modelId }?.thinkingConfig
-        if (cfg != null) return cfg.kind
-        if (ThinkingKinds.isOpenRouter(provider.baseUrl)) return ThinkingParamKind.OPENAI_REASONING_EFFORT
-        return ThinkingKinds.hostInferredKind(provider.baseUrl)
-            ?: ThinkingKinds.inferFromModelId(modelId)
+        val raw = when {
+            cfg != null -> cfg.kind
+            ThinkingKinds.isOpenRouter(provider.baseUrl) -> ThinkingParamKind.OPENAI_REASONING_EFFORT
+            else -> ThinkingKinds.hostInferredKind(provider.baseUrl)
+                ?: ThinkingKinds.inferFromModelId(modelId)
+        }
+        return ThinkingKinds.wireKind(raw, provider.baseUrl)
     }
+
+    /** 模型是否强制开启推理（如 Kimi K3）。 */
+    private fun isAlwaysOnThinking(provider: ByokProvider, modelId: String): Boolean =
+        provider.models.firstOrNull { it.id == modelId }?.thinkingConfig?.alwaysOn == true ||
+            ThinkingKinds.isKimiK3(modelId)
 
     /** 向 OpenAI-compat 请求体追加推理参数（top-level 字段，按 kind 分派）。 */
     private fun JsonObjectBuilder.addOpenAiThinking(
@@ -605,7 +655,9 @@ class ByokChatService(
     ) {
         val kind = effectiveThinkingKind(provider, request.modelId)
         if (kind == ThinkingParamKind.NONE) return
-        if (!request.useThinking) {
+        val alwaysOn = isAlwaysOnThinking(provider, request.modelId)
+        val useThinking = request.useThinking || alwaysOn
+        if (!useThinking) {
             // 关闭：仅对需要显式禁用的 kind 发禁用参数，其余省略（更安全）。
             when (kind) {
                 ThinkingParamKind.DEEPSEEK_THINKING, ThinkingParamKind.KIMI ->
@@ -615,10 +667,14 @@ class ByokChatService(
             }
             return
         }
-        val effort = request.reasoningEffort.ifBlank { ThinkingKinds.MEDIUM }
+        val effort = request.reasoningEffort.ifBlank {
+            provider.models.firstOrNull { it.id == request.modelId }?.thinkingConfig
+                ?.let { ThinkingKinds.resolveDefaultEffort(it) }
+                ?: ThinkingKinds.MEDIUM
+        }
         when (kind) {
             ThinkingParamKind.OPENAI_REASONING_EFFORT -> {
-                if (ThinkingKinds.isOpenRouter(provider.baseUrl)) {
+                if (ThinkingKinds.isAggregatingGateway(provider.baseUrl)) {
                     putJsonObject("reasoning") { put("effort", effort) }
                 } else {
                     put("reasoning_effort", effort)
@@ -633,10 +689,44 @@ class ByokChatService(
                 put("enable_thinking", true)
                 put("thinking_budget", ThinkingKinds.budgetFor(kind, effort))
             }
-            ThinkingParamKind.GEMINI -> put("reasoning_effort", effort)
+            ThinkingParamKind.GEMINI -> {
+                // OpenAI-compat Gemini：符号档位；聚合网关已在 wireKind 折算走 effort 分支。
+                if (ThinkingKinds.isAggregatingGateway(provider.baseUrl)) {
+                    putJsonObject("reasoning") { put("effort", effort) }
+                } else {
+                    put("reasoning_effort", effort)
+                }
+            }
             else -> {}
         }
     }
+
+    /**
+     * 把当前模型的自定义 body 覆写项叠加到请求体（作为 builder 的最后一步，覆盖前面所有字段）。
+     * 保护键（承载消息/流/工具结构的字段）永不可覆盖，避免破坏请求。与 Desktop CustomRequestParams 对齐。
+     */
+    private fun JsonObjectBuilder.applyModelCustomBody(provider: ByokProvider, modelId: String) {
+        val custom = provider.models.firstOrNull { it.id == modelId }?.customBody ?: return
+        custom.forEach { param ->
+            val key = param.key.trim()
+            if (key.isBlank() || isProtectedBodyKey(key)) return@forEach
+            put(key, customBodyValueToJson(param))
+        }
+    }
+
+    private fun isProtectedBodyKey(key: String): Boolean =
+        key == "messages" || key == "input" || key == "contents" || key == "stream" ||
+            key == "tools" || key == "tool_choice" || key == "functionDeclarations"
+
+    private fun customBodyValueToJson(param: CustomBodyParam): JsonElement =
+        when (param.type.trim().lowercase()) {
+            "number" -> param.value.toLongOrNull()?.let { JsonPrimitive(it) }
+                ?: param.value.toDoubleOrNull()?.let { JsonPrimitive(it) }
+                ?: JsonPrimitive(param.value)
+            "boolean" -> JsonPrimitive(param.value.trim().toBooleanStrictOrNull() ?: false)
+            "json" -> runCatching { http.json.parseToJsonElement(param.value) }.getOrDefault(JsonPrimitive(param.value))
+            else -> JsonPrimitive(param.value)
+        }
 
     private fun buildMessages(provider: ByokProvider, request: ChatRequest): List<JsonObject> {
         val replaceImages = replaceImagesWithText(provider, request)
@@ -1473,7 +1563,8 @@ class ByokChatService(
         if (systemText.isNotBlank()) put("system", systemText)
         // Anthropic 推理：adaptive（Claude 3.7/4.x）/ budget_tokens（预算式），按 kind 分派。
         val kind = effectiveThinkingKind(provider, request.modelId)
-        if (request.useThinking && kind != ThinkingParamKind.NONE) {
+        val useThinking = request.useThinking || isAlwaysOnThinking(provider, request.modelId)
+        if (useThinking && kind != ThinkingParamKind.NONE) {
             val effort = request.reasoningEffort.ifBlank { ThinkingKinds.MEDIUM }
             when (kind) {
                 ThinkingParamKind.CLAUDE_BUDGET -> {
@@ -1492,6 +1583,7 @@ class ByokChatService(
             }
         }
         if (includeTools) put("tools", anthropicToolDefinitions(provider, request))
+        applyModelCustomBody(provider, request.modelId)
     }
 
     private fun parseAnthropicEvent(data: String): StreamEvent? {
@@ -1548,7 +1640,8 @@ class ByokChatService(
             put("temperature", request.temperature)
             // Gemini 2.5/3 推理：thinkingConfig.thinkingBudget（按档位映射）。
             val kind = effectiveThinkingKind(provider, request.modelId)
-            if (request.useThinking && kind == ThinkingParamKind.GEMINI) {
+            val thinkingOn = request.useThinking || isAlwaysOnThinking(provider, request.modelId)
+            if (thinkingOn && kind == ThinkingParamKind.GEMINI) {
                 val effort = request.reasoningEffort.ifBlank { ThinkingKinds.MEDIUM }
                 putJsonObject("thinkingConfig") {
                     put("thinkingBudget", ThinkingKinds.budgetFor(kind, effort))
@@ -1556,6 +1649,7 @@ class ByokChatService(
             }
         })
         if (includeTools) put("tools", geminiToolDefinitions(provider, request))
+        applyModelCustomBody(provider, request.modelId)
     }
 
     private fun parseGeminiEvent(data: String): List<StreamEvent> {

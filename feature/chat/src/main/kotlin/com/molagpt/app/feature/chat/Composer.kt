@@ -32,8 +32,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ripple
 import androidx.compose.material3.Icon
@@ -71,10 +71,10 @@ import com.molagpt.app.core.render.PersonaIcons
  *
  * 工具行（可横向滚动）：
  *  - 「联网搜索」「网页拉取」：与设置页两个独立开关对应；BYOK 需所选模型支持工具调用；
- *  - 「推理」开关：仅当所选模型 [ProviderModel.supportsThinking] 时显示；
+ *  - 「推理」胶囊：仅当所选模型 [ProviderModel.supportsThinking] 时显示。有档位的模型点按弹出
+ *    强度面板（[ReasoningSheet]，滑杆 + 刻度，关闭态点按=开启并回默认档）；无档位 kind（Kimi）退化为纯开关；
  *  - BYOK 专属「MCP / 视觉 / 图像」：MCP 按服务器配置门控；视觉作为外挂视觉工具，
  *    只要模型支持工具调用即可启用；图像由独立的图像用途 provider 提供，当前聊天模型只要支持工具调用即可调用。
- *  - 推理强度（低/中/高）：仅当开了推理且模型 [ProviderModel.supportsReasoningEffort] 时显示。
  * 底部加号 = 选图上传（代码执行仅 MolaGPT 账户，开关在设置页）。
  */
 @Composable
@@ -86,6 +86,7 @@ fun Composer(
     selectedModel: ProviderModel?,
     useThinking: Boolean,
     reasoningEffort: String,
+    providerBaseUrl: String,
     pendingAttachments: List<FileInfo>,
     activePersona: Persona?,
     showPersonaChip: Boolean,
@@ -98,9 +99,12 @@ fun Composer(
     onRemoveAttachment: (String) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
+    /** BYOK：打开当前模型的推理参数编辑页；MolaGPT 传 null。 */
+    onOpenModelReasoningSettings: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
+    var showReasoningSheet by remember { mutableStateOf(false) }
     val hasReadyAttachment = pendingAttachments.any {
         it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank())
     }
@@ -108,16 +112,21 @@ fun Composer(
     val colorScheme = MaterialTheme.colorScheme
     val toolsEnabled = enabled && !isStreaming
     val showThinking = selectedModel?.supportsThinking == true
-    // 推理档位：BYOK 模型按 thinkingConfig.effortLevels 动态渲染；MolaGPT/未配置走 low/medium/high 兜底。
+    // 推理档位来源：模型 ThinkingConfig（可含 max/ultra 等自定义档，resolveEffortLevels 空则回落方言默认）；
+    // 无 ThinkingConfig 的遗留模型按 supportsReasoningEffort 走标准 reasoning_effort 三档。
     val tc = selectedModel?.thinkingConfig
-    val effortOptions: List<Pair<String, String>> = when {
-        tc != null && tc.kind != com.molagpt.app.core.model.ThinkingParamKind.NONE && tc.effortLevels.isNotEmpty() ->
-            tc.effortLevels.map { it to effortLabel(it) }
-        selectedModel?.supportsReasoningEffort == true ->
-            listOf("low" to "低", "medium" to "中", "high" to "高")
-        else -> emptyList()
+    val thinkingConfig: com.molagpt.app.core.model.ThinkingConfig? = when {
+        tc != null && tc.kind != com.molagpt.app.core.model.ThinkingParamKind.NONE -> tc
+        selectedModel?.supportsReasoningEffort == true -> com.molagpt.app.core.model.ThinkingConfig(
+            kind = com.molagpt.app.core.model.ThinkingParamKind.OPENAI_REASONING_EFFORT,
+            effortLevels = listOf("low", "medium", "high"),
+            defaultEffort = "medium",
+        )
+        else -> null
     }
-    val showEffort = showThinking && useThinking && effortOptions.isNotEmpty()
+    val effortLevels: List<String> = thinkingConfig
+        ?.let { com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(it) }
+        ?: emptyList()
     val isByok = selectedModel?.providerKind == ProviderKind.BYOK
     // BYOK 工具的通用前提：模型声明支持工具调用。
     val byokToolEnabled = toolsEnabled && (selectedModel?.supportsToolCalling == true)
@@ -175,21 +184,36 @@ fun Composer(
                     onCheckedChange = onSetSteel,
                 )
                 if (showThinking) {
-                    ToolChip(
-                        label = "推理",
-                        checked = useThinking,
+                    val toggleOnly = effortLevels.isEmpty()
+                    val alwaysOn = thinkingConfig?.alwaysOn == true
+                    val chipOn = alwaysOn || useThinking
+                    ReasoningChip(
+                        checked = chipOn,
+                        effortLabel = if (!toggleOnly && chipOn) {
+                            com.molagpt.app.core.model.ThinkingKinds.effortLabel(reasoningEffort)
+                        } else {
+                            null
+                        },
+                        hasLevels = !toggleOnly,
                         enabled = toolsEnabled,
-                        onCheckedChange = onToggleThinking,
+                        onClick = {
+                            if (toggleOnly) {
+                                // KIMI 等仅开/关的 kind：纯开关，不弹层。
+                                onToggleThinking(!useThinking)
+                            } else if (alwaysOn) {
+                                showReasoningSheet = true
+                            } else {
+                                if (!useThinking) {
+                                    // 关→点按 = 开启并回默认档，再弹层微调。
+                                    onToggleThinking(true)
+                                    thinkingConfig?.let {
+                                        onSetReasoningEffort(com.molagpt.app.core.model.ThinkingKinds.resolveDefaultEffort(it))
+                                    }
+                                }
+                                showReasoningSheet = true
+                            }
+                        },
                     )
-                    // 推理强度（低/中/高）紧贴推理开关右侧；MCP/视觉/图像 在设置页对应开关里控制，不在此暴露。
-                    if (showEffort) {
-                        com.molagpt.app.core.render.SegmentedControl(
-                            options = effortOptions,
-                            selected = reasoningEffort,
-                            onSelect = onSetReasoningEffort,
-                            modifier = Modifier.width((effortOptions.size * 46).dp),
-                        )
-                    }
                 }
             }
 
@@ -253,7 +277,7 @@ fun Composer(
                 ) { streaming ->
                     if (streaming) {
                         RoundIconButton(
-                            icon = Icons.Filled.Clear,
+                            icon = Icons.Filled.Stop,
                             contentDescription = "停止生成",
                             selected = true,
                             containerColor = colorScheme.error,
@@ -275,18 +299,25 @@ fun Composer(
             }
         }
     }
-}
 
-/** 推理档位符号 → 中文标签。 */
-private fun effortLabel(effort: String): String = when (effort.lowercase()) {
-    "low" -> "低"
-    "medium" -> "中"
-    "high" -> "高"
-    "xhigh" -> "超高"
-    "max" -> "最高"
-    "auto" -> "自动"
-    "off" -> "关"
-    else -> effort
+    if (showReasoningSheet && thinkingConfig != null) {
+        ReasoningSheet(
+            config = thinkingConfig,
+            useThinking = useThinking || thinkingConfig.alwaysOn,
+            reasoningEffort = reasoningEffort,
+            baseUrl = providerBaseUrl,
+            onPick = { pick ->
+                if (pick == null) {
+                    if (!thinkingConfig.alwaysOn) onToggleThinking(false)
+                } else {
+                    if (!useThinking) onToggleThinking(true)
+                    onSetReasoningEffort(pick)
+                }
+            },
+            onDismiss = { showReasoningSheet = false },
+            onOpenModelSettings = onOpenModelReasoningSettings?.takeIf { isByok },
+        )
+    }
 }
 
 /** 待发送图片条：上传中转圈、失败标红，右侧叉可移除。 */

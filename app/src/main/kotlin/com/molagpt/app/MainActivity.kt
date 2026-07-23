@@ -37,7 +37,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         maybeRequestNotificationPermission()
-        handleOpenConversationIntent(intent)
+        handleOpenNotificationIntent(intent)
         setContent {
             val settings by container.settingsStore.settings
                 .collectAsStateWithLifecycle(initialValue = com.molagpt.app.core.storage.AppSettings())
@@ -72,7 +72,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleOpenConversationIntent(intent)
+        handleOpenNotificationIntent(intent)
     }
 
     override fun onStart() {
@@ -85,9 +85,11 @@ class MainActivity : ComponentActivity() {
         container.setAppForeground(false)
     }
 
-    private fun handleOpenConversationIntent(intent: Intent?) {
+    private fun handleOpenNotificationIntent(intent: Intent?) {
         val sessionId = intent?.getStringExtra(NotificationController.EXTRA_OPEN_SESSION)
         if (!sessionId.isNullOrBlank()) container.requestOpenConversation(sessionId)
+        val agentSessionId = intent?.getStringExtra(AgentNotificationController.EXTRA_OPEN_AGENT_SESSION)
+        if (!agentSessionId.isNullOrBlank()) container.requestOpenAgentSession(agentSessionId)
     }
 
     private fun maybeRequestNotificationPermission() {

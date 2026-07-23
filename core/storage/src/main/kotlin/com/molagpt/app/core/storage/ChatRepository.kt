@@ -265,6 +265,8 @@ class ChatRepository(
                 collapseThinking(frags)
                 meta = meta - "pending"
                 cmd.usage?.totalTokens?.let { meta = meta + ("tokens" to it.toString()) }
+                // 记录服务端上报的推理 token 数，供运行时自校正判定「隐藏思考但确实推理了」。
+                cmd.usage?.reasoningTokens?.let { meta = meta + ("reasoningTokens" to it.toString()) }
             }
             is DeltaCommand.Fail -> {
                 status = MessageStatus.ERROR

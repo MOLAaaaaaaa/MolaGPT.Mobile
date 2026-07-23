@@ -26,7 +26,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -133,7 +133,7 @@ fun AgentComposer(
                 Spacer(Modifier.weight(1f))
                 Crossfade(targetState = active, label = "agentSendStop") { streaming ->
                     if (streaming) {
-                        RoundIconButton(Icons.Filled.Clear, "停止", containerColor = cs.error, contentColor = cs.onError, onClick = onStop)
+                        RoundIconButton(Icons.Filled.Stop, "停止", containerColor = cs.error, contentColor = cs.onError, onClick = onStop)
                     } else {
                         RoundIconButton(
                             Icons.AutoMirrored.Filled.Send, "发送",

@@ -1,11 +1,16 @@
 package com.molagpt.app.feature.settings
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -26,9 +31,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,6 +76,9 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -65,9 +86,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
+import com.molagpt.app.core.model.CustomBodyParam
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.model.ThinkingBehavior
 import com.molagpt.app.core.model.ThinkingConfig
+import com.molagpt.app.core.model.ThinkingDetectSource
 import com.molagpt.app.core.model.ThinkingKinds
 import com.molagpt.app.core.model.ThinkingParamKind
 import com.molagpt.app.core.render.SegmentedControl
@@ -86,6 +110,8 @@ fun ByokProviderDetailScreen(
     viewModel: SettingsViewModel,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 非空时进入页面即打开该模型的编辑弹层（推理参数设置深链）。 */
+    initialEditModelId: String? = null,
 ) {
     val providers by viewModel.byokProviderList.collectAsStateWithLifecycle()
     val status by viewModel.byokStatus.collectAsStateWithLifecycle()
@@ -102,12 +128,23 @@ fun ByokProviderDetailScreen(
     var selectingModels by remember(providerId) { mutableStateOf(false) }
     var selectedModelIds by remember(providerId) { mutableStateOf(emptySet<String>()) }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
+    var consumedInitialEdit by remember(providerId, initialEditModelId) { mutableStateOf(false) }
 
     LaunchedEffect(status) {
         status?.let {
             snackbar.showSnackbar(it)
             viewModel.clearByokStatus()
         }
+    }
+    // 深链：provider 就绪后切到「模型」Tab 并打开对应模型编辑弹层。
+    LaunchedEffect(provider, initialEditModelId, consumedInitialEdit) {
+        if (consumedInitialEdit) return@LaunchedEffect
+        val targetId = initialEditModelId?.trim().orEmpty()
+        if (targetId.isEmpty() || provider == null) return@LaunchedEffect
+        val model = provider.models.firstOrNull { it.id == targetId } ?: return@LaunchedEffect
+        tab = 1
+        editingModel = ModelDraft.from(model)
+        consumedInitialEdit = true
     }
     // 离开「模型」Tab 时退出多选，避免配置页仍露出删除 FAB。
     LaunchedEffect(tab) {
@@ -315,6 +352,7 @@ fun ByokProviderDetailScreen(
         ModelEditSheet(
             draft = draft,
             isImageProvider = isImageProvider,
+            providerBaseUrl = provider.baseUrl,
             onDismiss = { editingModel = null },
             onSave = { saved ->
                 val base = (saveDraftRef.value ?: provider!!)
@@ -352,6 +390,13 @@ fun ByokProviderDetailScreen(
     }
 }
 
+private fun defaultChatPathFor(type: ByokProviderType): String = when (type) {
+    ByokProviderType.OPENAI_COMPAT -> "v1/chat/completions"
+    ByokProviderType.OPENAI_RESPONSE -> "v1/responses"
+    ByokProviderType.ANTHROPIC -> "v1/messages"
+    ByokProviderType.GEMINI -> "models/{model}:streamGenerateContent"
+}
+
 @Composable
 private fun ConfigSection(
     provider: ByokProvider,
@@ -372,6 +417,7 @@ private fun ConfigSection(
     var imageEditPath by remember(provider.id) { mutableStateOf(provider.imageEditPath) }
     var keyVisible by remember { mutableStateOf(false) }
     var showAdvanced by remember { mutableStateOf(false) }
+    var customHeaders by remember(provider.id) { mutableStateOf(provider.customHeaders) }
 
     val isImage = purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE
     // 图像用途兼容的服务类型：OpenAI 兼容（chat/completions 出图或 /v1/images/generations）与 Gemini（:generateContent 出图）。
@@ -390,6 +436,7 @@ private fun ConfigSection(
         purpose = purpose,
         imageFormat = imageFormat,
         imageEditPath = imageEditPath.trim(),
+        customHeaders = customHeaders.filter { it.name.isNotBlank() },
     )
 
     fun reportDraft() = onDraftChanged(current())
@@ -408,6 +455,19 @@ private fun ConfigSection(
                         t == com.molagpt.app.core.model.ByokProviderType.GEMINI
                     if (!imgOk && purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE) {
                         purpose = com.molagpt.app.core.model.ByokPurpose.CHAT
+                    }
+                    // 协议切换时，若对话/模型路径仍是某个已知默认值（或空），重填为新协议的默认路径；
+                    // 用户自定义过的路径保留。与 Desktop ProviderTypeChanged 的已知默认值守卫一致。
+                    val knownChatPaths = setOf(
+                        "v1/chat/completions", "v1/responses", "v1/messages",
+                        "models/{model}:streamGenerateContent",
+                    )
+                    if (chatPath.isBlank() || chatPath.trim() in knownChatPaths) {
+                        chatPath = defaultChatPathFor(t)
+                    }
+                    val knownModelsPaths = setOf("v1/models", "models")
+                    if (modelsPath.isBlank() || modelsPath.trim() in knownModelsPaths) {
+                        modelsPath = if (t == com.molagpt.app.core.model.ByokProviderType.GEMINI) "models" else "v1/models"
                     }
                     reportDraft()
                 })
@@ -538,6 +598,41 @@ private fun ConfigSection(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
+
+            Text("自定义请求头", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "附加到该服务全部请求（对话 / 模型列表 / 测试），auth 之后追加。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            customHeaders.forEachIndexed { index, header ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedTextField(
+                        value = header.name,
+                        onValueChange = { v ->
+                            customHeaders = customHeaders.toMutableList().also { it[index] = header.copy(name = v) }
+                            reportDraft()
+                        },
+                        label = { Text("名称") }, singleLine = true, modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = header.value,
+                        onValueChange = { v ->
+                            customHeaders = customHeaders.toMutableList().also { it[index] = header.copy(value = v) }
+                            reportDraft()
+                        },
+                        label = { Text("值") }, singleLine = true, modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = {
+                        customHeaders = customHeaders.toMutableList().also { it.removeAt(index) }
+                        reportDraft()
+                    }) { Text("删除") }
+                }
+            }
+            TextButton(onClick = {
+                customHeaders = customHeaders + com.molagpt.app.core.model.CustomHeader()
+                reportDraft()
+            }) { Text("+ 添加请求头") }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -727,7 +822,7 @@ private fun AbilityTag(label: String) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun ModelEditSheet(
     draft: ModelDraft,
@@ -735,21 +830,78 @@ private fun ModelEditSheet(
     onSave: (ModelDraft) -> Unit,
     onDelete: (() -> Unit)?,
     isImageProvider: Boolean = false,
+    providerBaseUrl: String = "",
 ) {
     var modelId by remember { mutableStateOf(draft.modelId) }
     var displayName by remember { mutableStateOf(draft.displayName) }
-    // 图像用途 provider 锁定为图像模型；对话用途锁定为对话模型。
     var isImage by remember { mutableStateOf(if (isImageProvider) true else draft.isImage) }
     var imageEdit by remember { mutableStateOf(draft.imageEdit) }
     var vision by remember { mutableStateOf(draft.vision) }
     var thinking by remember { mutableStateOf(draft.thinking) }
     var thinkingKind by remember { mutableStateOf(draft.thinkingKind) }
+    var alwaysOn by remember { mutableStateOf(draft.alwaysOn) }
+    var detectSource by remember { mutableStateOf(draft.detectSource) }
+    var manualOverride by remember { mutableStateOf(draft.manualOverride) }
+    var manualOpen by remember {
+        mutableStateOf(draft.manualOverride || !ThinkingKinds.isHighConfidence(draft.detectSource))
+    }
+    var effortLevels by remember {
+        mutableStateOf(
+            draft.effortLevels.ifEmpty { ThinkingKinds.effortLevelsFor(draft.thinkingKind) },
+        )
+    }
+    var defaultEffort by remember {
+        mutableStateOf(
+            draft.defaultEffort.ifBlank { ThinkingKinds.defaultEffortFor(draft.thinkingKind) },
+        )
+    }
+    var customEffortInput by remember { mutableStateOf("") }
     var tools by remember { mutableStateOf(draft.tools) }
+    var customBody by remember { mutableStateOf(draft.customBody) }
+
+    fun applyAutoDetect() {
+        val auto = ThinkingKinds.autoConfigFor(modelId, providerBaseUrl, supportedParams = null)
+            ?: ThinkingKinds.configFor(
+                ThinkingKinds.inferFromModelId(modelId).takeIf { it != ThinkingParamKind.NONE }
+                    ?: ThinkingKinds.hostInferredKind(providerBaseUrl)
+                    ?: ThinkingParamKind.OPENAI_REASONING_EFFORT,
+                alwaysOn = ThinkingKinds.isKimiK3(modelId),
+                detectSource = ThinkingDetectSource.HEURISTIC,
+            )
+        thinkingKind = auto.kind
+        alwaysOn = auto.alwaysOn
+        detectSource = auto.detectSource
+        manualOverride = false
+        effortLevels = ThinkingKinds.resolveEffortLevels(auto)
+        defaultEffort = ThinkingKinds.resolveDefaultEffort(auto)
+        thinking = auto.kind != ThinkingParamKind.NONE
+        manualOpen = !ThinkingKinds.isHighConfidence(auto.detectSource)
+    }
+
+    fun applyBehavior(behavior: ThinkingBehavior) {
+        if (behavior == ThinkingBehavior.NONE) {
+            thinkingKind = ThinkingParamKind.NONE
+            alwaysOn = false
+            effortLevels = emptyList()
+            defaultEffort = ""
+            manualOverride = true
+            detectSource = ThinkingDetectSource.OVERRIDE
+            return
+        }
+        val kind = ThinkingKinds.kindForBehavior(behavior, preferred = thinkingKind)
+        thinkingKind = kind
+        alwaysOn = ThinkingKinds.isKimiK3(modelId) && behavior == ThinkingBehavior.EFFORT
+        detectSource = ThinkingDetectSource.OVERRIDE
+        manualOverride = true
+        effortLevels = if (alwaysOn) listOf("low", "high", "max") else ThinkingKinds.effortLevelsFor(kind)
+        defaultEffort = if (alwaysOn) "max" else ThinkingKinds.defaultEffortFor(kind).let { d ->
+            if (d in effortLevels) d else effortLevels.firstOrNull().orEmpty()
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        // 自带 inset 置 0，底部留白只由内容的 navigationBarsPadding 处理一次（否则全屏展开时底部多一条白条把内容顶出屏幕）。
         contentWindowInsets = { WindowInsets(0) },
     ) {
         Column(
@@ -778,7 +930,7 @@ private fun ModelEditSheet(
                     SelectPill("支持编辑", selected = imageEdit, onClick = { imageEdit = !imageEdit })
                 }
                 Text(
-                    "图像用途模型用于图像生成/编辑。是否支持编辑影响图像编辑功能可用性。出图参数（尺寸/宽高比/推理）在图像工作台直接调整。",
+                    "图像用途模型用于图像生成/编辑；是否支持编辑将影响图像编辑功能可用性。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -788,54 +940,207 @@ private fun ModelEditSheet(
                     modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    SelectPill("推理", selected = thinking, onClick = { thinking = !thinking })
+                    SelectPill("推理", selected = thinking, onClick = {
+                        thinking = !thinking
+                        if (thinking && thinkingKind == ThinkingParamKind.NONE) applyAutoDetect()
+                    })
                     SelectPill("工具", selected = tools, onClick = { tools = !tools })
                     SelectPill("视觉", selected = vision, onClick = { vision = !vision })
                 }
-                Text(
-                    "能力标签影响对话界面里的功能可用性（推理强度、工具调用、图片输入）。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                // 推理参数格式（仅开启推理时显示）。自动检测按模型 ID 填充，可手动覆盖。
-                // 这里只管「API 参数格式（kind）」；推理档位（低/中/高）在对话界面调整。
                 if (thinking) {
-                    Text("推理参数格式", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    val kindOptions = listOf(
-                        ThinkingParamKind.NONE to "无",
-                        ThinkingParamKind.OPENAI_REASONING_EFFORT to "OpenAI（reasoning_effort）",
-                        ThinkingParamKind.CLAUDE_ADAPTIVE to "Claude（thinking adaptive）",
-                        ThinkingParamKind.CLAUDE_BUDGET to "Claude（预算 budget_tokens）",
-                        ThinkingParamKind.DEEPSEEK_THINKING to "DeepSeek（thinking）",
-                        ThinkingParamKind.GEMINI to "Gemini（thinkingBudget）",
-                        ThinkingParamKind.QWEN_THINKING_BUDGET to "Qwen（enable_thinking）",
-                        ThinkingParamKind.KIMI to "Kimi（thinking）",
+                    Text("推理方式", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val effectiveKind = ThinkingKinds.wireKind(thinkingKind, providerBaseUrl)
+                    val behavior = ThinkingKinds.behaviorOf(effectiveKind)
+                    val highConf = ThinkingKinds.isHighConfidence(detectSource) || manualOverride
+                    ThinkingDetectCard(
+                        behaviorLabel = ThinkingKinds.behaviorLabel(behavior),
+                        source = if (manualOverride) ThinkingDetectSource.OVERRIDE else detectSource,
+                        highConfidence = highConf,
+                        aggregating = ThinkingKinds.isAggregatingGateway(providerBaseUrl),
+                        nativeBudget = ThinkingKinds.isBudgetKind(thinkingKind),
+                        onRestoreAuto = { applyAutoDetect() },
                     )
-                    var kindExpanded by remember { mutableStateOf(false) }
-                    val selectedKindLabel = kindOptions.firstOrNull { it.first == thinkingKind }?.second ?: "无"
-                    Box {
-                        OutlinedButton(onClick = { kindExpanded = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text(selectedKindLabel, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("▾", style = MaterialTheme.typography.labelSmall)
+                    TextButton(onClick = { manualOpen = !manualOpen }) {
+                        Text(
+                            if (manualOpen) "收起手动指定" else "手动指定（高级）",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                    AnimatedVisibility(
+                        visible = manualOpen,
+                        enter = fadeIn() + expandVertically(),
+                        exit = fadeOut() + shrinkVertically(),
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            BehaviorOption(
+                                title = "自动（推荐）",
+                                subtitle = "按服务商能力与模型识别",
+                                selected = !manualOverride,
+                                onClick = { applyAutoDetect() },
+                            )
+                            BehaviorOption(
+                                title = "强度档位",
+                                subtitle = "低 / 中 / 高，常出现于 OpenAI 及其兼容 API",
+                                selected = manualOverride && behavior == ThinkingBehavior.EFFORT,
+                                onClick = { applyBehavior(ThinkingBehavior.EFFORT) },
+                            )
+                            BehaviorOption(
+                                title = "思考预算",
+                                subtitle = "按档位分配固定思考 token budget，常出现于 Qwen API",
+                                selected = manualOverride && behavior == ThinkingBehavior.BUDGET,
+                                onClick = { applyBehavior(ThinkingBehavior.BUDGET) },
+                            )
+                            BehaviorOption(
+                                title = "仅开关",
+                                subtitle = "只支持开 / 关，无强度档位",
+                                selected = manualOverride && behavior == ThinkingBehavior.TOGGLE,
+                                onClick = { applyBehavior(ThinkingBehavior.TOGGLE) },
+                            )
                         }
-                        androidx.compose.material3.DropdownMenu(
-                            expanded = kindExpanded, onDismissRequest = { kindExpanded = false },
+                    }
+
+                    val showEffortEditor = effectiveKind != ThinkingParamKind.NONE &&
+                        effectiveKind != ThinkingParamKind.KIMI
+                    if (showEffortEditor) {
+                        val isBudget = ThinkingKinds.showAsBudget(
+                            ThinkingConfig(kind = thinkingKind),
+                            providerBaseUrl,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            kindOptions.forEach { (kind, label) ->
-                                DropdownMenuItem(
-                                    text = { Text(label) },
-                                    onClick = { thinkingKind = kind; kindExpanded = false },
+                            Text(
+                                "可选强度",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                onClick = {
+                                    if (alwaysOn) {
+                                        effortLevels = listOf("low", "high", "max")
+                                        defaultEffort = "max"
+                                    } else {
+                                        effortLevels = ThinkingKinds.effortLevelsFor(thinkingKind)
+                                        defaultEffort = ThinkingKinds.defaultEffortFor(thinkingKind).let { d ->
+                                            if (d in effortLevels) d else effortLevels.firstOrNull().orEmpty()
+                                        }
+                                    }
+                                },
+                            ) { Text("重置") }
+                        }
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            effortLevels.forEach { level ->
+                                EffortLevelChip(
+                                    level = level,
+                                    isDefault = level == defaultEffort,
+                                    budgetTokens = if (isBudget) ThinkingKinds.budgetFor(thinkingKind, level) else null,
+                                    removable = effortLevels.size > 1,
+                                    onSetDefault = { defaultEffort = level },
+                                    onRemove = {
+                                        val next = effortLevels.filter { it != level }
+                                        effortLevels = next
+                                        if (defaultEffort !in next) defaultEffort = next.firstOrNull().orEmpty()
+                                    },
                                 )
                             }
                         }
+                        Text(
+                            "默认推理强度设置",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (!isBudget) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                OutlinedTextField(
+                                    value = customEffortInput,
+                                    onValueChange = { customEffortInput = it },
+                                    label = { Text("添加档位") },
+                                    placeholder = { Text("ultra …") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                OutlinedButton(
+                                    onClick = {
+                                        val next = ThinkingKinds.normalizeEffortLevels(
+                                            effortLevels + customEffortInput.trim().lowercase(),
+                                        )
+                                        if (next != effortLevels) {
+                                            effortLevels = next
+                                            if (defaultEffort !in next) {
+                                                defaultEffort = next.firstOrNull().orEmpty()
+                                            }
+                                        }
+                                        customEffortInput = ""
+                                    },
+                                    enabled = customEffortInput.trim().isNotEmpty(),
+                                ) { Text("添加") }
+                            }
+                        }
+                        ReasoningNoteCard(
+                            text = when {
+                                ThinkingKinds.isAggregatingGateway(providerBaseUrl) &&
+                                    ThinkingKinds.isBudgetKind(thinkingKind) && manualOverride ->
+                                    "该服务商会统一按强度处理，预算 token 不会精确生效。"
+                                ThinkingKinds.isAggregatingGateway(providerBaseUrl) &&
+                                    ThinkingKinds.isBudgetKind(thinkingKind) && !manualOverride ->
+                                    "已按 OpenRouter 自动折算为强度档位。"
+                                alwaysOn -> "该模型始终开启推理，不可关闭。"
+                                isBudget -> "强度越高，分配的思考额度越多。"
+                                else -> "对话时可在这些强度间快速切换。可添加服务商支持的自定义档位。"
+                            },
+                            warn = ThinkingKinds.isAggregatingGateway(providerBaseUrl) &&
+                                ThinkingKinds.isBudgetKind(thinkingKind) && manualOverride,
+                        )
+                    } else if (effectiveKind == ThinkingParamKind.KIMI) {
+                        ReasoningNoteCard(
+                            text = "该模型只支持开 / 关推理，不可调整推理强度。",
+                        )
                     }
-                    Text(
-                        "自动检测按模型 ID 推断参数格式；不同厂商推理参数名不同。选「无」可强制不发推理参数。推理强度（低/中/高）在对话界面里调。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
             }
+
+            Text("参数覆写（高级）", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            customBody.forEachIndexed { index, param ->
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = param.key,
+                            onValueChange = { v ->
+                                customBody = customBody.toMutableList().also { it[index] = param.copy(key = v) }
+                            },
+                            label = { Text("键") }, singleLine = true, modifier = Modifier.weight(1f),
+                        )
+                        OutlinedTextField(
+                            value = param.value,
+                            onValueChange = { v ->
+                                customBody = customBody.toMutableList().also { it[index] = param.copy(value = v) }
+                            },
+                            label = { Text("值") }, singleLine = true, modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val types = listOf("string", "number", "boolean", "json")
+                        OutlinedButton(onClick = {
+                            val next = types[(types.indexOf(param.type).coerceAtLeast(0) + 1) % types.size]
+                            customBody = customBody.toMutableList().also { it[index] = param.copy(type = next) }
+                        }) { Text("类型：${param.type.ifBlank { "string" }}", style = MaterialTheme.typography.labelSmall) }
+                        TextButton(onClick = {
+                            customBody = customBody.toMutableList().also { it.removeAt(index) }
+                        }) { Text("删除") }
+                    }
+                }
+            }
+            TextButton(onClick = { customBody = customBody + CustomBodyParam() }) { Text("+ 添加参数") }
             Button(
                 onClick = {
                     if (modelId.isNotBlank()) {
@@ -848,7 +1153,13 @@ private fun ModelEditSheet(
                                 vision = vision,
                                 thinking = thinking,
                                 thinkingKind = thinkingKind,
+                                effortLevels = effortLevels,
+                                defaultEffort = defaultEffort,
+                                alwaysOn = alwaysOn,
+                                detectSource = detectSource,
+                                manualOverride = manualOverride,
                                 tools = tools,
+                                customBody = customBody,
                             ),
                         )
                     }
@@ -865,6 +1176,184 @@ private fun ModelEditSheet(
             }
         }
     }
+}
+
+@Composable
+private fun ThinkingDetectCard(
+    behaviorLabel: String,
+    source: ThinkingDetectSource?,
+    highConfidence: Boolean,
+    aggregating: Boolean,
+    nativeBudget: Boolean,
+    onRestoreAuto: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    val isOverride = source == ThinkingDetectSource.OVERRIDE
+    val icon = if (!highConfidence) Icons.Filled.Warning else Icons.Filled.Check
+    val tint = if (!highConfidence) cs.tertiary else cs.primary
+    val bg = if (!highConfidence) cs.tertiaryContainer.copy(alpha = 0.55f) else cs.primaryContainer.copy(alpha = 0.45f)
+    val sourceText = when (source) {
+        ThinkingDetectSource.CAPABILITY -> "已读取服务商能力表识别推理配置"
+        ThinkingDetectSource.HOST -> "已按服务商识别推理配置"
+        ThinkingDetectSource.HEURISTIC -> "自动推测推理配置"
+        ThinkingDetectSource.OVERRIDE -> "已手动指定推理配置"
+        null -> "未标注来源"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(bg)
+            .padding(13.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+            Text(
+                if (isOverride) "手动：$behaviorLabel" else "识别为 $behaviorLabel",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                color = cs.onSurface,
+            )
+        }
+        Text(
+            text = buildString {
+                append(sourceText)
+                if (!highConfidence && !isOverride) append(" → 如有异常请手动指定")
+                if (aggregating && nativeBudget && !isOverride) append(" · 已折算为强度")
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (highConfidence) tint else cs.onTertiaryContainer,
+        )
+        if (isOverride) {
+            TextButton(onClick = onRestoreAuto) { Text("恢复自动") }
+        }
+    }
+}
+
+@Composable
+private fun BehaviorOption(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) cs.primary.copy(alpha = 0.12f) else cs.surfaceVariant.copy(alpha = 0.55f))
+            .border(
+                1.dp,
+                if (selected) cs.primary.copy(alpha = 0.45f) else cs.outline.copy(alpha = 0.14f),
+                RoundedCornerShape(12.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Spacer(modifier = Modifier.width(4.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+        }
+    }
+}
+
+/**
+ * 推理档位 chip：点本体 = 设为默认（星标 + 主色高亮），独立 × 移除（仅剩一档时锁定）。
+ * 预算类 kind 附带映射 token 短格式（如 8K）。
+ */
+@Composable
+private fun EffortLevelChip(
+    level: String,
+    isDefault: Boolean,
+    budgetTokens: Int?,
+    removable: Boolean,
+    onSetDefault: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(11.dp)
+    val containerColor by animateColorAsState(
+        targetValue = if (isDefault) colorScheme.primary.copy(alpha = 0.14f) else colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        label = "effortChipContainer",
+    )
+    val contentColor = if (isDefault) colorScheme.primary else colorScheme.onSurface
+    val borderColor = if (isDefault) colorScheme.primary.copy(alpha = 0.4f) else colorScheme.outline.copy(alpha = 0.16f)
+
+    Row(
+        modifier = Modifier
+            .clip(shape)
+            .background(containerColor)
+            .border(1.dp, borderColor, shape)
+            .clickable { onSetDefault() }
+            .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        if (isDefault) {
+            Icon(
+                imageVector = Icons.Filled.Star,
+                contentDescription = "默认档位",
+                tint = contentColor,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+        Text(
+            text = ThinkingKinds.effortLabel(level),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = contentColor,
+        )
+        Text(
+            text = level,
+            style = MaterialTheme.typography.labelSmall,
+            color = contentColor.copy(alpha = 0.55f),
+        )
+        if (budgetTokens != null) {
+            Text(
+                text = ThinkingKinds.formatBudgetShort(budgetTokens),
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = contentColor.copy(alpha = if (isDefault) 0.85f else 0.6f),
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(24.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(enabled = removable) { onRemove() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Close,
+                contentDescription = "移除档位",
+                tint = colorScheme.onSurfaceVariant.copy(alpha = if (removable) 0.8f else 0.28f),
+                modifier = Modifier.size(12.dp),
+            )
+        }
+    }
+}
+
+/** 推理段说明卡（精简人话；warn 时用警告色）。 */
+@Composable
+private fun ReasoningNoteCard(text: String, warn: Boolean = false) {
+    val cs = MaterialTheme.colorScheme
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = if (warn) cs.onTertiaryContainer else cs.onSurfaceVariant,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                if (warn) cs.tertiaryContainer.copy(alpha = 0.55f)
+                else cs.surfaceVariant.copy(alpha = 0.5f),
+            )
+            .padding(horizontal = 13.dp, vertical = 11.dp),
+    )
 }
 
 /**
@@ -1027,7 +1516,13 @@ private data class ModelDraft(
     val vision: Boolean = false,
     val thinking: Boolean = false,
     val thinkingKind: ThinkingParamKind = ThinkingParamKind.NONE,
+    val effortLevels: List<String> = emptyList(),
+    val defaultEffort: String = "",
+    val alwaysOn: Boolean = false,
+    val detectSource: ThinkingDetectSource? = null,
+    val manualOverride: Boolean = false,
     val tools: Boolean = true,
+    val customBody: List<CustomBodyParam> = emptyList(),
     val isExisting: Boolean = false,
 ) {
     fun toModel(provider: ByokProvider): ProviderModel = ProviderModel(
@@ -1036,7 +1531,7 @@ private data class ModelDraft(
         apiUrl = provider.chatPath,
         supportsVision = vision,
         supportsThinking = thinking,
-        supportsReasoningEffort = thinking,
+        supportsReasoningEffort = thinking && ThinkingKinds.effortLevelsFor(thinkingKind).isNotEmpty(),
         supportsToolCalling = tools,
         supportsImageGeneration = isImage,
         supportsImageEdit = isImage && imageEdit,
@@ -1044,14 +1539,19 @@ private data class ModelDraft(
         providerId = provider.id,
         providerName = provider.name,
         providerKind = ProviderKind.BYOK,
-        // 仅对话模型携带推理配置（kind + 档位集）；图像模型固定为 null。
         thinkingConfig = if (!isImage && thinking) {
-            ThinkingConfig(
+            val cfg = ThinkingConfig(
                 kind = thinkingKind,
-                effortLevels = ThinkingKinds.effortLevelsFor(thinkingKind),
-                defaultEffort = ThinkingKinds.defaultEffortFor(thinkingKind),
+                effortLevels = ThinkingKinds.normalizeEffortLevels(effortLevels)
+                    .ifEmpty { ThinkingKinds.effortLevelsFor(thinkingKind) },
+                defaultEffort = defaultEffort,
+                alwaysOn = alwaysOn || ThinkingKinds.isKimiK3(modelId),
+                detectSource = detectSource,
+                manualOverride = manualOverride,
             )
+            cfg.copy(defaultEffort = ThinkingKinds.resolveDefaultEffort(cfg))
         } else null,
+        customBody = customBody.filter { it.key.isNotBlank() },
     )
 
     companion object {
@@ -1065,7 +1565,13 @@ private data class ModelDraft(
                 vision = model.supportsVision,
                 thinking = model.supportsThinking || model.supportsReasoningEffort,
                 thinkingKind = tcfg?.kind ?: ThinkingParamKind.NONE,
+                effortLevels = tcfg?.let { ThinkingKinds.resolveEffortLevels(it) }.orEmpty(),
+                defaultEffort = tcfg?.let { ThinkingKinds.resolveDefaultEffort(it) }.orEmpty(),
+                alwaysOn = tcfg?.alwaysOn == true || ThinkingKinds.isKimiK3(model.id),
+                detectSource = tcfg?.detectSource,
+                manualOverride = tcfg?.manualOverride == true,
                 tools = model.supportsToolCalling,
+                customBody = model.customBody,
                 isExisting = true,
             )
         }

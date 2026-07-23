@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -230,7 +231,11 @@ private fun ActionButtons(checking: Boolean, onCheckUpdate: () -> Unit, onOpenGi
                 modifier = Modifier.size(17.dp),
                 strokeWidth = 2.dp,
                 color = LocalContentColor.current,
-            ) else RefreshGlyph(modifier = Modifier.size(17.dp))
+            ) else Icon(
+                imageVector = Icons.Filled.Refresh,
+                contentDescription = null,
+                modifier = Modifier.size(17.dp),
+            )
             Text("检查更新", modifier = Modifier.padding(start = 8.dp))
         }
         OutlinedButton(
@@ -355,24 +360,6 @@ private fun LicenseExpander() {
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun RefreshGlyph(modifier: Modifier = Modifier) {
-    val color = LocalContentColor.current
-    Canvas(modifier = modifier) {
-        drawArc(
-            color = color,
-            startAngle = 35f,
-            sweepAngle = 285f,
-            useCenter = false,
-            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round),
-            topLeft = Offset(size.width * 0.12f, size.height * 0.12f),
-            size = Size(size.width * 0.76f, size.height * 0.76f),
-        )
-        drawLine(color, Offset(size.width * 0.78f, size.height * 0.10f), Offset(size.width * 0.88f, size.height * 0.36f), 2.dp.toPx(), StrokeCap.Round)
-        drawLine(color, Offset(size.width * 0.78f, size.height * 0.10f), Offset(size.width * 0.54f, size.height * 0.18f), 2.dp.toPx(), StrokeCap.Round)
     }
 }
 

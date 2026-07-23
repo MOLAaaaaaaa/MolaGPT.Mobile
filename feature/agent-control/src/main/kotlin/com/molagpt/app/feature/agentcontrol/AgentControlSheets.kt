@@ -34,9 +34,12 @@ import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.AgentBackendIds
 import com.molagpt.app.core.model.AgentPermissionMode
 import com.molagpt.app.core.model.CodexApprovalPolicy
+import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.RelaySessionMeta
 import com.molagpt.app.core.model.approvalPolicyEnum
+import com.molagpt.app.core.model.displayName
 import com.molagpt.app.core.model.displayWorkspace
+import com.molagpt.app.core.model.isOnline
 import com.molagpt.app.core.model.isQuickChat
 import com.molagpt.app.core.model.permissionModeEnum
 import com.molagpt.app.core.model.sortAtMs
@@ -53,22 +56,47 @@ internal fun effortLabel(value: String?): String = when (value?.lowercase()) {
 @Composable
 internal fun NewSessionSheet(
     sessions: List<RelaySessionMeta>,
+    machines: List<RelayMachine>,
     onDismiss: () -> Unit,
-    onCreate: (backendId: String, cwd: String?, title: String?) -> Unit,
+    onCreate: (backendId: String, cwd: String?, title: String?, machineId: String?) -> Unit,
 ) {
+    val now = System.currentTimeMillis()
+    val selectableMachines = remember(machines, sessions) {
+        val fromRegistry = machines.sortedByDescending { it.lastSeenAtMs }
+        if (fromRegistry.isNotEmpty()) fromRegistry
+        else sessions.mapNotNull { meta ->
+            val id = meta.machineId?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            RelayMachine(id = id, name = meta.machineName, lastSeenAtMs = meta.updatedAtMs)
+        }.distinctBy { it.id }
+    }
+    val defaultMachineId = remember(selectableMachines) {
+        val online = selectableMachines.filter { it.isOnline(now) }
+        when {
+            online.size == 1 -> online.first().id
+            selectableMachines.size == 1 -> selectableMachines.first().id
+            online.isNotEmpty() -> online.first().id
+            else -> selectableMachines.firstOrNull()?.id
+        }
+    }
+    var machineId by remember(defaultMachineId) { mutableStateOf(defaultMachineId) }
+    val hasTargetMachine = !machineId.isNullOrBlank()
     var backendId by remember { mutableStateOf(AgentBackendIds.ClaudeCode) }
     var cwd by remember { mutableStateOf<String?>(null) }
     var title by remember { mutableStateOf("") }
 
-    // 工作区按后端区分：CLI 的工作目录是按 backend 各自存的，切换后端时只列该后端的工作区。
-    val workspaces = remember(sessions, backendId) {
-        sessions.filter { !it.isQuickChat && it.backendId == backendId }
+    // 工作区按「目标机器 + 后端」区分：路径在不同电脑上不可互通。
+    val workspaces = remember(sessions, backendId, machineId) {
+        sessions.filter {
+            !it.isQuickChat &&
+                it.backendId == backendId &&
+                (machineId.isNullOrBlank() || it.machineId == machineId)
+        }
             .sortedByDescending { it.sortAtMs }
             .distinctBy { it.workspaceKey ?: it.workingDirectory }
             .map { it.displayWorkspace to it.workingDirectory }
     }
-    // 切换后端后，若已选工作区不属于新后端则回退到 Quick Chat（否则会指向一个已消失的项）。
-    LaunchedEffect(backendId) {
+    // 切换后端/机器后，若已选工作区不属于新范围则回退到 Quick Chat。
+    LaunchedEffect(backendId, machineId) {
         if (cwd != null && workspaces.none { it.second == cwd }) cwd = null
     }
 
@@ -88,6 +116,23 @@ internal fun NewSessionSheet(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SheetTitle("新建远程会话")
+            if (selectableMachines.isNotEmpty()) {
+                SheetLabel("电脑")
+                selectableMachines.forEach { machine ->
+                    val online = machine.isOnline(now)
+                    SheetOption(
+                        title = machine.displayName,
+                        sub = if (online) "在线" else "离线（命令可能无法送达）",
+                        selected = machineId == machine.id,
+                    ) { machineId = machine.id }
+                }
+            } else {
+                Text(
+                    "尚未检测到桌面桥接。请先在电脑上登录并启用 Agent 桥接。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             SheetLabel("后端")
             SegmentedControl(
                 options = listOf(AgentBackendIds.ClaudeCode to "Claude Code", AgentBackendIds.Codex to "Codex"),
@@ -107,7 +152,11 @@ internal fun NewSessionSheet(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Button(onClick = { onCreate(backendId, cwd, title.ifBlank { null }) }, modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = { onCreate(backendId, cwd, title.ifBlank { null }, machineId) },
+                enabled = hasTargetMachine,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text("在桌面端创建")
             }
         }

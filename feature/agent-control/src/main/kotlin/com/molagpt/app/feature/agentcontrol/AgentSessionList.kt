@@ -34,32 +34,35 @@ import com.molagpt.app.core.model.AgentPermissionMode
 import com.molagpt.app.core.model.AgentPhase
 import com.molagpt.app.core.model.CodexApprovalPolicy
 import com.molagpt.app.core.model.RelayConnectionState
+import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.RelaySessionMeta
 import com.molagpt.app.core.model.approvalPolicyEnum
+import com.molagpt.app.core.model.displayMachine
+import com.molagpt.app.core.model.displayName
 import com.molagpt.app.core.model.displayWorkspace
 import com.molagpt.app.core.model.isBusy
+import com.molagpt.app.core.model.isOnline
 import com.molagpt.app.core.model.isQuickChat
 import com.molagpt.app.core.model.permissionModeEnum
 import com.molagpt.app.core.model.phaseEnum
 import com.molagpt.app.core.model.sortAtMs
 
 /**
- * Agent Hub —— 一级页面的主体。桌面端状态 hero + 全部/待处理分页 + 项目/快聊分组的富会话卡。
+ * Agent Hub —— 一级页面的主体。桌面端状态 hero + 按机器分组，其下再分项目/快聊。
  * 复用 relay 元信息（backend 徽标、phase 徽标、模型·模式标签、attention 点）。
  */
 @Composable
 fun AgentHub(
     sessions: List<RelaySessionMeta>,
+    machines: List<RelayMachine>,
     connectionState: RelayConnectionState,
     onSelect: (RelaySessionMeta) -> Unit,
     onReconnect: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val projects = sessions.filter { !it.isQuickChat }
-        .groupBy { it.workspaceKey ?: it.workingDirectory }
-        .toList()
-        .sortedByDescending { (_, list) -> list.maxOf { it.sortAtMs } }
-    val chats = sessions.filter { it.isQuickChat }.sortedByDescending { it.sortAtMs }
+    val now = System.currentTimeMillis()
+    val onlineMachines = machines.count { it.isOnline(now) }
+    val machineGroups = buildMachineGroups(sessions, machines)
 
     LazyColumn(
         modifier.fillMaxSize(),
@@ -67,14 +70,20 @@ fun AgentHub(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item(key = "hero") {
-            DesktopStatusHero(connectionState, sessions.size, projects.size, onReconnect)
+            DesktopStatusHero(
+                state = connectionState,
+                sessionCount = sessions.size,
+                machineCount = machines.size.coerceAtLeast(machineGroups.size),
+                onlineMachineCount = onlineMachines,
+                onReconnect = onReconnect,
+            )
         }
 
-        if (sessions.isEmpty()) {
+        if (sessions.isEmpty() && machines.isEmpty()) {
             item(key = "empty") {
                 Box(Modifier.fillMaxWidth().padding(top = 60.dp), contentAlignment = Alignment.Center) {
                     Text(
-                        "暂无 Agent 会话\n在 PC 上安装 MolaGPT，或点右下按钮来新建一个会话",
+                        "暂无 Agent 会话\n在 PC 上安装并启用 MolaGPT 桥接，或点右下按钮来新建一个会话",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -82,16 +91,76 @@ fun AgentHub(
             }
         }
 
-        projects.forEach { (key, list) ->
-            item(key = "ph-$key") { GroupHeader("项目", list.first().displayWorkspace) }
-            items(list.sortedByDescending { it.sortAtMs }, key = { it.conversationId }) { meta ->
-                SessionCard(meta, onSelect)
+        machineGroups.forEach { group ->
+            val multiMachine = machineGroups.size > 1
+            if (multiMachine || group.machineId.isNotBlank()) {
+                item(key = "mh-${group.machineId.ifBlank { "legacy" }}") {
+                    MachineHeader(group.name, group.online)
+                }
+            }
+
+            val projects = group.sessions.filter { !it.isQuickChat }
+                .groupBy { it.workspaceKey ?: it.workingDirectory }
+                .toList()
+                .sortedByDescending { (_, list) -> list.maxOf { it.sortAtMs } }
+            val chats = group.sessions.filter { it.isQuickChat }.sortedByDescending { it.sortAtMs }
+
+            projects.forEach { (key, list) ->
+                item(key = "ph-${group.machineId}-$key") {
+                    GroupHeader("项目", list.first().displayWorkspace)
+                }
+                items(list.sortedByDescending { it.sortAtMs }, key = { it.conversationId }) { meta ->
+                    SessionCard(meta, onSelect, showMachine = false)
+                }
+            }
+            if (chats.isNotEmpty()) {
+                item(key = "ch-head-${group.machineId}") { GroupHeader("快聊", "Quick Chat") }
+                items(chats, key = { it.conversationId }) { meta ->
+                    SessionCard(meta, onSelect, showMachine = false)
+                }
             }
         }
-        if (chats.isNotEmpty()) {
-            item(key = "ch-head") { GroupHeader("快聊", "Quick Chat") }
-            items(chats, key = { it.conversationId }) { meta -> SessionCard(meta, onSelect) }
-        }
+    }
+}
+
+private data class MachineGroup(
+    val machineId: String,
+    val name: String,
+    val online: Boolean,
+    val sessions: List<RelaySessionMeta>,
+)
+
+private fun buildMachineGroups(
+    sessions: List<RelaySessionMeta>,
+    machines: List<RelayMachine>,
+): List<MachineGroup> {
+    val now = System.currentTimeMillis()
+    val byId = machines.associateBy { it.id }
+    val grouped = sessions.groupBy { it.machineId.orEmpty() }
+    val ids = (machines.map { it.id } + grouped.keys).distinct()
+    return ids.mapNotNull { id ->
+        val list = grouped[id].orEmpty()
+        val machine = byId[id]
+        // 跳过既无会话、又已过期（或不存在）的空机器条目——但保留在线空机器，
+        // 这样用户能看到「这台电脑已连上，可新建会话」。
+        val online = machine?.isOnline(now) == true
+        if (list.isEmpty() && !online && id.isNotBlank()) return@mapNotNull null
+        if (list.isEmpty() && id.isBlank()) return@mapNotNull null
+        MachineGroup(
+            machineId = id,
+            name = when {
+                machine != null -> machine.displayName
+                id.isBlank() -> "未知电脑"
+                else -> list.firstOrNull()?.displayMachine ?: "未知电脑"
+            },
+            online = online || list.any { now - it.updatedAtMs < 45_000L },
+            sessions = list.sortedByDescending { it.sortAtMs },
+        )
+    }.sortedByDescending { group ->
+        maxOf(
+            group.sessions.maxOfOrNull { it.sortAtMs } ?: 0L,
+            byId[group.machineId]?.lastSeenAtMs ?: 0L,
+        )
     }
 }
 
@@ -99,7 +168,8 @@ fun AgentHub(
 private fun DesktopStatusHero(
     state: RelayConnectionState,
     sessionCount: Int,
-    projectCount: Int,
+    machineCount: Int,
+    onlineMachineCount: Int,
     onReconnect: () -> Unit,
 ) {
     val p = agentPalette()
@@ -110,7 +180,9 @@ private fun DesktopStatusHero(
     val dotColor = when { online -> p.green; connecting -> p.amber; else -> p.red }
     val statusText = when { online -> "已连接"; connecting -> "连接中…"; else -> "未连接" }
     val sub = when {
-        online -> "$sessionCount 个会话 · $projectCount 个项目"
+        online && machineCount > 1 ->
+            "$onlineMachineCount/$machineCount 台电脑在线 · $sessionCount 个会话"
+        online -> "$sessionCount 个会话 · ${if (machineCount > 0) "$machineCount 台电脑" else "本机"}"
         connecting -> "正在建立连接"
         else -> "远程控制不可用"
     }
@@ -161,6 +233,38 @@ internal fun MonitorIcon(tint: Color, dimen: androidx.compose.ui.unit.Dp = 22.dp
 }
 
 @Composable
+private fun MachineHeader(name: String, online: Boolean) {
+    val p = agentPalette()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 4.dp, top = 10.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "电脑",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(Modifier.width(7.dp))
+        Text(
+            "· $name",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+        )
+        Pill(
+            if (online) "在线" else "离线",
+            if (online) p.green else MaterialTheme.colorScheme.onSurfaceVariant,
+            if (online) p.greenSoft else MaterialTheme.colorScheme.surfaceVariant,
+        )
+    }
+}
+
+@Composable
 private fun GroupHeader(kind: String, name: String) {
     Row(
         Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
@@ -173,7 +277,11 @@ private fun GroupHeader(kind: String, name: String) {
 }
 
 @Composable
-private fun SessionCard(meta: RelaySessionMeta, onSelect: (RelaySessionMeta) -> Unit) {
+private fun SessionCard(
+    meta: RelaySessionMeta,
+    onSelect: (RelaySessionMeta) -> Unit,
+    showMachine: Boolean = false,
+) {
     Surface(
         onClick = { onSelect(meta) },
         shape = RoundedCornerShape(16.dp),
@@ -192,7 +300,7 @@ private fun SessionCard(meta: RelaySessionMeta, onSelect: (RelaySessionMeta) -> 
                     maxLines = 1,
                 )
                 Text(
-                    meta.displayWorkspace,
+                    if (showMachine) "${meta.displayMachine} · ${meta.displayWorkspace}" else meta.displayWorkspace,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

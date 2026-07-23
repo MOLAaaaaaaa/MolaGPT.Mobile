@@ -374,7 +374,7 @@ private fun EmptyProvidersHint() {
 
 internal fun protocolLabel(type: ByokProviderType): String = when (type) {
     ByokProviderType.OPENAI_COMPAT -> "OpenAI 兼容"
-    ByokProviderType.OPENAI_RESPONSE -> "OpenAI Response"
+    ByokProviderType.OPENAI_RESPONSE -> "OpenAI Responses"
     ByokProviderType.ANTHROPIC -> "Anthropic"
     ByokProviderType.GEMINI -> "Gemini"
 }

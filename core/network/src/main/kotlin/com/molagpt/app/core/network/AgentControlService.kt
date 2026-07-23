@@ -4,10 +4,12 @@ import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.common.Logger
 import com.molagpt.app.core.model.AgentModelInfo
 import com.molagpt.app.core.model.AgentPhase
+import com.molagpt.app.core.model.AgentSessionsSnapshot
 import com.molagpt.app.core.model.AgentToolStatus
 import com.molagpt.app.core.model.RelayCommandOp
 import com.molagpt.app.core.model.RelayEnvelope
 import com.molagpt.app.core.model.RelayEvent
+import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.RelaySessionMeta
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -50,12 +52,20 @@ class AgentControlService(
 ) {
     private val base = MolaEndpoints.BASE_URL.trimEnd('/')
 
+    /** Agent 的普通 JSON 调用专用客户端（共享连接池）。共享的 [MolaHttp.okHttp]
+     *  为 SSE 把 read/call 超时都设成了 0——半开 socket 会让列表/历史/命令调用
+     *  永久挂起，详情页看起来像冻结。这里的调用都是小 JSON，必须有整体超时。 */
+    private val jsonHttp = http.okHttp.newBuilder()
+        .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+
     /** 拉取账号下所有 agent 会话元信息（桌面不在线时也可读：服务器持有数据）。 */
-    suspend fun listSessions(): List<RelaySessionMeta> {
-        val jwt = jwtProvider() ?: return emptyList()
+    suspend fun listSessions(): AgentSessionsSnapshot {
+        val jwt = jwtProvider() ?: return AgentSessionsSnapshot()
         Logger.d("AgentRelay", "listSessions: jwt=OK (${jwt.length} chars)")
         val req = Request.Builder()
-            .url("$base/api/auth/agent_sessions.php")
+            .url("$base/api/auth/agent_sessions.php?include_offline=1")
             .header("Authorization", "Bearer $jwt")
             .get()
             .apply { addDeviceHeaders(this) }
@@ -63,22 +73,26 @@ class AgentControlService(
         return withContext(dispatchers.io) {
             runCatching {
                 Logger.d("AgentRelay", "sending request to ${req.url}")
-                http.okHttp.newCall(req).execute().use { resp ->
+                jsonHttp.newCall(req).execute().use { resp ->
                     Logger.d("AgentRelay", "response: HTTP ${resp.code}")
                     if (!resp.isSuccessful) {
                         val body = resp.body?.string().orEmpty().take(200)
                         Logger.w("AgentRelay", "HTTP ${resp.code}: $body")
-                        return@use emptyList()
+                        return@use AgentSessionsSnapshot()
                     }
                     val text = resp.body?.string().orEmpty().trimStart('\uFEFF')
                     Logger.d("AgentRelay", "response body (${text.length} chars)")
-                    val list = parseSessions(text)
-                    Logger.d("AgentRelay", "parsed ${list.size} sessions; availableModels=${list.map { it.availableModels?.size ?: 0 }}")
-                    list
+                    val snapshot = parseSessionsSnapshot(text)
+                    Logger.d(
+                        "AgentRelay",
+                        "parsed ${snapshot.sessions.size} sessions, ${snapshot.machines.size} machines; " +
+                            "availableModels=${snapshot.sessions.map { it.availableModels?.size ?: 0 }}",
+                    )
+                    snapshot
                 }
             }.getOrElse { ex ->
                 Logger.w("AgentRelay", "listSessions failed", ex)
-                emptyList()
+                AgentSessionsSnapshot()
             }
         }
     }
@@ -87,11 +101,14 @@ class AgentControlService(
      * 订阅一个会话的事件流。从 [sinceSeq] 起重放，之后轮询增量。
      *
      * 这里刻意不用服务器 SSE：当前线上经 Cloudflare/PHP-FPM 时长连接会稳定遇到 524，
-     * 详情首屏不能依赖它。1s 级轮询对 relay MVP 足够实时，也更容易恢复。
+     * 详情首屏不能依赖它。轮询节奏自适应：有新事件时 250ms 紧跟（流式中），
+     * 连续空轮询逐步退到 5s（会话空闲时省电省流量）——因此会话页可以**始终订阅**，
+     * 不再依赖 phase 判断"要不要跟随"（那正是外部会话画面冻结的根因）。
      */
     fun streamEventBatches(sessionId: String, sinceSeq: Long = 0L): Flow<List<RelayEnvelope>> = flow {
         var lastSeq = sinceSeq
         var attempt = 0
+        var idleDelayMs = ACTIVE_POLL_IDLE_MS
         while (true) {
             try {
                 val batch = fetchEvents(sessionId, lastSeq)
@@ -106,7 +123,13 @@ class AgentControlService(
                 }
                 if (batch.latestSeq > lastSeq) lastSeq = batch.latestSeq
                 attempt = 0
-                delay(if (fresh.isNotEmpty()) 250 else 1000)
+                if (fresh.isNotEmpty()) {
+                    idleDelayMs = ACTIVE_POLL_IDLE_MS
+                    delay(ACTIVE_POLL_BUSY_MS)
+                } else {
+                    delay(idleDelayMs)
+                    idleDelayMs = (idleDelayMs + 1000L).coerceAtMost(MAX_POLL_IDLE_MS)
+                }
             } catch (c: CancellationException) {
                 throw c
             } catch (e: Exception) {
@@ -139,7 +162,7 @@ class AgentControlService(
             .header("Authorization", "Bearer $jwt")
             .get()
             .build()
-        http.okHttp.newCall(req).execute().use { resp ->
+        jsonHttp.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty().trimStart('\uFEFF')
             if (!resp.isSuccessful) {
                 throw Exception("HTTP ${resp.code}: ${text.take(160)}")
@@ -150,18 +173,22 @@ class AgentControlService(
 
     /**
      * 入队一条命令。[cmdId] 用于去重；op 如 "Send" / "Interrupt" / "Close" / "New"。
+     * [machineId] 在多机账号下把命令路由到目标桌面（`New` 必填；已有会话可省略，
+     * 中继会用会话 meta 上的 machineId）。
      */
     private suspend fun sendCommand(
         sessionId: String,
         op: RelayCommandOp,
         cmdId: String,
         payload: JsonObject? = null,
+        machineId: String? = null,
     ): Boolean = withContext(dispatchers.io) {
         val jwt = jwtProvider() ?: return@withContext false
         val body = buildJsonObject {
             put("sessionId", sessionId)
             put("cmdId", cmdId)
             put("op", op.name)
+            machineId?.takeIf { it.isNotBlank() }?.let { put("machineId", it) }
             if (payload != null) {
                 put("payloadJson", http.json.encodeToString(JsonObject.serializer(), payload))
             }
@@ -175,10 +202,16 @@ class AgentControlService(
             )
             .build()
         runCatching<Boolean> {
-            http.okHttp.newCall(req).execute().use { resp ->
+            jsonHttp.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Logger.w("AgentRelay", "command ${op.name} rejected: HTTP ${resp.code}")
+                }
                 resp.isSuccessful
             }
-        }.getOrDefault(false)
+        }.getOrElse { ex ->
+            Logger.w("AgentRelay", "command ${op.name} failed: ${ex.message}")
+            false
+        }
     }
 
     private fun addDeviceHeaders(builder: Request.Builder) {
@@ -190,11 +223,12 @@ class AgentControlService(
         }
     }
 
-    suspend fun sendPrompt(sessionId: String, cmdId: String, text: String): Boolean =
+    suspend fun sendPrompt(sessionId: String, cmdId: String, text: String, machineId: String? = null): Boolean =
         sendCommand(
             sessionId = sessionId,
             cmdId = cmdId,
             op = RelayCommandOp.Send,
+            machineId = machineId,
             payload = buildJsonObject {
                 put("text", text)
                 putJsonArray("images") {}
@@ -208,10 +242,12 @@ class AgentControlService(
         reasoningEffort: String? = null,
         permissionMode: Int? = null,
         approvalPolicy: Int? = null,
+        machineId: String? = null,
     ): Boolean = sendCommand(
         sessionId = sessionId,
         cmdId = cmdId,
         op = RelayCommandOp.SwitchOptions,
+        machineId = machineId,
         payload = buildJsonObject {
             model?.takeIf { it.isNotBlank() }?.let { put("model", it) }
             reasoningEffort?.takeIf { it.isNotBlank() }?.let { put("reasoningEffort", it) }
@@ -220,26 +256,28 @@ class AgentControlService(
         },
     )
 
-    suspend fun interrupt(sessionId: String, cmdId: String): Boolean =
-        sendCommand(sessionId, RelayCommandOp.Interrupt, cmdId)
+    suspend fun interrupt(sessionId: String, cmdId: String, machineId: String? = null): Boolean =
+        sendCommand(sessionId, RelayCommandOp.Interrupt, cmdId, machineId = machineId)
 
     suspend fun approve(
         sessionId: String,
         cmdId: String,
         permissionId: String,
         choice: String,
+        machineId: String? = null,
     ): Boolean = sendCommand(
         sessionId = sessionId,
         cmdId = cmdId,
         op = RelayCommandOp.Approve,
+        machineId = machineId,
         payload = buildJsonObject {
             put("permissionId", permissionId)
             put("choice", choice)
         },
     )
 
-    suspend fun close(sessionId: String, cmdId: String): Boolean =
-        sendCommand(sessionId, RelayCommandOp.Close, cmdId)
+    suspend fun close(sessionId: String, cmdId: String, machineId: String? = null): Boolean =
+        sendCommand(sessionId, RelayCommandOp.Close, cmdId, machineId = machineId)
 
     suspend fun createSession(
         sessionId: String,
@@ -248,10 +286,12 @@ class AgentControlService(
         workingDirectory: String?,
         title: String?,
         model: String?,
+        machineId: String?,
     ): Boolean = sendCommand(
         sessionId = sessionId,
         cmdId = cmdId,
         op = RelayCommandOp.New,
+        machineId = machineId,
         payload = buildJsonObject {
             put("backendId", backendId)
             workingDirectory?.takeIf { it.isNotBlank() }?.let { put("workingDirectory", it) }
@@ -260,14 +300,29 @@ class AgentControlService(
         },
     )
 
-    private fun parseSessions(text: String): List<RelaySessionMeta> {
+    private fun parseSessionsSnapshot(text: String): AgentSessionsSnapshot {
         val root = runCatching { http.json.parseToJsonElement(text).asObject() }.getOrNull()
-            ?: return emptyList()
-        val sessions = root.array("sessions") ?: run {
+            ?: return AgentSessionsSnapshot()
+        val sessions = root.array("sessions")
+            ?.mapNotNull { (it as? JsonObject)?.toSessionMeta() }
+            .orEmpty()
+        if (root.array("sessions") == null) {
             Logger.w("AgentRelay", "no 'sessions' key in response: ${text.take(200)}")
-            return emptyList()
         }
-        return sessions.mapNotNull { (it as? JsonObject)?.toSessionMeta() }
+        val machines = root.array("machines")
+            ?.mapNotNull { (it as? JsonObject)?.toMachine() }
+            .orEmpty()
+        return AgentSessionsSnapshot(sessions = sessions, machines = machines)
+    }
+
+    private fun JsonObject.toMachine(): RelayMachine? {
+        val id = string("id", "machineId", "machine_id") ?: return null
+        if (id.isBlank()) return null
+        return RelayMachine(
+            id = id,
+            name = string("name", "machineName", "machine_name"),
+            lastSeenAtMs = long("lastSeenAtMs", "last_seen_at_ms", "LastSeenAtMs") ?: 0L,
+        )
     }
 
     private fun parseEventBatch(text: String, fallbackSeq: Long): EventBatch {
@@ -296,8 +351,14 @@ class AgentControlService(
         val k = kind("kind", "Kind")
         return when (k) {
             "userPrompt" -> RelayEvent.UserPrompt(text = string("text", "Text").orEmpty())
-            "answerSnapshot" -> RelayEvent.AnswerSnapshot(text = string("text", "Text").orEmpty())
-            "thinkingSnapshot" -> RelayEvent.ThinkingSnapshot(text = string("text", "Text").orEmpty())
+            "answerSnapshot" -> RelayEvent.AnswerSnapshot(
+                text = string("text", "Text").orEmpty(),
+                segmentId = string("segmentId", "segment_id", "SegmentId"),
+            )
+            "thinkingSnapshot" -> RelayEvent.ThinkingSnapshot(
+                text = string("text", "Text").orEmpty(),
+                segmentId = string("segmentId", "segment_id", "SegmentId"),
+            )
             "turnFailed" -> RelayEvent.TurnFailed(message = string("message", "Message").orEmpty())
             "turnDone" -> {
                 val usage = obj("usage", "Usage")
@@ -357,6 +418,11 @@ class AgentControlService(
                     http.json.decodeFromJsonElement(ListSerializer(AgentModelInfo.serializer()), arr)
                 }.getOrNull()
             },
+            machineId = string("machineId", "machine_id", "MachineId"),
+            machineName = string("machineName", "machine_name", "MachineName"),
+            lastCommandId = string("lastCommandId", "last_command_id", "LastCommandId"),
+            lastCommandError = string("lastCommandError", "last_command_error", "LastCommandError"),
+            lastCommandAtMs = long("lastCommandAtMs", "last_command_at_ms", "LastCommandAtMs") ?: 0L,
         )
     }
 
@@ -378,7 +444,9 @@ class AgentControlService(
 
     private fun JsonObject.nullableEnumOrdinal(names: Array<String>, vararg keys: String): Int? {
         val raw = firstPrimitive(*keys) ?: return null
-        raw.intOrNull?.let { return it }
+        // 整数 ordinal 必须落在枚举范围内——损坏/未来版本的值静默透传会把
+        // 权限模式之类的显示悄悄变成别的档位。越界一律当缺失处理。
+        raw.intOrNull?.let { return it.takeIf { v -> v in names.indices } }
         val text = raw.contentOrNull ?: return null
         return names.indexOfFirst { it.equals(text, ignoreCase = true) }.takeIf { it >= 0 }
     }
@@ -407,6 +475,9 @@ class AgentControlService(
     private fun JsonElement.asObject(): JsonObject? = this as? JsonObject
 
     private companion object {
+        private const val ACTIVE_POLL_BUSY_MS = 250L
+        private const val ACTIVE_POLL_IDLE_MS = 1000L
+        private const val MAX_POLL_IDLE_MS = 5000L
         private val AGENT_PHASES = arrayOf("Idle", "Spawning", "Running", "Waiting", "Completed", "Failed")
         private val AGENT_PERMISSION_MODES = arrayOf("Plan", "AcceptEdits", "Default", "BypassPermissions")
         private val CODEX_APPROVAL_POLICIES = arrayOf("Untrusted", "OnRequest", "Never")

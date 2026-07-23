@@ -2,6 +2,8 @@ package com.molagpt.app.di
 
 import android.content.Context
 import android.os.Build
+import com.molagpt.app.AgentNotificationController
+import com.molagpt.app.AgentNotificationMonitor
 import com.molagpt.app.NotificationController
 import com.molagpt.app.StreamForegroundService
 import com.molagpt.app.core.common.DefaultDispatchers
@@ -51,6 +53,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -112,6 +115,12 @@ class AppContainer(
         credentialStore = credentialStore,
         dispatchers = dispatchers,
     )
+
+    /** providerId → baseUrl 快照（供聊天页推理弹层判断聚合网关/预算折算，`.value` 无挂起读取）。 */
+    val byokProviderBaseUrls: StateFlow<Map<String, String>> =
+        byokProviderRepository.providers
+            .map { list -> list.associate { it.id to it.baseUrl } }
+            .stateIn(applicationScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyMap())
     val personaRepository = PersonaRepository(
         personaDao = database.personaDao(),
         dispatchers = dispatchers,
@@ -293,8 +302,14 @@ class AppContainer(
     /** 当前可见会话 id（ChatHost 维护），用于完成通知抑制。 */
     val foregroundSessionId = MutableStateFlow<String?>(null)
 
+    /** 当前可见的远程 Agent 会话 id，用于 Agent 通知抑制。 */
+    val foregroundAgentSessionId = MutableStateFlow<String?>(null)
+
     /** 通知/深链请求打开的会话；ChatHost 消费后清空。 */
     val pendingOpenSessionId = MutableStateFlow<String?>(null)
+
+    /** Agent 通知请求打开的远程会话；AgentControl 路由消费后清空。 */
+    val pendingOpenAgentSessionId = MutableStateFlow<String?>(null)
 
     private val notificationController = NotificationController(
         appContext = appContext,
@@ -306,6 +321,20 @@ class AppContainer(
         foregroundSessionId = { foregroundSessionId.value },
     )
 
+    private val agentNotificationController = AgentNotificationController(
+        context = appContext,
+        appForeground = { appForeground.value },
+        foregroundAgentSessionId = { foregroundAgentSessionId.value },
+    )
+
+    internal val agentNotificationMonitor = AgentNotificationMonitor(
+        service = agentControlService,
+        controller = agentNotificationController,
+        scope = applicationScope,
+        notifyEnabled = { latestSettings.completionNotify },
+        isAuthenticated = { !credentialStore.jwt.isNullOrBlank() },
+    )
+
     fun setAppForeground(value: Boolean) {
         appForeground.value = value
     }
@@ -314,9 +343,17 @@ class AppContainer(
         foregroundSessionId.value = sessionId
     }
 
+    fun setForegroundAgentSession(sessionId: String?) {
+        foregroundAgentSessionId.value = sessionId
+    }
+
     /** 通知点击/深链：请求 UI 打开指定会话。 */
     fun requestOpenConversation(sessionId: String?) {
         if (!sessionId.isNullOrBlank()) pendingOpenSessionId.value = sessionId
+    }
+
+    fun requestOpenAgentSession(sessionId: String?) {
+        if (!sessionId.isNullOrBlank()) pendingOpenAgentSessionId.value = sessionId
     }
 
     init {

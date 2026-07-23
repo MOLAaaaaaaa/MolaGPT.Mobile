@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -59,6 +60,8 @@ class ChatViewModel(
     private val modelRefreshingFlow: StateFlow<Boolean>,
     private val modelRefresher: suspend (ProviderKind) -> List<ProviderModel>,
     private val settingsFlow: StateFlow<com.molagpt.app.core.storage.AppSettings>,
+    /** providerId → BYOK baseUrl 解析器（供推理弹层判断聚合网关/预算折算）；默认返回空串。 */
+    private val byokBaseUrlResolver: (String?) -> String = { "" },
     private val defaultModelId: String?,
     private val tools: EnabledTools,
     useThinking: Boolean,
@@ -81,6 +84,8 @@ class ChatViewModel(
     // 推理开关/强度为**运行时**会话级状态（初值取自设置）：composer 可即时切换，不回写设置。
     private val _useThinking = MutableStateFlow(useThinking)
     private val _reasoningEffort = MutableStateFlow(reasoningEffort)
+    /** 本次回复未检测到推理内容时的自校正提示（低置信配置更易触发）。 */
+    private val _reasoningMissHint = MutableStateFlow<ReasoningMissHint?>(null)
     private val _pendingAttachments = MutableStateFlow<List<FileInfo>>(emptyList())
     // 占位会话懒加载期间为 true（仅在确认要发网络请求时才置位）→ 驱动聊天页居中转圈。
     private val _loadingHistory = MutableStateFlow(false)
@@ -98,12 +103,53 @@ class ChatViewModel(
             restoreConversationModel()
             _loadingHistory.value = false
         }
+        // 运行时自校正：本会话流正常完成后，若开启了推理但助手消息无思考片段 → 提示。
+        viewModelScope.launch {
+            backgroundStreams.completions.collect { completion ->
+                if (completion.sessionId != sessionId) return@collect
+                maybeShowReasoningMissHint()
+            }
+        }
+    }
+
+    private fun maybeShowReasoningMissHint() {
+        if (!_useThinking.value) return
+        val model = uiState.value.selectedModel ?: return
+        // 仅对 BYOK 且已识别为推理的模型做自校正：MolaGPT 无用户可调设置，弹「去设置」只会打扰。
+        if (model.providerKind != ProviderKind.BYOK) return
+        val tc = model.thinkingConfig ?: return
+        // 仅开关类（无档位）不提示——本身就没有思考强度语义。
+        val levels = com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(tc)
+        if (levels.isEmpty()) return
+        val lastAssistant = uiState.value.messages.lastOrNull { it.role == Role.ASSISTANT } ?: return
+        val hasThinking = lastAssistant.fragments.any {
+            it is com.molagpt.app.core.model.MessageFragment.Thinking && it.text.isNotBlank()
+        }
+        // 有些模型隐藏思考文本却会上报 reasoning_tokens——据此判定「确实推理了」，避免误报。
+        val reasoningTokens = lastAssistant.metadata["reasoningTokens"]?.toIntOrNull() ?: 0
+        if (hasThinking || reasoningTokens > 0) {
+            _reasoningMissHint.value = null
+            return
+        }
+        val lowConf = !com.molagpt.app.core.model.ThinkingKinds.isHighConfidence(tc.detectSource) &&
+            !tc.manualOverride
+        _reasoningMissHint.value = ReasoningMissHint(
+            lowConfidence = lowConf,
+            canTurnOff = !tc.alwaysOn,
+        )
     }
 
     private val controls = combine(
-        _error, _authExpired, _enabledTools, _useThinking, _reasoningEffort,
-    ) { error, authExpired, enabledTools, thinking, effort ->
-        ChatControlState(error, authExpired, enabledTools, thinking, effort)
+        _error, _authExpired, _enabledTools, _useThinking, _reasoningEffort, _reasoningMissHint,
+    ) { values ->
+        val error = values[0] as String?
+        val authExpired = values[1] as Boolean
+        val enabledTools = values[2] as EnabledTools
+        val thinking = values[3] as Boolean
+        val effort = values[4] as String
+        @Suppress("UNCHECKED_CAST")
+        val miss = values[5] as ReasoningMissHint?
+        ChatControlState(error, authExpired, enabledTools, thinking, effort, miss)
     }
 
     /** 已启用的 MCP 服务器是否存在——门控对话内 MCP 工具开关，避免空配置时仍向模型暴露 MCP。 */
@@ -190,12 +236,27 @@ class ChatViewModel(
             enabledTools = controls.enabledTools,
             useThinking = controls.useThinking,
             reasoningEffort = controls.reasoningEffort,
+            providerBaseUrl = byokBaseUrlResolver(meta.providerId),
+            reasoningMissHint = controls.reasoningMissHint,
             pendingAttachments = pending,
             error = controls.error ?: streamState.error,
             authExpired = controls.authExpired,
             isLoadingHistory = meta.isLoadingHistory,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ChatUiState(sessionId))
+
+    init {
+        // 必须放在 uiState 声明之后：viewModelScope 默认 Main.immediate，launch 会同步执行到第一个挂起点，
+        // 若在上方 init 里读 uiState，属性尚未初始化会 NPE 闪退。
+        // 模型列表异步就绪 / 切换模型后，把推理开关与档位适配到当前模型
+        // （覆盖「恢复会话早于模型加载」导致 adaptThinkingStateTo 从未运行、K3 常开态/档位未生效的场景）。
+        viewModelScope.launch {
+            uiState
+                .map { it.selectedModel }
+                .distinctUntilChanged { a, b -> a?.id == b?.id && a?.thinkingConfig == b?.thinkingConfig }
+                .collect { m -> m?.let { adaptThinkingStateTo(it) } }
+        }
+    }
 
     /** 把全量模型按阵营→提供商分组：若用户已配置 BYOK，则 BYOK 各提供商置顶，MolaGPT 随后；否则仅显示 MolaGPT。 */
     private fun buildModelGroups(models: List<ProviderModel>): List<ModelGroup> {
@@ -239,7 +300,7 @@ class ChatViewModel(
     private fun adaptThinkingStateTo(model: ProviderModel) {
         val tc = model.thinkingConfig
         val kind = tc?.kind ?: com.molagpt.app.core.model.ThinkingParamKind.NONE
-        if (kind == com.molagpt.app.core.model.ThinkingParamKind.NONE) {
+        if (tc == null || kind == com.molagpt.app.core.model.ThinkingParamKind.NONE) {
             if (!model.supportsReasoningEffort) {
                 _useThinking.value = false
             } else if (_reasoningEffort.value !in listOf("low", "medium", "high")) {
@@ -247,9 +308,15 @@ class ChatViewModel(
             }
             return
         }
-        val levels = com.molagpt.app.core.model.ThinkingKinds.effortLevelsFor(kind)
+        // 常开推理（Kimi K3）：强制开启。
+        if (tc.alwaysOn) {
+            _useThinking.value = true
+        }
+        // 校验/回落都用 resolve*（含模型自定义档位），不能用方言模板——
+        // 否则自定义档（如 ultra）会在模型切换时被误判越界而重置。
+        val levels = com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(tc)
         if (levels.isNotEmpty() && _reasoningEffort.value !in levels) {
-            _reasoningEffort.value = com.molagpt.app.core.model.ThinkingKinds.defaultEffortFor(kind)
+            _reasoningEffort.value = com.molagpt.app.core.model.ThinkingKinds.resolveDefaultEffort(tc)
         }
     }
 
@@ -283,11 +350,25 @@ class ChatViewModel(
     }
 
     fun setUseThinking(enabled: Boolean) {
+        val alwaysOn = uiState.value.selectedModel?.thinkingConfig?.alwaysOn == true ||
+            com.molagpt.app.core.model.ThinkingKinds.isKimiK3(uiState.value.selectedModelId.orEmpty())
+        if (alwaysOn && !enabled) return
         _useThinking.value = enabled
+        if (!enabled) dismissReasoningMissHint()
     }
 
     fun setReasoningEffort(effort: String) {
         _reasoningEffort.value = effort
+    }
+
+    fun dismissReasoningMissHint() {
+        _reasoningMissHint.value = null
+    }
+
+    /** 运行时自校正：用户选择关闭推理。 */
+    fun applyReasoningMissOff() {
+        setUseThinking(false)
+        dismissReasoningMissHint()
     }
 
     /** 选取附件后即时处理：MolaGPT 走上传，BYOK 只在发送前临时转 data URL，落库永远只存轻量 URI。 */
@@ -731,6 +812,21 @@ class ChatViewModel(
             } else {
                 requestHistory
             }
+            // 按当前模型推理配置校正（send/retry 都经此单一出口）：常开模型强制开启；档位越界
+            // （如 Kimi K3 不支持 medium）回落到该 kind 默认档，杜绝把不支持的 reasoning_effort 发到上游。
+            val thinkingCfg = providerModel?.thinkingConfig
+            val alwaysOnThinking = thinkingCfg?.alwaysOn == true ||
+                com.molagpt.app.core.model.ThinkingKinds.isKimiK3(modelId)
+            val effectiveEffort = if (thinkingCfg != null) {
+                val levels = com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(thinkingCfg)
+                if (levels.isNotEmpty() && _reasoningEffort.value !in levels) {
+                    com.molagpt.app.core.model.ThinkingKinds.resolveDefaultEffort(thinkingCfg)
+                } else {
+                    _reasoningEffort.value
+                }
+            } else {
+                _reasoningEffort.value
+            }
             val request = ChatRequest(
                 modelId = modelId,
                 modelDisplayName = modelDisplayName,
@@ -741,8 +837,8 @@ class ChatViewModel(
                 streamSessionId = streamSessionId,
                 conversationId = conversationId,
                 temperature = temperature,
-                useThinking = _useThinking.value,
-                reasoningEffort = _reasoningEffort.value,
+                useThinking = _useThinking.value || alwaysOnThinking,
+                reasoningEffort = effectiveEffort,
                 enabledTools = requestTools,
             )
             backgroundStreams.start(request, assistantId, throttleMs, priorAttempts)
@@ -895,6 +991,7 @@ private data class ChatControlState(
     val enabledTools: EnabledTools,
     val useThinking: Boolean,
     val reasoningEffort: String,
+    val reasoningMissHint: ReasoningMissHint? = null,
 )
 
 private data class ChatUiMetaCore(

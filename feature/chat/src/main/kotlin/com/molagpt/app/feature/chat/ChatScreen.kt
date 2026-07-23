@@ -9,14 +9,18 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
@@ -24,9 +28,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -36,6 +42,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -44,8 +51,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -59,6 +68,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -89,6 +99,8 @@ fun ChatScreen(
     onNewChat: () -> Unit,
     onOpenAgentControl: () -> Unit = {},
     onOpenImageWorkbench: () -> Unit = {},
+    /** 打开 BYOK 当前模型的推理参数编辑页。 */
+    onOpenByokModelSettings: (providerId: String, modelId: String) -> Unit = { _, _ -> },
     drawerOpen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
@@ -321,6 +333,18 @@ fun ChatScreen(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
+                state.reasoningMissHint?.let { hint ->
+                    ReasoningMissCard(
+                        lowConfidence = hint.lowConfidence,
+                        canTurnOff = hint.canTurnOff,
+                        onManual = {
+                            viewModel.dismissReasoningMissHint()
+                            onOpenSettings()
+                        },
+                        onTurnOff = viewModel::applyReasoningMissOff,
+                        onDismiss = viewModel::dismissReasoningMissHint,
+                    )
+                }
                 HorizontalDivider()
                 Composer(
                     enabled = state.inputEnabled,
@@ -330,6 +354,7 @@ fun ChatScreen(
                     selectedModel = state.selectedModel,
                     useThinking = state.useThinking,
                     reasoningEffort = state.reasoningEffort,
+                    providerBaseUrl = state.providerBaseUrl,
                     pendingAttachments = state.pendingAttachments,
                     activePersona = activePersona,
                     showPersonaChip = isActiveConversation,
@@ -342,6 +367,12 @@ fun ChatScreen(
                     onRemoveAttachment = viewModel::removeAttachment,
                     onSend = viewModel::send,
                     onStop = viewModel::stop,
+                    onOpenModelReasoningSettings = {
+                        val model = state.selectedModel ?: return@Composer
+                        if (model.providerKind == ProviderKind.BYOK) {
+                            onOpenByokModelSettings(model.providerId, model.id)
+                        }
+                    },
                 )
             }
         },
@@ -417,6 +448,62 @@ private fun rememberPreviewUrlHolder(): com.molagpt.app.feature.file.ImagePrevie
 }
 
 /** 顶栏「远程 Agent」入口图标——一个显示器轮廓，把 Agent 控制提到首屏一级。 */
+@Composable
+private fun ReasoningMissCard(
+    lowConfidence: Boolean,
+    canTurnOff: Boolean,
+    onManual: () -> Unit,
+    onTurnOff: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(cs.tertiaryContainer.copy(alpha = 0.55f))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Filled.Warning,
+                contentDescription = null,
+                tint = cs.onTertiaryContainer,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                "本次回复未检测到推理",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = cs.onTertiaryContainer,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Filled.Close, contentDescription = "关闭", modifier = Modifier.size(16.dp))
+            }
+        }
+        Text(
+            text = if (lowConfidence) {
+                "当前推理方式是推测得到的，且本次未产生思考内容。很可能识别有误，建议手动指定。"
+            } else {
+                "已按当前格式发送请求，但未返回思考内容。可能该模型这次未触发思考，或服务端暂不支持。"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = cs.onTertiaryContainer.copy(alpha = 0.9f),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onManual) { Text("去设置") }
+            // 常开推理模型（如 Kimi K3）无法关闭，隐藏该操作以免误导。
+            if (canTurnOff) {
+                OutlinedButton(onClick = onTurnOff) { Text("关闭推理") }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AgentMonitorIcon(tint: androidx.compose.ui.graphics.Color) {
     androidx.compose.foundation.Canvas(modifier = Modifier.size(22.dp)) {

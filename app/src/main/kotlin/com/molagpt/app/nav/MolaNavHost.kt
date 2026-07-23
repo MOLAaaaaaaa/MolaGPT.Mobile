@@ -59,6 +59,7 @@ import kotlinx.coroutines.launch
 
 private object Routes {
     const val LOGIN = "login"
+    const val AGENT_LOGIN = "login/agent-control"
     const val CHAT = "chat"
     const val SETTINGS = "settings"
     const val PERSONALIZATION = "personalization"
@@ -82,6 +83,18 @@ fun MolaNavHost(
 ) {
     val container = LocalAppContainer.current
     val navController = rememberNavController()
+    val openAgentControl = {
+        val target = if (container.authService.isLoggedIn) Routes.AGENT_CONTROL else Routes.AGENT_LOGIN
+        if (navController.currentDestination?.route != target) {
+            navController.navigate(target) { launchSingleTop = true }
+        }
+    }
+    val pendingAgentOpen by container.pendingOpenAgentSessionId.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingAgentOpen) {
+        if (!pendingAgentOpen.isNullOrBlank()) {
+            openAgentControl()
+        }
+    }
     // 游客可直接进入聊天；登录入口由设置页提供。
     val start = Routes.CHAT
 
@@ -118,6 +131,37 @@ fun MolaNavHost(
             )
         }
 
+        composable(Routes.AGENT_LOGIN) {
+            val vm: AuthViewModel = viewModel(factory = ViewModelFactories.auth(container))
+            // A notification target must survive a successful login so the Agent
+            // route can select it, but backing out as a guest explicitly abandons it.
+            DisposableEffect(Unit) {
+                onDispose {
+                    if (!container.authService.isLoggedIn) {
+                        container.pendingOpenAgentSessionId.value = null
+                    }
+                }
+            }
+            LoginScreen(
+                viewModel = vm,
+                onLoggedIn = {
+                    navController.navigate(Routes.AGENT_CONTROL) {
+                        popUpTo(Routes.AGENT_LOGIN) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                },
+                onBack = {
+                    container.pendingOpenAgentSessionId.value = null
+                    if (!navController.popBackStack()) {
+                        navController.navigate(Routes.CHAT) {
+                            popUpTo(Routes.AGENT_LOGIN) { inclusive = true }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
         composable(Routes.CHAT) {
             LaunchedEffect(Unit) {
                 // 重试到官方 model_config **拉取成功**为止（不是"列表非空"——BYOK 是本地的，
@@ -140,11 +184,12 @@ fun MolaNavHost(
                         }
                     }
                 },
-                onOpenAgentControl = {
-                    if (navController.currentDestination?.route != Routes.AGENT_CONTROL) {
-                        navController.navigate(Routes.AGENT_CONTROL) { launchSingleTop = true }
-                    }
+                onOpenByokModelSettings = { providerId, modelId ->
+                    val encodedModel = android.net.Uri.encode(modelId)
+                    val target = "${Routes.BYOK_PROVIDER_DETAIL}/$providerId?editModel=$encodedModel"
+                    navController.navigate(target) { launchSingleTop = true }
                 },
+                onOpenAgentControl = openAgentControl,
                 onOpenImageWorkbench = {
                     if (navController.currentDestination?.route != Routes.IMAGE_WORKBENCH) {
                         navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
@@ -200,11 +245,7 @@ fun MolaNavHost(
                         navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
                     }
                 },
-                onOpenAgentControl = {
-                    if (navController.currentDestination?.route != Routes.AGENT_CONTROL) {
-                        navController.navigate(Routes.AGENT_CONTROL) { launchSingleTop = true }
-                    }
-                },
+                onOpenAgentControl = openAgentControl,
                 onOpenByokProviders = {
                     if (navController.currentDestination?.route != Routes.BYOK_PROVIDERS) {
                         navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
@@ -245,17 +286,43 @@ fun MolaNavHost(
         }
 
         composable(Routes.AGENT_CONTROL) {
-            val vm: AgentControlViewModel = viewModel(factory = ViewModelFactories.agentControl(container))
-            AgentControlScreen(
-                vm = vm,
-                onExit = {
-                    if (navController.currentDestination?.route == Routes.AGENT_CONTROL) {
-                        if (!navController.popBackStack()) {
-                            navController.navigate(Routes.CHAT) { launchSingleTop = true }
-                        }
+            val account by container.authService.account.collectAsStateWithLifecycle()
+            if (!account.loggedIn) {
+                // Route-level guard covers future/direct entry paths in addition to
+                // the current chat, settings and notification entry points.
+                LaunchedEffect(Unit) {
+                    navController.navigate(Routes.AGENT_LOGIN) {
+                        popUpTo(Routes.AGENT_CONTROL) { inclusive = true }
+                        launchSingleTop = true
                     }
-                },
-            )
+                }
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background,
+                ) {}
+            } else {
+                val vm: AgentControlViewModel = viewModel(factory = ViewModelFactories.agentControl(container))
+                val sessions by vm.sessions.collectAsStateWithLifecycle()
+                val targetSessionId by container.pendingOpenAgentSessionId.collectAsStateWithLifecycle()
+                LaunchedEffect(targetSessionId, sessions) {
+                    val target = targetSessionId?.let { id -> sessions.firstOrNull { it.conversationId == id } }
+                    if (target != null) {
+                        vm.select(target)
+                        container.pendingOpenAgentSessionId.value = null
+                    }
+                }
+                AgentControlScreen(
+                    vm = vm,
+                    onVisibleSessionChanged = container::setForegroundAgentSession,
+                    onExit = {
+                        if (navController.currentDestination?.route == Routes.AGENT_CONTROL) {
+                            if (!navController.popBackStack()) {
+                                navController.navigate(Routes.CHAT) { launchSingleTop = true }
+                            }
+                        }
+                    },
+                )
+            }
         }
 
         composable(Routes.BYOK_PROVIDERS) {
@@ -277,13 +344,21 @@ fun MolaNavHost(
         }
 
         composable(
-            route = "${Routes.BYOK_PROVIDER_DETAIL}/{id}",
-            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+            route = "${Routes.BYOK_PROVIDER_DETAIL}/{id}?editModel={editModel}",
+            arguments = listOf(
+                navArgument("id") { type = NavType.StringType },
+                navArgument("editModel") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+            ),
         ) { backStackEntry ->
             val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            val editModel = backStackEntry.arguments?.getString("editModel").orEmpty()
             ByokProviderDetailScreen(
                 providerId = backStackEntry.arguments?.getString("id").orEmpty(),
                 viewModel = vm,
+                initialEditModelId = editModel.ifBlank { null },
                 onBack = {
                     if (!navController.popBackStack()) {
                         navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
@@ -438,6 +513,7 @@ fun MolaNavHost(
 private fun ChatHost(
     settings: AppSettings,
     onOpenSettings: () -> Unit,
+    onOpenByokModelSettings: (providerId: String, modelId: String) -> Unit,
     onOpenAgentControl: () -> Unit,
     onOpenImageWorkbench: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
@@ -512,6 +588,7 @@ private fun ChatHost(
                     enterToSend = settings.enterToSend,
                     onOpenDrawer = { drawerOpen = true },
                     onOpenSettings = onOpenSettings,
+                    onOpenByokModelSettings = onOpenByokModelSettings,
                     onOpenPersonaManagement = onOpenPersonaManagement,
                     onAuthExpired = onAuthExpired,
                     onOpenAgentControl = onOpenAgentControl,

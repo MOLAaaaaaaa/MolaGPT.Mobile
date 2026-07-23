@@ -34,10 +34,23 @@ data class ChatUiState(
     val enabledTools: EnabledTools = EnabledTools(),
     val useThinking: Boolean = false,
     val reasoningEffort: String = "medium",
+    /** 当前会话所属 BYOK 提供商 baseUrl（供推理弹层判断聚合网关/预算折算）；MolaGPT 会话为空串。 */
+    val providerBaseUrl: String = "",
+    /** 本次回复未检测到推理时的自校正提示。 */
+    val reasoningMissHint: ReasoningMissHint? = null,
     val pendingAttachments: List<FileInfo> = emptyList(),
     val error: String? = null,
     val authExpired: Boolean = false,
     val isLoadingHistory: Boolean = false,
+)
+
+/** 运行时自校正：开启了推理但回复中无思考内容。 */
+@Immutable
+data class ReasoningMissHint(
+    /** 当前配置是否为低置信（仅按模型名推测）。 */
+    val lowConfidence: Boolean,
+    /** 是否允许「关闭推理」——常开推理模型（如 Kimi K3）无法关闭，隐藏该操作。 */
+    val canTurnOff: Boolean = true,
 )
 
 /**

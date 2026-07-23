@@ -18,4 +18,6 @@ data class Usage(
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
     val totalTokens: Int? = null,
+    /** 内部思考 token 数（usage.completion_tokens_details.reasoning_tokens）；用于运行时自校正。 */
+    val reasoningTokens: Int? = null,
 )

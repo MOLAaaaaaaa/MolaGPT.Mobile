@@ -32,6 +32,27 @@ data class RelaySessionMeta(
     /** 该会话可切换到的模型，桌面从 CLI 实时发现（Claude initialize.models / Codex model/list）。
      *  为空表示尚未发现——展示层回退到"默认 + 已观察到的 model id"。老会话/老桌面为 null。 */
     val availableModels: List<AgentModelInfo>? = null,
+    /** 拥有该会话的桌面桥接机器。多机账号下用于分组与命令路由；老会话为 null。 */
+    val machineId: String? = null,
+    val machineName: String? = null,
+    /** 最近一次桌面端命令失败结果；由 relay 保留到下一次成功命令。 */
+    val lastCommandId: String? = null,
+    val lastCommandError: String? = null,
+    val lastCommandAtMs: Long = 0,
+)
+
+/** 一台最近心跳过的桌面桥接机器（`GET agent_sessions.php` 的 `machines`）。 */
+@Serializable
+data class RelayMachine(
+    val id: String,
+    val name: String? = null,
+    val lastSeenAtMs: Long = 0,
+)
+
+/** 会话列表快照：会话 + 桌面机器表（手机建会话时选目标机器用）。 */
+data class AgentSessionsSnapshot(
+    val sessions: List<RelaySessionMeta> = emptyList(),
+    val machines: List<RelayMachine> = emptyList(),
 )
 
 /** 桌面 `AgentModelInfo` 的镜像：一个可切换到的模型。[id] 是回传给桌面用来切换的确切值
@@ -113,6 +134,24 @@ val RelaySessionMeta.displayWorkspace: String
             .takeIf { it.isNotBlank() }
         ?: "Quick Chat"
 
+/** 展示用机器名：优先 machineName，回退 machineId 短截，再回退「未知电脑」。 */
+val RelaySessionMeta.displayMachine: String
+    get() = machineName?.takeIf { it.isNotBlank() }
+        ?: machineId?.takeIf { it.isNotBlank() }?.let { id ->
+            if (id.length <= 8) id else id.take(8) + "…"
+        }
+        ?: "未知电脑"
+
+/** 机器是否在线：桌面每 ~10–15s 心跳；超过此窗口视为离线。 */
+fun RelayMachine.isOnline(nowMs: Long = System.currentTimeMillis(), timeoutMs: Long = 45_000L): Boolean =
+    lastSeenAtMs > 0 && nowMs - lastSeenAtMs < timeoutMs
+
+/** 展示用机器名。 */
+val RelayMachine.displayName: String
+    get() = name?.takeIf { it.isNotBlank() }
+        ?: id.takeIf { it.isNotBlank() }?.let { if (it.length <= 8) it else it.take(8) + "…" }
+        ?: "未知电脑"
+
 /**
  * 折叠后的粗粒度 relay 事件（手机侧由 `AgentControlService` 从 JSON 手解码——
  * 线格式枚举为整数、键演进中，手解码比 kotlinx 多态更耐脏）。
@@ -139,11 +178,14 @@ sealed interface RelayEvent {
         val argumentsJson: String? = null,
     ) : RelayEvent
 
-    /** 助手答复快照（回合末整段，非增量——**替换**当前助手块全文）。 */
-    data class AnswerSnapshot(val text: String) : RelayEvent
+    /** 助手答复快照（**替换**当前助手块全文）。
+     *  [segmentId] 标识回合内一段连续答复（工具调用分段）；桌面在流式期间会用**同一**
+     *  segmentId 反复发送"到目前为止的全文"，手机按 segmentId 原位替换即得伪流式。
+     *  老桌面/历史投影为 null——退回按事件 seq 分块（回合末单段语义，行为同旧版）。 */
+    data class AnswerSnapshot(val text: String, val segmentId: String? = null) : RelayEvent
 
-    /** 思考快照（**替换**当前思考块全文）。 */
-    data class ThinkingSnapshot(val text: String) : RelayEvent
+    /** 思考快照（**替换**当前思考块全文），segment 语义同 [AnswerSnapshot]。 */
+    data class ThinkingSnapshot(val text: String, val segmentId: String? = null) : RelayEvent
 
     /** 回合正常结束（带可选 usage）。 */
     data class TurnDone(

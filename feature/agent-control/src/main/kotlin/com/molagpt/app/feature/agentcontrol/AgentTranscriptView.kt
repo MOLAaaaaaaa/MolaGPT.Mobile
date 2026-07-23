@@ -1,6 +1,7 @@
 package com.molagpt.app.feature.agentcontrol
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,11 +19,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.AgentToolStatus
 import com.molagpt.app.core.model.ToolStatus
@@ -169,6 +176,28 @@ private fun PermissionCard(
         )
         block.description?.takeIf { it.isNotBlank() }?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
+        }
+        // 决策依据：完整命令/参数。此前只显示 toolName + 描述，argumentsJson 到了手机
+        // 却没渲染，等于让用户盲批。默认收起为 8 行，点击展开全文。
+        val detail = remember(block.argumentsJson) {
+            agentPermissionDetail(block.toolName, block.argumentsJson)
+        }
+        if (detail != null) {
+            var expanded by remember(block.permissionId) { mutableStateOf(false) }
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.92f),
+                maxLines = if (expanded) Int.MAX_VALUE else 8,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.45f))
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+            )
         }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
             TextButton(onClick = { onPermissionChoice(block.permissionId, "Once") }) {

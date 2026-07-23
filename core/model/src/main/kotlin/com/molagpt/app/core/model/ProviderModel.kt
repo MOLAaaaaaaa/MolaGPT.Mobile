@@ -29,7 +29,13 @@ data class ProviderModel(
     val providerKind: ProviderKind = ProviderKind.MOLAGPT,
     /** 推理参数配置（仅 BYOK 聊天模型有意义）。null 表示未配置，按模型 ID/host 启发式处理。 */
     val thinkingConfig: ThinkingConfig? = null,
+    /** BYOK: 覆盖该模型请求体顶层字段（type: string|number|boolean|json）。 */
+    val customBody: List<CustomBodyParam> = emptyList(),
 )
+
+/** 用户自定义请求体覆写项。[type] ∈ string|number|boolean|json，决定 [value] 如何解析成 JSON 值。 */
+@Serializable
+data class CustomBodyParam(val key: String = "", val type: String = "string", val value: String = "")
 
 /**
  * 图像生成参数（OpenRouter /v1/chat/completions 出图）。

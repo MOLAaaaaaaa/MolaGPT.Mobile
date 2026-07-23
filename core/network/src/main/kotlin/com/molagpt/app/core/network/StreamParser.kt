@@ -127,10 +127,13 @@ class StreamParser(private val json: Json) {
 
     private fun parseUsage(root: JsonObject): Usage? {
         val u = root["usage"] as? JsonObject ?: return null
+        val details = u["completion_tokens_details"] as? JsonObject
         return Usage(
             promptTokens = u["prompt_tokens"]?.prim()?.intOrNull,
             completionTokens = u["completion_tokens"]?.prim()?.intOrNull,
             totalTokens = u["total_tokens"]?.prim()?.intOrNull,
+            reasoningTokens = details?.get("reasoning_tokens")?.prim()?.intOrNull
+                ?: u["reasoning_tokens"]?.prim()?.intOrNull,
         )
     }
 

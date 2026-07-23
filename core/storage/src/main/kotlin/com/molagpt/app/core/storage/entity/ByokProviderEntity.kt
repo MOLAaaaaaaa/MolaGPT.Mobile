@@ -17,6 +17,7 @@ data class ByokProviderEntity(
     val imageEditPath: String = "",
     val enabled: Boolean = true,
     val modelsJson: String = "[]",
+    val customHeadersJson: String = "[]",
     val sortOrder: Int = 0,
     val updatedAt: Long = System.currentTimeMillis(),
 )

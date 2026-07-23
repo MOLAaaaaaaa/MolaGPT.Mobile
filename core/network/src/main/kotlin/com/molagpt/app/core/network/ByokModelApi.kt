@@ -6,6 +6,7 @@ import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ThinkingConfig
+import com.molagpt.app.core.model.ThinkingDetectSource
 import com.molagpt.app.core.model.ThinkingKinds
 import com.molagpt.app.core.model.ThinkingParamKind
 import com.molagpt.app.core.model.ProviderModel
@@ -57,22 +58,33 @@ class ByokModelApi(private val http: MolaHttp) {
                 ?: return@mapNotNull null
             // chat 用途：仅保留聊天模型，图像模型交给 image 用途 provider。
             if (!looksLikeByokChatModel(id)) return@mapNotNull null
+            val supportedParams = parseSupportedParameters(obj)
+            val thinkingConfig = thinkingConfigFor(provider, id, supportedParams)
+            val isThinking = thinkingConfig != null
             ProviderModel(
                 id = id,
                 displayName = beautifyModelName(id),
                 apiUrl = provider.chatPath,
                 supportsVision = looksLikeByokVisionModel(id),
-                supportsThinking = looksLikeByokReasoningModel(id),
-                supportsReasoningEffort = looksLikeByokReasoningModel(id),
+                supportsThinking = isThinking,
+                supportsReasoningEffort = isThinking &&
+                    ThinkingKinds.resolveEffortLevels(thinkingConfig).isNotEmpty(),
                 supportsToolCalling = looksLikeByokToolModel(id),
                 supportsImageGeneration = false,
                 supportsChat = true,
                 providerId = provider.id,
                 providerName = provider.name,
                 providerKind = ProviderKind.BYOK,
-                thinkingConfig = thinkingConfigFor(provider, id),
+                thinkingConfig = thinkingConfig,
             )
         }.sortedWith(compareByDescending<ProviderModel> { it.supportsToolCalling }.thenBy { it.id })
+    }
+
+    /** 解析 OpenRouter 等返回的 supported_parameters 数组；无该字段返回 null（表示未知，非「不支持」）。 */
+    private fun parseSupportedParameters(obj: JsonObject): Set<String>? {
+        val arr = obj["supported_parameters"] as? JsonArray ?: return null
+        val out = arr.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
+        return out.toSet()
     }
 
     private fun parseAnthropicModels(root: JsonObject, provider: ByokProvider): List<ProviderModel> {
@@ -81,21 +93,23 @@ class ByokModelApi(private val http: MolaHttp) {
             val obj = item as? JsonObject ?: return@mapNotNull null
             val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
-            val isThinking = looksLikeByokReasoningModel(id)
+            val thinkingConfig = thinkingConfigFor(provider, id)
+            val isThinking = thinkingConfig != null
             ProviderModel(
                 id = id,
                 displayName = obj["display_name"]?.jsonPrimitive?.contentOrNull ?: beautifyModelName(id),
                 apiUrl = provider.chatPath,
                 supportsVision = looksLikeByokVisionModel(id),
                 supportsThinking = isThinking,
-                supportsReasoningEffort = isThinking,
+                supportsReasoningEffort = isThinking &&
+                    ThinkingKinds.resolveEffortLevels(thinkingConfig).isNotEmpty(),
                 supportsToolCalling = true,
                 supportsImageGeneration = false,
                 supportsChat = true,
                 providerId = provider.id,
                 providerName = provider.name,
                 providerKind = ProviderKind.BYOK,
-                thinkingConfig = thinkingConfigFor(provider, id),
+                thinkingConfig = thinkingConfig,
             )
         }
     }
@@ -117,20 +131,23 @@ class ByokModelApi(private val http: MolaHttp) {
             val isImagen = id.contains("imagen", ignoreCase = true)
             // chat 用途：跳过 imagen 与不支持 generateContent 的模型。
             if (isImagen || !supportsGenerateContent) return@mapNotNull null
+            val thinkingConfig = thinkingConfigFor(provider, id)
+            val isThinking = thinkingConfig != null
             ProviderModel(
                 id = id,
                 displayName = obj["displayName"]?.jsonPrimitive?.contentOrNull ?: beautifyModelName(id),
                 apiUrl = provider.chatPath,
                 supportsVision = looksLikeByokVisionModel(id),
-                supportsThinking = looksLikeByokReasoningModel(id),
-                supportsReasoningEffort = looksLikeByokReasoningModel(id),
+                supportsThinking = isThinking,
+                supportsReasoningEffort = isThinking &&
+                    ThinkingKinds.resolveEffortLevels(thinkingConfig).isNotEmpty(),
                 supportsToolCalling = true,
                 supportsImageGeneration = false,
                 supportsChat = true,
                 providerId = provider.id,
                 providerName = provider.name,
                 providerKind = ProviderKind.BYOK,
-                thinkingConfig = thinkingConfigFor(provider, id),
+                thinkingConfig = thinkingConfig,
             )
         }
     }
@@ -174,20 +191,33 @@ class ByokModelApi(private val http: MolaHttp) {
         id.substringAfterLast('/').replace('_', ' ')
 
     /**
-     * 据模型 ID + provider 推断推理配置（仅对推理模型返回非 null）。
-     * OpenRouter 统一走 reasoning:{effort} 对象，忽略模型家族差异；
-     * 其余 provider 先按模型 ID 推断，漏掉时按 host 兜底，再退到 OPENAI_REASONING_EFFORT。
+     * 据模型 ID + provider（+ 可选能力表）推断推理配置。
+     * 优先 [ThinkingKinds.autoConfigFor]（含 OpenRouter supported_parameters / K3 常开 / 网关折算）。
+     * 无能力表且名字也不像推理模型时返回 null。
      */
-    private fun thinkingConfigFor(provider: ByokProvider, id: String): ThinkingConfig? {
-        if (!looksLikeByokReasoningModel(id)) return null
-        val kind = if (ThinkingKinds.isOpenRouter(provider.baseUrl)) {
-            ThinkingParamKind.OPENAI_REASONING_EFFORT
-        } else {
-            ThinkingKinds.inferFromModelId(id).takeIf { it != ThinkingParamKind.NONE }
-                ?: ThinkingKinds.hostInferredKind(provider.baseUrl)
-                ?: ThinkingParamKind.OPENAI_REASONING_EFFORT
+    private fun thinkingConfigFor(
+        provider: ByokProvider,
+        id: String,
+        supportedParams: Set<String>? = null,
+    ): ThinkingConfig? {
+        // 有能力表：以能力表为准（即使名字不像推理模型）。
+        if (supportedParams != null) {
+            return ThinkingKinds.autoConfigFor(id, provider.baseUrl, supportedParams)
         }
-        return ThinkingKinds.configFor(kind)
+        // 无能力表：仅当名字命中「精选推理模型集」才给配置。
+        // 不能放宽到 inferFromModelId——它把所有 Claude/Gemini/Kimi 都归类为推理，
+        // 会让 Claude 3.5、Gemini 1.5 等非推理模型误显推理开关并下发不支持的参数（400）。
+        if (!looksLikeByokReasoningModel(id)) {
+            return null
+        }
+        return ThinkingKinds.autoConfigFor(id, provider.baseUrl, supportedParams = null)
+            ?: ThinkingKinds.configFor(
+                ThinkingKinds.inferFromModelId(id).takeIf { it != ThinkingParamKind.NONE }
+                    ?: ThinkingKinds.hostInferredKind(provider.baseUrl)
+                    ?: ThinkingParamKind.OPENAI_REASONING_EFFORT,
+                alwaysOn = ThinkingKinds.isKimiK3(id),
+                detectSource = ThinkingDetectSource.HEURISTIC,
+            )
     }
 }
 
@@ -363,13 +393,19 @@ fun ByokProvider.modelsEndpoint(): String {
 }
 
 fun ByokProvider.applyAuthHeaders(add: (String, String) -> Unit) {
-    val key = apiKey?.takeIf { it.isNotBlank() } ?: return
-    when (type) {
-        ByokProviderType.ANTHROPIC -> {
-            add("x-api-key", key)
-            add("anthropic-version", "2023-06-01")
+    val key = apiKey?.takeIf { it.isNotBlank() }
+    if (key != null) {
+        when (type) {
+            ByokProviderType.ANTHROPIC -> {
+                add("x-api-key", key)
+                add("anthropic-version", "2023-06-01")
+            }
+            ByokProviderType.GEMINI -> Unit
+            ByokProviderType.OPENAI_COMPAT, ByokProviderType.OPENAI_RESPONSE -> add("Authorization", "Bearer $key")
         }
-        ByokProviderType.GEMINI -> Unit
-        ByokProviderType.OPENAI_COMPAT, ByokProviderType.OPENAI_RESPONSE -> add("Authorization", "Bearer $key")
+    }
+    // 自定义请求头在 auth 之后追加（即使无 key 也应用，支持仅靠自定义头鉴权的网关）。
+    customHeaders.forEach { h ->
+        if (h.name.isNotBlank()) add(h.name, h.value)
     }
 }

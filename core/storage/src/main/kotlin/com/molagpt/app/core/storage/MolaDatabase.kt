@@ -19,7 +19,7 @@ import com.molagpt.app.core.storage.entity.StreamTaskEntity
 
 @Database(
     entities = [ConversationEntity::class, MessageEntity::class, StreamTaskEntity::class, ByokProviderEntity::class, PersonaEntity::class],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 abstract class MolaDatabase : RoomDatabase() {
@@ -32,7 +32,7 @@ abstract class MolaDatabase : RoomDatabase() {
     companion object {
         fun build(context: Context): MolaDatabase =
             Room.databaseBuilder(context.applicationContext, MolaDatabase::class.java, "mola.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                 .build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -189,6 +189,13 @@ abstract class MolaDatabase : RoomDatabase() {
                     ) > 1000000
                     """.trimIndent(),
                 )
+            }
+        }
+
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // BYOK 自定义请求头（参数覆写）。默认 '[]' 使旧行保持无附加头。
+                db.execSQL("ALTER TABLE byok_providers ADD COLUMN customHeadersJson TEXT NOT NULL DEFAULT '[]'")
             }
         }
     }

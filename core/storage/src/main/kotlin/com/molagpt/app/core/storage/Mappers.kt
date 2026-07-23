@@ -7,6 +7,7 @@ import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.model.CustomHeader
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
@@ -130,6 +131,9 @@ internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvi
     val models = runCatching {
         json.decodeFromString<List<ProviderModel>>(modelsJson)
     }.getOrDefault(emptyList())
+    val customHeaders = runCatching {
+        json.decodeFromString<List<CustomHeader>>(customHeadersJson)
+    }.getOrDefault(emptyList())
     return ByokProvider(
         id = id,
         name = name,
@@ -146,6 +150,7 @@ internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvi
         models = models.map {
             it.copy(providerId = id, providerName = name, providerKind = ProviderKind.BYOK)
         },
+        customHeaders = customHeaders,
     )
 }
 
@@ -164,6 +169,7 @@ internal fun ByokProvider.toEntity(json: Json, sortOrder: Int = 0): ByokProvider
     modelsJson = json.encodeToString(models.map {
         it.copy(providerId = id, providerName = name, providerKind = ProviderKind.BYOK)
     }),
+    customHeadersJson = json.encodeToString(customHeaders),
     sortOrder = sortOrder,
     updatedAt = System.currentTimeMillis(),
 )

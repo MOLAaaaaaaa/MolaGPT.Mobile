@@ -20,7 +20,13 @@ data class ByokProvider(
     val imageEditPath: String = "",
     val enabled: Boolean = true,
     val models: List<ProviderModel> = emptyList(),
+    /** BYOK: 附加到该服务全部请求（对话 / 模型列表 / 图像）的自定义请求头，auth 之后追加。 */
+    val customHeaders: List<CustomHeader> = emptyList(),
 )
+
+/** 用户自定义 HTTP 请求头。 */
+@Serializable
+data class CustomHeader(val name: String = "", val value: String = "")
 
 @Serializable
 enum class ByokProviderType {
