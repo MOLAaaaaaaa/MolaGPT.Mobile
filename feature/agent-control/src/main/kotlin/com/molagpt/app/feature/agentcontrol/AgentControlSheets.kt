@@ -43,6 +43,7 @@ import com.molagpt.app.core.model.isOnline
 import com.molagpt.app.core.model.isQuickChat
 import com.molagpt.app.core.model.permissionModeEnum
 import com.molagpt.app.core.model.sortAtMs
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.SegmentedControl
 
 internal fun effortLabel(value: String?): String = when (value?.lowercase()) {
@@ -106,6 +107,8 @@ internal fun NewSessionSheet(
         // 自带 inset 置 0，底部留白只由内容的 navigationBarsPadding 处理一次（仿 BYOK 添加服务抽屉，避免内容被顶出/遮挡）。
         contentWindowInsets = { WindowInsets(0) },
     ) {
+        // 键盘弹着时返回先收键盘，不关弹层（丢已填的首条 prompt）。
+        ImeDismissBackHandler()
         Column(
             modifier = Modifier
                 .verticalScroll(rememberScrollState())

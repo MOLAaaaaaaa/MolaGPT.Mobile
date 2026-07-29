@@ -41,6 +41,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -51,6 +52,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Settings
@@ -114,19 +116,11 @@ fun ChatScreen(
     val keyboard = LocalSoftwareKeyboardController.current
     val density = LocalDensity.current
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
-    val modelPrefix = if (state.providerKind == ProviderKind.BYOK) "BYOK" else "MolaGPT"
-    // 副标题：服务商 · 模型（BYOK 含服务商名）。主标题改显对话标题，模型选择器入口移到此副标题。
-    val modelSubtitle = state.selectedModel?.let { model ->
-        if (state.providerKind == ProviderKind.BYOK) {
-            "$modelPrefix · ${model.providerName} · ${model.displayName}"
-        } else {
-            "$modelPrefix · ${model.displayName}"
-        }
-    } ?: if (state.isModelRefreshing) {
-        "正在获取模型"
-    } else {
-        "选择模型"
-    }
+    // 阵营做成徽章，副标题只留模型名：顶栏 title 区被汉堡和 3~4 个图标夹住，
+    // 360dp 下仅约 152dp，再拼提供商名（下拉分组标题里已有）会把模型名挤成「ge…」。
+    val modelKindLabel = if (state.providerKind == ProviderKind.BYOK) "BYOK" else "MolaGPT"
+    val modelNameText = state.selectedModel?.displayName
+        ?: if (state.isModelRefreshing) "正在获取模型" else "选择模型"
     val conversationTitle = state.title.ifBlank { "新对话" }
     /** 空白会话：无消息、无未发送附件、且不在加载历史中；此时跨阵营切换模型不弹确认窗。 */
     val isBlankConversation = state.messages.isEmpty() &&
@@ -214,7 +208,7 @@ fun ChatScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        // 副标题「服务商 · 模型 ▾」即模型选择器入口：点击弹模型菜单。
+                        // 副标题「阵营徽章 模型名 ▾」即模型选择器入口：点击弹模型菜单。
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
@@ -225,8 +219,23 @@ fun ChatScreen(
                                 }
                                 .padding(end = 4.dp),
                         ) {
+                            // 徽章宽度固定，不参与压缩，把剩余空间全留给模型名。
+                            if (state.selectedModel != null) {
+                                Text(
+                                    text = modelKindLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                                )
+                                Spacer(Modifier.width(5.dp))
+                            }
                             Text(
-                                text = modelSubtitle,
+                                text = modelNameText,
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1,
@@ -266,8 +275,32 @@ fun ChatScreen(
                                 )
                                 group.models.forEach { model ->
                                     val sameKind = group.kind == state.providerKind
+                                    val selected = state.selectedModel?.let {
+                                        it.id == model.id && it.providerId == model.providerId
+                                    } == true
                                     DropdownMenuItem(
-                                        text = { Text(model.displayName) },
+                                        text = {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.fillMaxWidth(),
+                                            ) {
+                                                Text(
+                                                    model.displayName,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f),
+                                                )
+                                                if (selected) {
+                                                    Spacer(Modifier.width(12.dp))
+                                                    Icon(
+                                                        Icons.Filled.Check,
+                                                        contentDescription = "当前模型",
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(18.dp),
+                                                    )
+                                                }
+                                            }
+                                        },
                                         onClick = {
                                             modelMenuOpen = false
                                             if (sameKind || isBlankConversation) {
@@ -277,6 +310,18 @@ fun ChatScreen(
                                                 // 跨阵营：历史不互通，弹确认后新建对话。
                                                 pendingCrossModel = model
                                             }
+                                        },
+                                        colors = if (selected) {
+                                            MenuDefaults.itemColors(
+                                                textColor = MaterialTheme.colorScheme.primary,
+                                            )
+                                        } else {
+                                            MenuDefaults.itemColors()
+                                        },
+                                        modifier = if (selected) {
+                                            Modifier.background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f))
+                                        } else {
+                                            Modifier
                                         },
                                     )
                                 }

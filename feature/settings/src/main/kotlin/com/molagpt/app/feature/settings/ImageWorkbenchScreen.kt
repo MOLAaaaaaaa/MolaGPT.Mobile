@@ -168,6 +168,7 @@ import com.molagpt.app.core.network.ByokImageHit
 import com.molagpt.app.core.network.ByokImageWorkbenchConfig
 import com.molagpt.app.core.network.ByokImageWorkbenchResult
 import com.molagpt.app.core.network.looksLikeByokImageReasoningModel
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.decodeImageModel
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -219,6 +220,9 @@ fun ImageWorkbenchScreen(
     val providers by viewModel.byokProviderList.collectAsStateWithLifecycle()
     val imageProviders = providers.filter { it.enabled && it.purpose == ByokPurpose.IMAGE }
     val prefs = remember { context.getSharedPreferences(WORKBENCH_PREFS, Context.MODE_PRIVATE) }
+
+    // 键盘弹着时返回先收键盘，不退页面（三星等未启用预测式返回的机型会穿透到 NavHost）。
+    ImeDismissBackHandler()
 
     val sessions = remember { mutableStateListOf<WorkbenchSessionUi>() }
     var currentSessionId by rememberSaveable { mutableStateOf("") }
@@ -1705,6 +1709,8 @@ private fun WorkbenchParametersSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         contentWindowInsets = { WindowInsets(0) },
     ) {
+        // 键盘弹着时返回先收键盘，不关弹层（丢输入内容）。
+        ImeDismissBackHandler()
         Column(
             // verticalScroll 在前+ime 让位：焦点框（如自定义尺寸，位置偏下）在键盘弹出时可滚动到键盘上方（对齐 ModelEditSheet）。
             modifier = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
@@ -2114,6 +2120,8 @@ private fun WorkbenchSettingsSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         contentWindowInsets = { WindowInsets(0) },
     ) {
+        // 键盘弹着时返回先收键盘，不关弹层（丢输入内容）。
+        ImeDismissBackHandler()
         Column(
             // verticalScroll 在前+ime 让位：焦点框（请求超时，位置偏下）在键盘弹出时可滚动到键盘上方（对齐 ModelEditSheet）。
             modifier = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp).windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),

@@ -94,6 +94,7 @@ import com.molagpt.app.core.model.ThinkingConfig
 import com.molagpt.app.core.model.ThinkingDetectSource
 import com.molagpt.app.core.model.ThinkingKinds
 import com.molagpt.app.core.model.ThinkingParamKind
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.SegmentedControl
 import kotlinx.coroutines.launch
 
@@ -129,6 +130,9 @@ fun ByokProviderDetailScreen(
     var selectedModelIds by remember(providerId) { mutableStateOf(emptySet<String>()) }
     var showBatchDeleteConfirm by remember { mutableStateOf(false) }
     var consumedInitialEdit by remember(providerId, initialEditModelId) { mutableStateOf(false) }
+
+    // 键盘弹着时返回先收键盘，不退页面（三星等未启用预测式返回的机型会穿透到 NavHost）。
+    ImeDismissBackHandler()
 
     LaunchedEffect(status) {
         status?.let {
@@ -904,6 +908,8 @@ private fun ModelEditSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         contentWindowInsets = { WindowInsets(0) },
     ) {
+        // 键盘弹着时返回先收键盘，不关弹层（丢输入内容）。
+        ImeDismissBackHandler()
         Column(
             modifier = Modifier
                 .verticalScroll(rememberScrollState())
@@ -1401,6 +1407,8 @@ private fun ModelFetchSheet(
         // 自带 inset 置 0，底部留白只由内容的 navigationBarsPadding 处理一次（否则全屏展开时底部多一条白条把按钮顶出屏幕）。
         contentWindowInsets = { WindowInsets(0) },
     ) {
+        // 键盘弹着时返回先收键盘，不关弹层（搜索框在这里）。
+        ImeDismissBackHandler()
         Column(
             modifier = Modifier
                 .padding(horizontal = 20.dp)

@@ -24,6 +24,9 @@ fun MolaWebView(
         modifier = modifier,
         factory = { context ->
             WebView(context).apply {
+                // 首帧渲染完成前 WebView 会越过自身边界把全屏刷白、盖住同屏 Compose 内容
+                //（Google issue 174233728），官方建议即裁剪到自身 outline。
+                clipToOutline = true
                 settings.apply {
                     this.javaScriptEnabled = javaScriptEnabled
                     domStorageEnabled = true

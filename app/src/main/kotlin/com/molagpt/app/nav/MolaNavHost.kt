@@ -47,6 +47,7 @@ import com.molagpt.app.feature.settings.ByokProvidersScreen
 import com.molagpt.app.feature.settings.ByokToolsScreen
 import com.molagpt.app.feature.settings.ImageWorkbenchScreen
 import com.molagpt.app.feature.settings.McpServerDetailScreen
+import com.molagpt.app.feature.settings.MolaAccountScreen
 import com.molagpt.app.feature.settings.PersonaEditScreen
 import com.molagpt.app.feature.settings.PersonaManagementScreen
 import com.molagpt.app.feature.settings.PersonaViewScreen
@@ -62,6 +63,7 @@ private object Routes {
     const val AGENT_LOGIN = "login/agent-control"
     const val CHAT = "chat"
     const val SETTINGS = "settings"
+    const val MOLA_ACCOUNT = "mola_account"
     const val PERSONALIZATION = "personalization"
     const val ABOUT = "about"
     const val IMAGE_WORKBENCH = "image_workbench"
@@ -214,12 +216,6 @@ fun MolaNavHost(
                 viewModel = vm,
                 loggedIn = account.loggedIn,
                 username = account.username,
-                onOpenLogin = {
-                    if (navController.currentDestination?.route != Routes.LOGIN) {
-                        navController.navigate(Routes.LOGIN) { launchSingleTop = true }
-                    }
-                },
-                onLogout = { container.authService.logout() },
                 onBack = {
                     if (navController.currentDestination?.route == Routes.SETTINGS) {
                         val returnedToPrevious = navController.popBackStack()
@@ -230,9 +226,9 @@ fun MolaNavHost(
                         }
                     }
                 },
-                onOpenPersonalization = {
-                    if (navController.currentDestination?.route != Routes.PERSONALIZATION) {
-                        navController.navigate(Routes.PERSONALIZATION) { launchSingleTop = true }
+                onOpenMolaAccount = {
+                    if (navController.currentDestination?.route != Routes.MOLA_ACCOUNT) {
+                        navController.navigate(Routes.MOLA_ACCOUNT) { launchSingleTop = true }
                     }
                 },
                 onOpenAbout = {
@@ -262,6 +258,35 @@ fun MolaNavHost(
                     }
                 },
                 buildLabel = "MolaGPT v${com.molagpt.app.BuildConfig.VERSION_NAME} · 构建 ${com.molagpt.app.BuildConfig.BUILD_TIME}",
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // MolaGPT 账户页：账户域（账户信息/配额/云同步/个性化记忆/账户工具）整体收在此二级页，
+        // 设置根页只留一行入口。复用 SettingsViewModel（与图像工作台/BYOK 各页同一惯例）。
+        composable(Routes.MOLA_ACCOUNT) {
+            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            val account by container.authService.account.collectAsStateWithLifecycle()
+            MolaAccountScreen(
+                viewModel = vm,
+                loggedIn = account.loggedIn,
+                username = account.username,
+                onOpenLogin = {
+                    if (navController.currentDestination?.route != Routes.LOGIN) {
+                        navController.navigate(Routes.LOGIN) { launchSingleTop = true }
+                    }
+                },
+                onLogout = { container.authService.logout() },
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.MOLA_ACCOUNT) {
+                        navController.popBackStack()
+                    }
+                },
+                onOpenPersonalization = {
+                    if (navController.currentDestination?.route != Routes.PERSONALIZATION) {
+                        navController.navigate(Routes.PERSONALIZATION) { launchSingleTop = true }
+                    }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
         }

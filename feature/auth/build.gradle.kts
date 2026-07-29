@@ -29,6 +29,7 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:network"))
     implementation(project(":core:storage"))
+    implementation(project(":core:render")) // ImeDismissBackHandler
 
     implementation(libs.bundles.compose)
     implementation(libs.androidx.activity.compose)

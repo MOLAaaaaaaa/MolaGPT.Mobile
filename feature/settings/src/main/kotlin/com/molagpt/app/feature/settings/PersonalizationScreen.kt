@@ -82,6 +82,7 @@ import com.molagpt.app.core.model.Insight
 import com.molagpt.app.core.model.InsightCategory
 import com.molagpt.app.core.model.InsightRating
 import com.molagpt.app.core.model.InsightStatus
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.fadeScaleIn
 import com.molagpt.app.core.render.shimmer
 
@@ -161,6 +162,9 @@ fun PersonalizationScreen(
     var editing by remember { mutableStateOf<Insight?>(null) }
     var confirm by remember { mutableStateOf<ConfirmAction?>(null) }
     var insightsExpanded by rememberSaveable { mutableStateOf(false) }
+
+    // 键盘弹着时返回先收键盘，不退页面（三星等未启用预测式返回的机型会穿透到 NavHost）。
+    ImeDismissBackHandler()
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -769,6 +773,8 @@ private fun EditInsightSheet(initial: String, onDismiss: () -> Unit, onSave: (St
         // 自带 inset 置 0，底部留白只由内容的 navigationBarsPadding 处理一次（否则全屏展开时底部多一条白条把内容顶出屏幕）。
         contentWindowInsets = { WindowInsets(0) },
     ) {
+        // 键盘弹着时返回先收键盘，不关弹层（丢输入内容）。
+        ImeDismissBackHandler()
         Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp).navigationBarsPadding().imePadding()) {
             Text("调整印象", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
             Text(

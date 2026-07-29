@@ -32,6 +32,7 @@ dependencies {
     // Compose 版本由 libs.versions.toml 集中管理。
     implementation(libs.bundles.compose)
     implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.androidx.activity.compose) // ImeDismissBackHandler 用 BackHandler
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     implementation(libs.androidx.core.ktx) // createBitmap 扩展

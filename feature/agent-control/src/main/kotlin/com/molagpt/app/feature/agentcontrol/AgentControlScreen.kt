@@ -53,6 +53,7 @@ import com.molagpt.app.core.model.AgentBackendIds
 import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.displayWorkspace
 import com.molagpt.app.core.model.isBusy
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.MolaMotion
 
 /**
@@ -108,6 +109,11 @@ fun AgentControlScreen(
 
     // 会话态下系统返回（含侧滑手势）先回到 Hub，而不是直接弹出整个 Agent 路由跳到上一级。
     BackHandler(enabled = inSession) { vm.deselect() }
+
+    // 必须排在上面那个 BackHandler **之后**：OnBackPressedDispatcher 是 LIFO，越晚注册优先级越高。
+    // 否则会话里对着输入框打字时，一次返回会被上面的 deselect 抢走，直接退出会话（三星等
+    // 未启用预测式返回的机型上必现）。调整本文件顺序时注意别把这两行对调。
+    ImeDismissBackHandler()
 
     AnimatedContent(
         targetState = inSession,

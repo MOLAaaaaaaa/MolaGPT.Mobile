@@ -1,7 +1,6 @@
 package com.molagpt.app.feature.agentcontrol
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.AgentBackendIds
@@ -197,7 +197,12 @@ private fun DesktopStatusHero(
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(statusText, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(
+                    statusText,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = cs.onSurface,
+                )
                 Spacer(Modifier.width(8.dp))
                 Dot(dotColor, 9.dp)
             }
@@ -393,18 +398,23 @@ internal data class AgentPalette(
 )
 
 @Composable
-internal fun agentPalette(): AgentPalette = if (isSystemInDarkTheme()) {
-    AgentPalette(
-        green = Color(0xFF68C598), greenSoft = Color(0xFF18352A),
-        blue = Color(0xFF8FB5FF), blueSoft = Color(0xFF1D2B44),
-        amber = Color(0xFFE6B45F), amberSoft = Color(0xFF3B2C16),
-        red = Color(0xFFFF8D89), redSoft = Color(0xFF3A1918),
-    )
-} else {
-    AgentPalette(
-        green = Color(0xFF23865F), greenSoft = Color(0xFFE6F5EF),
-        blue = Color(0xFF3F74C8), blueSoft = Color(0xFFE9F0FB),
-        amber = Color(0xFFA56A1B), amberSoft = Color(0xFFFFF4DF),
-        red = Color(0xFFC2413D), redSoft = Color(0xFFFDEBEA),
-    )
+internal fun agentPalette(): AgentPalette {
+    // 跟随 App 主题（themeMode），不要看系统 isSystemInDarkTheme：
+    // 用户选「深色」而系统仍是浅色时，软底色会错用浅色粉/绿，状态卡在夜间页里刺眼且字看不清。
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    return if (dark) {
+        AgentPalette(
+            green = Color(0xFF68C598), greenSoft = Color(0xFF18352A),
+            blue = Color(0xFF8FB5FF), blueSoft = Color(0xFF1D2B44),
+            amber = Color(0xFFE6B45F), amberSoft = Color(0xFF3B2C16),
+            red = Color(0xFFFF8D89), redSoft = Color(0xFF3A1918),
+        )
+    } else {
+        AgentPalette(
+            green = Color(0xFF23865F), greenSoft = Color(0xFFE6F5EF),
+            blue = Color(0xFF3F74C8), blueSoft = Color(0xFFE9F0FB),
+            amber = Color(0xFFA56A1B), amberSoft = Color(0xFFFFF4DF),
+            red = Color(0xFFC2413D), redSoft = Color(0xFFFDEBEA),
+        )
+    }
 }

@@ -63,6 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.Persona
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.PersonaIcons
 import com.molagpt.app.core.storage.PersonaRepository
 import kotlinx.coroutines.launch
@@ -413,6 +414,9 @@ fun PersonaEditScreen(
     var prompt by rememberSaveable(personaId, copyFromId) { mutableStateOf<String?>(null) }
     var selectedIcon by rememberSaveable(personaId, copyFromId) { mutableStateOf<String?>(null) }
     var deleting by remember { mutableStateOf(false) }
+
+    // 键盘弹着时返回先收键盘，不退页面（三星等未启用预测式返回的机型会穿透到 NavHost）。
+    ImeDismissBackHandler()
 
     // base 解析后一次性灌入表单初值（空白新建无需等待）。
     LaunchedEffect(base, isBlankNew) {

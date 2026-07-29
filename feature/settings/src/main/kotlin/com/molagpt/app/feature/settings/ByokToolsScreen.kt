@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.ByokMcpServer
 import com.molagpt.app.core.model.WebSearchProvider
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -79,6 +80,9 @@ fun ByokToolsScreen(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     fun showSnack(msg: String) = scope.launch { snackbar.showSnackbar(msg) }
+
+    // 键盘弹着时返回先收键盘，不退页面（三星等未启用预测式返回的机型会穿透到 NavHost）。
+    ImeDismissBackHandler()
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -305,6 +309,8 @@ private fun McpAddSheet(
         // 自带 inset 置 0，底部留白只由内容的 navigationBarsPadding 处理一次（否则全屏展开时底部多一条白条把内容顶出屏幕）。
         contentWindowInsets = { WindowInsets(0) },
     ) {
+        // 键盘弹着时返回先收键盘，不关弹层（丢输入内容）。
+        ImeDismissBackHandler()
         Column(modifier = Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).verticalScroll(rememberScrollState()).navigationBarsPadding().imePadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("添加 MCP 服务器", style = MaterialTheme.typography.titleLarge)

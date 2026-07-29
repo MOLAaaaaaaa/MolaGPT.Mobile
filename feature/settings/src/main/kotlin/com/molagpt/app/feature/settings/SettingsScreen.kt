@@ -1,7 +1,6 @@
 package com.molagpt.app.feature.settings
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import com.molagpt.app.core.common.Logger
 import androidx.compose.foundation.horizontalScroll
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -25,23 +23,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,21 +43,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.molagpt.app.core.model.AccountStatus
 import com.molagpt.app.core.model.ByokMcpServer
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
-import com.molagpt.app.core.model.QuotaItem
-import com.molagpt.app.core.render.shimmer
 
 /**
  * 设置页 = 个人中心 + 偏好。账户区登录态由 app 层注入（[loggedIn]/[username]），配额/userType 来自 VM 拉取的 status。
@@ -77,10 +63,8 @@ fun SettingsScreen(
     viewModel: SettingsViewModel,
     loggedIn: Boolean,
     username: String?,
-    onOpenLogin: () -> Unit,
-    onLogout: () -> Unit,
     onBack: () -> Unit,
-    onOpenPersonalization: () -> Unit,
+    onOpenMolaAccount: () -> Unit,
     onOpenAbout: () -> Unit,
     onOpenImageWorkbench: () -> Unit,
     onOpenAgentControl: () -> Unit,
@@ -91,14 +75,8 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     val s by viewModel.settings.collectAsStateWithLifecycle()
-    val status by viewModel.status.collectAsStateWithLifecycle()
-    val statusLoading by viewModel.statusLoading.collectAsStateWithLifecycle()
-    val syncing by viewModel.syncing.collectAsStateWithLifecycle()
     val byokProviders by viewModel.byokProviderList.collectAsStateWithLifecycle()
     val byokStatus by viewModel.byokStatus.collectAsStateWithLifecycle()
-
-    // 进入/登录态变化时确保有配额数据：命中容器级缓存则不重拉（避免每次回到设置页刷新整张额度表）。
-    LaunchedEffect(loggedIn) { viewModel.ensureStatus() }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -124,12 +102,13 @@ fun SettingsScreen(
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            AccountHero(
+            // 账户入口置顶但只占一行：位置保留（Agent 控制硬依赖登录，入口要好找），
+            // 体量收敛（原先是 52dp 头像 + 逐模型一行的配额表，吃掉整个首屏）。
+            // 详情见 MolaAccountScreen。
+            MolaAccountEntryCard(
                 loggedIn = loggedIn,
                 username = username,
-                status = status,
-                onOpenLogin = onOpenLogin,
-                onLogout = onLogout,
+                onClick = onOpenMolaAccount,
             )
 
             SectionTitle("自定义模型")
@@ -140,58 +119,8 @@ fun SettingsScreen(
                 onOpenPersonaManagement = onOpenPersonaManagement,
             )
 
-            SectionTitle("配额用量 · 今日")
-            QuotaSection(status = status, loading = statusLoading, onRefresh = viewModel::refreshStatus)
-
-            // 云同步与个性化记忆依赖账号，游客态隐藏。
-            if (loggedIn) {
-                SectionTitle("云同步")
-                ToggleRow(
-                    label = "使用云同步",
-                    checked = s.cloudSyncEnabled,
-                    onChange = viewModel::setCloudSync,
-                    enabled = !syncing,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = if (s.lastSyncAt > 0L) "上次同步：${relativeTime(s.lastSyncAt)}" else "尚未同步",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (syncing) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                        )
-                    }
-                }
-                TextButton(
-                    onClick = viewModel::syncNow,
-                    enabled = s.cloudSyncEnabled && !syncing,
-                ) {
-                    Text(if (syncing) "同步中…" else "立即同步")
-                }
-
-                SectionTitle("个性化记忆 · MolaGPT Tracks")
-                TracksCard(
-                    enabled = s.tracksEnabled,
-                    onEnabledChange = viewModel::setTracks,
-                    onOpenPersonalization = onOpenPersonalization,
-                )
-            }
-
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             SectionTitle("对话工具")
-            MolaGptToolsSection(
-                network = s.toolNetwork,
-                steel = s.toolSteel,
-                code = s.toolCode,
-                onChange = viewModel::setTools,
-            )
             ByokToolsEntryCard(
                 mcp = s.byokMcpServers.any { it.enabled },
                 vision = s.visionProxyEnabled,
@@ -229,12 +158,66 @@ fun SettingsScreen(
         }
     }
 }
+/**
+ * MolaGPT 账户入口卡：单行，副标题承担登录态显示。
+ *
+ * 本 App 走 BYOK 优先路线，账户域（账户信息 / 配额 / 云同步 / 个性化记忆 / 账户工具）
+ * 整体收进 [MolaAccountScreen]。这里保留置顶位置但只占一行——**不要因为「降低存在感」
+ * 就把入口藏起来或隐藏游客态**：Agent 控制以登录 JWT 为前置条件，游客必须找得到登录路径。
+ */
+@Composable
+private fun MolaAccountEntryCard(
+    loggedIn: Boolean,
+    username: String?,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(MaterialTheme.colorScheme.primary),
+                contentAlignment = Alignment.Center,
+            ) {
+                PersonGlyph(
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("MolaGPT 账户", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = if (loggedIn) {
+                        "${username ?: "已登录"} · 配额、云同步与个性化记忆"
+                    } else {
+                        "登录后解锁云同步与 Agent 控制"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            ForwardChevron()
+        }
+    }
+}
 
 /**
  * 「自定义模型」域卡片：把 BYOK 模型的「来源」与「行为」收进同一张卡，用分隔线分面。
  * - 上行 `自定义 API 模型`：模型从哪来（provider / 模型清单）。
  * - 下行 `角色管理`：这些模型怎么说话（系统提示 / 角色，仅 BYOK 生效）。
- * 结构对齐本页 [TracksCard]（开关/入口两行同卡）的既有范式。
+ * 结构对齐 `MolaAccountScreen` 里 TracksCard（开关/入口两行同卡）的既有范式。
  */
 @Composable
 private fun ModelServiceCard(
@@ -370,44 +353,9 @@ private fun AboutEntryCard(onOpenAbout: () -> Unit) {
 }
 
 /**
- * MolaGPT 账户工具卡片：联网搜索 / 网页拉取 / 代码执行——由 MolaGPT 服务端执行，
- * 仅对 MolaGPT 账户模型生效，与 [ByokToolsEntryCard] 进入的 BYOK 自定义工具页明确分离。
- */
-@Composable
-private fun MolaGptToolsSection(
-    network: Boolean,
-    steel: Boolean,
-    code: Boolean,
-    onChange: (network: Boolean, steel: Boolean, code: Boolean) -> Unit,
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                TracksRowIcon(kind = TracksIconKind.Info)
-                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text("MolaGPT 账户工具", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "对 MolaGPT 账户模型生效",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-            }
-            ToggleRow("联网搜索", network, onChange = { onChange(it, steel, code) })
-            ToggleRow("网页拉取", steel, onChange = { onChange(network, it, code) })
-            ToggleRow("代码执行", code, onChange = { onChange(network, steel, it) })
-        }
-    }
-}
-
-/**
  * BYOK 自定义工具入口卡：进入独立的 BYOK 自定义工具页（网络搜索、MCP、视觉理解、图像生成）。
- * 与 [MolaGptToolsSection] 并列，把两类工具的入口在「对话工具」区清晰分开。
+ * MolaGPT 账户侧的对应能力（联网/网页/代码执行）已随账户域迁至 `MolaAccountScreen`，
+ * 因此本页「对话工具」区现在只服务 BYOK。
  */
 @Composable
 private fun ByokToolsEntryCard(
@@ -452,191 +400,6 @@ private fun ByokToolsEntryCard(
 
 
 @Composable
-private fun TracksCard(
-    enabled: Boolean,
-    onEnabledChange: (Boolean) -> Unit,
-    onOpenPersonalization: () -> Unit,
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
-    ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 14.dp, end = 14.dp, bottom = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TracksRowIcon(kind = TracksIconKind.Sparkles)
-                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text("启用个性化记忆", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "基于历史对话提供更连贯的个性化回答",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-                Switch(
-                    checked = enabled,
-                    onCheckedChange = onEnabledChange,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        checkedTrackColor = MaterialTheme.colorScheme.primary,
-                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
-                        uncheckedBorderColor = MaterialTheme.colorScheme.outline,
-                    ),
-                )
-            }
-
-            HorizontalDivider(
-                modifier = Modifier.padding(start = 58.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
-            )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onOpenPersonalization)
-                    .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TracksRowIcon(kind = TracksIconKind.Info)
-                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text("管理个性化回答", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "用户画像、对话风格与隐私",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp).rotate(180f),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun AccountHero(
-    loggedIn: Boolean,
-    username: String?,
-    status: AccountStatus?,
-    onOpenLogin: () -> Unit,
-    onLogout: () -> Unit,
-) {
-    val registered = loggedIn && (status?.isRegistered ?: true)
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(52.dp)
-                .clip(RoundedCornerShape(50))
-                .background(MaterialTheme.colorScheme.primary),
-            contentAlignment = Alignment.Center,
-        ) {
-            PersonGlyph(
-                color = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(30.dp),
-            )
-        }
-        Column(modifier = Modifier.weight(1f).padding(start = 14.dp)) {
-            Text(
-                text = if (loggedIn) (username ?: "已登录账号") else "游客",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(
-                text = when {
-                    registered -> "注册用户 · 已解锁更多模型"
-                    loggedIn -> "已登录"
-                    else -> "登录后可跨设备同步、解锁更多模型"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (loggedIn) {
-            TextButton(onClick = onLogout) { Text("退出") }
-        } else {
-            TextButton(onClick = onOpenLogin) { Text("登录") }
-        }
-    }
-}
-
-@Composable
-private fun QuotaSection(status: AccountStatus?, loading: Boolean, onRefresh: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = when {
-                status == null && loading -> "正在获取配额…"
-                status == null -> "未获取到配额"
-                status.quotas.isEmpty() -> "暂无配额信息"
-                else -> "额度每日重置"
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f),
-        )
-        if (loading) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-        } else {
-            TextButton(onClick = onRefresh) { Text("刷新") }
-        }
-    }
-    // 首次加载(还没拿到配额)时显示骨架微光占位。
-    if (status == null && loading) {
-        repeat(3) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-                    .height(12.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .shimmer(),
-            )
-        }
-    }
-    status?.quotas?.forEach { q -> QuotaRow(q) }
-}
-
-@Composable
-private fun QuotaRow(q: QuotaItem) {
-    val valueText = when {
-        q.used != null && q.limit != null -> "${q.used} / ${q.limit}"
-        q.used != null && q.unlimited -> "${q.used} / 无限"
-        !q.available -> "不可用"
-        q.unlimited -> "无限"
-        else -> "剩余 ${q.remaining}"
-    }
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(q.displayName, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            Text(
-                text = valueText,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (!q.available) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        // 仅在上限/已用均已知时画进度条。
-        q.usedFraction?.let { f ->
-            LinearProgressIndicator(
-                progress = { f },
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
-    }
-}
-
-@Composable
 private fun SegmentedRow(
     label: String,
     options: List<Pair<String, String>>,
@@ -651,36 +414,5 @@ private fun SegmentedRow(
             onSelect = onSelect,
             modifier = Modifier.fillMaxWidth(),
         )
-    }
-}
-
-/** 简易人头剪影(Canvas 绘制,不依赖图标库)：头 + 肩。用于账户头像。 */
-@Composable
-private fun PersonGlyph(color: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        val headR = w * 0.20f
-        drawCircle(color = color, radius = headR, center = Offset(w / 2f, h * 0.33f))
-        val bodyW = w * 0.66f
-        drawArc(
-            color = color,
-            startAngle = 180f,
-            sweepAngle = 180f,
-            useCenter = true,
-            topLeft = Offset((w - bodyW) / 2f, h * 0.58f),
-            size = Size(bodyW, bodyW),
-        )
-    }
-}
-
-/** 粗粒度相对时间（避免引入日期库）。注意：与 Date 无关，仅用当前毫秒差。 */
-private fun relativeTime(ms: Long): String {
-    val diff = System.currentTimeMillis() - ms
-    return when {
-        diff < 60_000 -> "刚刚"
-        diff < 3_600_000 -> "${diff / 60_000} 分钟前"
-        diff < 86_400_000 -> "${diff / 3_600_000} 小时前"
-        else -> "${diff / 86_400_000} 天前"
     }
 }

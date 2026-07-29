@@ -180,3 +180,26 @@ internal fun ForwardChevron(modifier: Modifier = Modifier) {
         modifier = modifier.size(20.dp).rotate(180f),
     )
 }
+
+/**
+ * 简易人头剪影（Canvas 绘制，不依赖图标库）：头 + 肩。用于账户头像。
+ * 设置页的账户入口行与账户页的 AccountHero 共用，故置于此。
+ */
+@Composable
+internal fun PersonGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val headR = w * 0.20f
+        drawCircle(color = color, radius = headR, center = Offset(w / 2f, h * 0.33f))
+        val bodyW = w * 0.66f
+        drawArc(
+            color = color,
+            startAngle = 180f,
+            sweepAngle = 180f,
+            useCenter = true,
+            topLeft = Offset((w - bodyW) / 2f, h * 0.58f),
+            size = androidx.compose.ui.geometry.Size(bodyW, bodyW),
+        )
+    }
+}

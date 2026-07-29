@@ -44,6 +44,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.Persona
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.PersonaIcons
 
 /**
@@ -81,6 +82,8 @@ fun PersonaPickerSheet(
         modifier = modifier,
         contentWindowInsets = { androidx.compose.foundation.layout.WindowInsets(0) },
     ) {
+        // 键盘弹着时返回先收键盘，不关弹层（搜索框在这里）。
+        ImeDismissBackHandler()
         Column(
             modifier = Modifier
                 .fillMaxWidth()
