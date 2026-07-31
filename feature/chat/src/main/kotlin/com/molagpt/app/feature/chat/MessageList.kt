@@ -2,6 +2,7 @@ package com.molagpt.app.feature.chat
 
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,6 +21,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -44,6 +46,8 @@ fun MessageList(
     messages: List<ChatMessage>,
     modifier: Modifier = Modifier,
     onRegenerate: () -> Unit = {},
+    onEditUser: (String) -> Unit = {},
+    canEdit: Boolean = true,
     models: List<ProviderModel> = emptyList(),
     onNavVersion: (String, Int) -> Unit = { _, _ -> },
 ) {
@@ -53,12 +57,21 @@ fun MessageList(
     // modelId → 选择器 displayName（历史消息/原始 id 也映射成友好名）；models 变化时一并重算。
     val modelNameOf: (String) -> String = { id -> models.firstOrNull { it.id == id }?.displayName ?: id }
     val rows by produceState(
-        initialValue = messages.toMessageRows(parseMarkdown = false, modelDisplayNameOf = modelNameOf),
+        initialValue = messages.toMessageRows(
+            parseMarkdown = false,
+            modelDisplayNameOf = modelNameOf,
+            canEditUser = canEdit,
+        ),
         key1 = messages,
         key2 = models,
+        key3 = canEdit,
     ) {
         value = withContext(Dispatchers.Default) {
-            messages.toMessageRows(parseMarkdown = true, modelDisplayNameOf = modelNameOf)
+            messages.toMessageRows(
+                parseMarkdown = true,
+                modelDisplayNameOf = modelNameOf,
+                canEditUser = canEdit,
+            )
         }
     }
 
@@ -126,11 +139,20 @@ fun MessageList(
                         }
                     }
                     is MessageListRow.StreamingPlaceholder -> AssistantStreamingPlaceholder(rowModifier)
-                    is MessageListRow.Actions -> MessageActionBar(
-                        onCopy = { clipboard.setText(AnnotatedString(row.text)) },
-                        onRegenerate = if (row.canRegenerate) onRegenerate else null,
+                    is MessageListRow.Actions -> Box(
                         modifier = rowModifier,
-                    )
+                        contentAlignment = if (row.alignEnd) Alignment.CenterEnd else Alignment.CenterStart,
+                    ) {
+                        MessageActionBar(
+                            onCopy = { clipboard.setText(AnnotatedString(row.text)) },
+                            onRegenerate = if (row.canRegenerate) onRegenerate else null,
+                            onEdit = if (row.canEdit) {
+                                { onEditUser(row.messageId) }
+                            } else {
+                                null
+                            },
+                        )
+                    }
                     is MessageListRow.Retry -> RetryBar(
                         current = row.current,
                         total = row.total,
@@ -212,11 +234,13 @@ private sealed interface MessageListRow {
         override val contentType = "streaming"
     }
 
-    /** 助手消息下方操作栏（复制 / 重新生成）。 */
+    /** 消息下方操作栏（复制 / 编辑 / 重新生成）。 */
     data class Actions(
         val messageId: String,
         val text: String,
         val canRegenerate: Boolean,
+        val canEdit: Boolean = false,
+        val alignEnd: Boolean = false,
         override val topPaddingDp: Int,
     ) : MessageListRow {
         override val key = "$messageId:actions"
@@ -238,6 +262,7 @@ private sealed interface MessageListRow {
 private fun List<ChatMessage>.toMessageRows(
     parseMarkdown: Boolean,
     modelDisplayNameOf: (String) -> String,
+    canEditUser: Boolean = true,
 ): List<MessageListRow> {
     val rows = ArrayList<MessageListRow>()
     val lastAssistantId = lastOrNull { it.role == Role.ASSISTANT }?.messageId
@@ -264,6 +289,20 @@ private fun List<ChatMessage>.toMessageRows(
 
         if (message.role == Role.USER) {
             addMessageRow { top -> MessageListRow.User(message, top) }
+            val copyText = message.metadata["displayContent"]?.takeIf { it.isNotBlank() }
+                ?: message.rawText.orEmpty()
+            if (copyText.isNotBlank() || message.attachments.isNotEmpty()) {
+                addRow(startsMessage = false) { top ->
+                    MessageListRow.Actions(
+                        messageId = message.messageId,
+                        text = copyText,
+                        canRegenerate = false,
+                        canEdit = canEditUser,
+                        alignEnd = true,
+                        topPaddingDp = top,
+                    )
+                }
+            }
             return@forEach
         }
 

@@ -22,7 +22,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,7 +37,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -86,22 +84,7 @@ fun AboutScreen(
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
 
     updateInfo?.let { info ->
-        AlertDialog(
-            onDismissRequest = { updateInfo = null },
-            title = { Text("发现新版本 ${info.version}") },
-            text = info.notes?.let { notes ->
-                { Text(notes, modifier = Modifier.verticalScroll(rememberScrollState())) }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    runCatching { uriHandler.openUri(info.url) }
-                    updateInfo = null
-                }) { Text("前往下载") }
-            },
-            dismissButton = {
-                TextButton(onClick = { updateInfo = null }) { Text("关闭") }
-            },
-        )
+        UpdateAvailableDialog(info = info, onDismiss = { updateInfo = null })
     }
 
     Scaffold(

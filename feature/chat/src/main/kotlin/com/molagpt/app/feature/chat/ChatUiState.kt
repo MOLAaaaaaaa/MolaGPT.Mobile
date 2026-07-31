@@ -39,9 +39,20 @@ data class ChatUiState(
     /** 本次回复未检测到推理时的自校正提示。 */
     val reasoningMissHint: ReasoningMissHint? = null,
     val pendingAttachments: List<FileInfo> = emptyList(),
+    /** 正在编辑的用户消息；非空时 Composer 进入编辑态，发送会截断该条及之后消息后重发。 */
+    val editingMessage: EditingUserMessage? = null,
     val error: String? = null,
     val authExpired: Boolean = false,
     val isLoadingHistory: Boolean = false,
+)
+
+/** Composer 编辑用户消息的会话态；[revision] 变化时输入框重新预填 [text]。 */
+@Immutable
+data class EditingUserMessage(
+    val messageId: String,
+    val createdAt: Long,
+    val text: String,
+    val revision: Long,
 )
 
 /** 运行时自校正：开启了推理但回复中无思考内容。 */

@@ -41,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,8 +72,8 @@ import com.molagpt.app.core.render.PersonaIcons
  *
  * 工具行（可横向滚动）：
  *  - 「联网搜索」「网页拉取」：与设置页两个独立开关对应；BYOK 需所选模型支持工具调用；
- *  - 「推理」胶囊：仅当所选模型 [ProviderModel.supportsThinking] 时显示。有档位的模型点按弹出
- *    强度面板（[ReasoningSheet]，滑杆 + 刻度，关闭态点按=开启并回默认档）；无档位 kind（Kimi）退化为纯开关；
+ *  - 「推理」胶囊：仅当所选模型 [ProviderModel.supportsThinking] 时显示。有档位时主体=开/关
+ *    （默认档、不弹层），▾ 打开 [ReasoningSheet]；无档位 kind（Kimi）退化为纯开关；
  *  - BYOK 专属「MCP / 视觉 / 图像」：MCP 按服务器配置门控；视觉作为外挂视觉工具，
  *    只要模型支持工具调用即可启用；图像由独立的图像用途 provider 提供，当前聊天模型只要支持工具调用即可调用。
  * 底部加号 = 选图上传（代码执行仅 MolaGPT 账户，开关在设置页）。
@@ -99,12 +100,20 @@ fun Composer(
     onRemoveAttachment: (String) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
+    /** 非空时进入编辑用户消息态：预填文案，发送会截断重发。 */
+    editingMessage: EditingUserMessage? = null,
+    onCancelEdit: () -> Unit = {},
     /** BYOK：打开当前模型的推理参数编辑页；MolaGPT 传 null。 */
     onOpenModelReasoningSettings: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     var showReasoningSheet by remember { mutableStateOf(false) }
+    val isEditing = editingMessage != null
+    LaunchedEffect(editingMessage?.revision) {
+        val edit = editingMessage ?: return@LaunchedEffect
+        text = edit.text
+    }
     val hasReadyAttachment = pendingAttachments.any {
         it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank())
     }
@@ -155,6 +164,35 @@ fun Composer(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (isEditing) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(colorScheme.primary.copy(alpha = 0.08f))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "正在编辑消息",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = colorScheme.primary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "取消",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable {
+                                onCancelEdit()
+                                text = ""
+                            }
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
+                }
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -196,23 +234,23 @@ fun Composer(
                         },
                         hasLevels = !toggleOnly,
                         enabled = toolsEnabled,
-                        onClick = {
-                            if (toggleOnly) {
-                                // KIMI 等仅开/关的 kind：纯开关，不弹层。
-                                onToggleThinking(!useThinking)
-                            } else if (alwaysOn) {
-                                showReasoningSheet = true
-                            } else {
-                                if (!useThinking) {
-                                    // 关→点按 = 开启并回默认档，再弹层微调。
+                        onToggle = {
+                            when {
+                                toggleOnly -> onToggleThinking(!useThinking)
+                                alwaysOn -> showReasoningSheet = true // 常开模型无法关闭，点主体开强度面板
+                                useThinking -> onToggleThinking(false)
+                                else -> {
+                                    // 关→开：默认档，不弹层
                                     onToggleThinking(true)
                                     thinkingConfig?.let {
-                                        onSetReasoningEffort(com.molagpt.app.core.model.ThinkingKinds.resolveDefaultEffort(it))
+                                        onSetReasoningEffort(
+                                            com.molagpt.app.core.model.ThinkingKinds.resolveDefaultEffort(it),
+                                        )
                                     }
                                 }
-                                showReasoningSheet = true
                             }
                         },
+                        onOpenLevels = { showReasoningSheet = true },
                     )
                 }
             }
@@ -240,7 +278,7 @@ fun Composer(
                     Box(modifier = Modifier.fillMaxWidth()) {
                         if (text.isEmpty()) {
                             Text(
-                                text = "输入消息...",
+                                text = if (isEditing) "修改输入..." else "输入消息...",
                                 color = colorScheme.onSurfaceVariant.copy(alpha = 0.68f),
                                 style = MaterialTheme.typography.bodyLarge,
                             )

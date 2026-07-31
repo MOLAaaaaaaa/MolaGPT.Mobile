@@ -87,6 +87,8 @@ class ChatViewModel(
     /** 本次回复未检测到推理内容时的自校正提示（低置信配置更易触发）。 */
     private val _reasoningMissHint = MutableStateFlow<ReasoningMissHint?>(null)
     private val _pendingAttachments = MutableStateFlow<List<FileInfo>>(emptyList())
+    /** 编辑用户消息：发送前按 createdAt 截断该条及之后，再按普通 send 重发。 */
+    private val _editingMessage = MutableStateFlow<EditingUserMessage?>(null)
     // 占位会话懒加载期间为 true（仅在确认要发网络请求时才置位）→ 驱动聊天页居中转圈。
     private val _loadingHistory = MutableStateFlow(false)
 
@@ -191,10 +193,11 @@ class ChatViewModel(
         ChatUiMetaCore(controls, refreshing, loadingHistory, provider.providerId, provider.providerKind, title)
     }
 
-    private val uiMeta = combine(uiMetaCore, _pendingAttachments) { meta, pending ->
+    private val uiMeta = combine(uiMetaCore, _pendingAttachments, _editingMessage) { meta, pending, editing ->
         ChatUiMeta(
             controls = meta.controls,
             pendingAttachments = pending,
+            editingMessage = editing,
             isModelRefreshing = meta.isModelRefreshing,
             isLoadingHistory = meta.isLoadingHistory,
             providerId = meta.providerId,
@@ -239,6 +242,7 @@ class ChatViewModel(
             providerBaseUrl = byokBaseUrlResolver(meta.providerId),
             reasoningMissHint = controls.reasoningMissHint,
             pendingAttachments = pending,
+            editingMessage = meta.editingMessage,
             error = controls.error ?: streamState.error,
             authExpired = controls.authExpired,
             isLoadingHistory = meta.isLoadingHistory,
@@ -485,6 +489,43 @@ class ChatViewModel(
         else -> "bin"
     }
 
+    /** 编辑用户消息：文案填入 Composer，附件回填待发送区；发送时截断该条及之后后重发。 */
+    fun startEditUser(messageId: String) {
+        if (backgroundStreams.isStreaming(sessionId)) return
+        val msg = uiState.value.messages.firstOrNull {
+            it.messageId == messageId && it.role == Role.USER
+        } ?: return
+        val text = msg.metadata["displayContent"]?.takeIf { it.isNotBlank() }
+            ?: msg.rawText.orEmpty().ifBlank {
+                msg.fragments.filterIsInstance<com.molagpt.app.core.model.MessageFragment.Text>()
+                    .joinToString("\n") { it.markdown }
+            }
+        _editingMessage.value = EditingUserMessage(
+            messageId = msg.messageId,
+            createdAt = msg.createdAt,
+            text = text,
+            revision = System.currentTimeMillis(),
+        )
+        _pendingAttachments.value = msg.attachments.map { attachment ->
+            FileInfo(
+                id = attachment.id,
+                name = attachment.name,
+                mimeType = attachment.mimeType,
+                sizeBytes = attachment.sizeBytes,
+                url = attachment.thumbnailUrl ?: attachment.remoteUrl,
+                sandboxPath = attachment.sandboxPath,
+                uploadStatus = UploadStatus.UPLOADED,
+            )
+        }
+        _error.value = null
+    }
+
+    fun cancelEdit() {
+        if (_editingMessage.value == null) return
+        _editingMessage.value = null
+        _pendingAttachments.value = emptyList()
+    }
+
     fun send(text: String) {
         val content = text.trim()
         val hasReadyAttachment = _pendingAttachments.value.any {
@@ -514,6 +555,12 @@ class ChatViewModel(
         }
 
         viewModelScope.launch {
+            // 编辑重发：先删掉被编辑消息及其后所有消息，再走普通发送。
+            val editing = _editingMessage.value
+            if (editing != null) {
+                chatRepository.deleteMessagesFrom(sessionId, editing.createdAt)
+                _editingMessage.value = null
+            }
             val shouldGenerateTitle = chatRepository.messageCount(sessionId) == 0
             val titleSeed = content.ifBlank { _pendingAttachments.value.firstOrNull()?.name ?: "附件" }
             sessionRepository.ensure(
@@ -1006,6 +1053,7 @@ private data class ChatUiMetaCore(
 private data class ChatUiMeta(
     val controls: ChatControlState,
     val pendingAttachments: List<FileInfo>,
+    val editingMessage: EditingUserMessage?,
     val isModelRefreshing: Boolean,
     val isLoadingHistory: Boolean,
     val providerId: String?,

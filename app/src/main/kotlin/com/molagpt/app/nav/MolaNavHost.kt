@@ -55,6 +55,7 @@ import com.molagpt.app.feature.settings.PersonalizationScreen
 import com.molagpt.app.feature.settings.PersonalizationViewModel
 import com.molagpt.app.feature.settings.SettingsScreen
 import com.molagpt.app.feature.settings.SettingsViewModel
+import com.molagpt.app.feature.settings.StartupNoticesHost
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.launch
 
@@ -100,10 +101,11 @@ fun MolaNavHost(
     // 游客可直接进入聊天；登录入口由设置页提供。
     val start = Routes.CHAT
 
+    Box(modifier = modifier.fillMaxSize()) {
     NavHost(
         navController = navController,
         startDestination = start,
-        modifier = modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize(),
         // 全局转场：二级页面从右侧推入，返回时当前页滑出，下层页面带轻微视差（统一声明见 MolaMotion）。
         // 返回手势会驱动 popExitTransition 的进度；目标页面不应额外拦截 BackHandler。
         enterTransition = { MolaMotion.PushEnter },
@@ -530,6 +532,12 @@ fun MolaNavHost(
                 modifier = Modifier.fillMaxSize(),
             )
         }
+    }
+
+    // 进入前台时检查更新（叠在 NavHost 之上）。
+    StartupNoticesHost(
+        versionName = com.molagpt.app.BuildConfig.VERSION_NAME,
+    )
     }
 }
 

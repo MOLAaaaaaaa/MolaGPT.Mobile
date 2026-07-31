@@ -31,14 +31,17 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -225,9 +228,7 @@ private fun buildMathAnnotated(
                     ),
                 ) { append(inline.text) }
                 is MdInline.Code -> withStyle(SpanStyle(color = accent)) { append(inline.text) }
-                is MdInline.Link -> withStyle(
-                    SpanStyle(color = accent, textDecoration = TextDecoration.Underline),
-                ) { append(inline.text) }
+                is MdInline.Link -> appendMarkdownLink(inline, accent)
                 is MdInline.Math -> {
                     val bmp = if (inline.expr.isNotBlank()) {
                         latexInlineBitmap(inline.expr, fontPx, colorArgb)
@@ -261,6 +262,27 @@ private fun buildMathAnnotated(
         }
     }
     return text to content
+}
+
+private fun AnnotatedString.Builder.appendMarkdownLink(inline: MdInline.Link, accent: Color) {
+    val url = inline.url.trim()
+    val label = inline.text.ifBlank { url }
+    val linkStyle = SpanStyle(color = accent, textDecoration = TextDecoration.Underline)
+    if (label.isEmpty()) return
+    if (isOpenableMarkdownUrl(url)) {
+        withLink(LinkAnnotation.Url(url, TextLinkStyles(style = linkStyle))) {
+            append(label)
+        }
+    } else {
+        withStyle(linkStyle) { append(label) }
+    }
+}
+
+/** 仅允许系统浏览器能安全打开的常见协议。 */
+private fun isOpenableMarkdownUrl(url: String): Boolean {
+    if (url.isEmpty()) return false
+    val scheme = url.substringBefore(':', missingDelimiterValue = "").lowercase()
+    return scheme == "http" || scheme == "https" || scheme == "mailto"
 }
 
 private sealed interface InlineSeg {

@@ -24,6 +24,10 @@ dependencyResolutionManagement {
 
 rootProject.name = "MolaGPT"
 
+// 按当前机器可用逻辑核心数拉满 Gradle worker（每次构建动态检测）
+val availableCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+gradle.startParameter.maxWorkerCount = availableCores
+
 // ——— app 宿主 ———
 include(":app")
 

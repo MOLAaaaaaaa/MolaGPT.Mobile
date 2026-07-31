@@ -1,7 +1,8 @@
 package com.molagpt.app.feature.chat
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
@@ -10,6 +11,9 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -27,23 +31,23 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ripple
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +64,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.semantics.Role
@@ -75,12 +80,11 @@ import kotlinx.coroutines.launch
 /**
  * Composer「推理」胶囊 + 推理强度弹层。
  *
- * 交互约定：
- *  - 有档位的模型：胶囊显示「推理 · 高」，点按弹出强度面板；关闭态点按 = 开启并回默认档、随即弹层。
- *  - 无档位的 kind（KIMI / 遗留开关）：胶囊退化为纯开关，无 chevron、不弹层。
- *  - alwaysOn（如 Kimi K3）：无「关」停靠点，滑杆仅档位。
- *  - 弹层滑杆停靠点 =（可选「关」）+ 档位；「关」即 useThinking=false。
- *  - 预算类 kind 在技术细节折叠区展示映射 token；主界面只用中文档位。
+ * 交互约定（方案 A）：
+ *  - 有档位：胶囊拆成「主体」+「▾」。主体 = 开/关（开启用默认档，不弹层）；▾ = 打开强度抽屉。
+ *  - 无档位 kind（KIMI）：退化为纯开关，无 ▾。
+ *  - alwaysOn：主体不关推理，点主体或 ▾ 都打开强度抽屉。
+ *  - 抽屉：离散滑杆 + 档位刻度；BYOK 时标题栏右侧齿轮直达模型推理设置。
  */
 @Composable
 internal fun ReasoningChip(
@@ -88,12 +92,14 @@ internal fun ReasoningChip(
     effortLabel: String?,
     hasLevels: Boolean,
     enabled: Boolean,
-    onClick: () -> Unit,
+    onToggle: () -> Unit,
+    onOpenLevels: () -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(50)
     val containerColor by animateColorAsState(
         targetValue = if (checked) colorScheme.primary.copy(alpha = 0.14f) else colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        animationSpec = MolaMotion.standard(MolaMotion.Short),
         label = "reasonChipContainer",
     )
     val contentColor by animateColorAsState(
@@ -102,46 +108,88 @@ internal fun ReasoningChip(
             checked -> colorScheme.primary
             else -> colorScheme.onSurfaceVariant
         },
+        animationSpec = MolaMotion.standard(MolaMotion.Short),
         label = "reasonChipContent",
     )
-    val borderColor = if (checked) colorScheme.primary.copy(alpha = 0.32f) else colorScheme.outline.copy(alpha = 0.12f)
+    val borderColor by animateColorAsState(
+        targetValue = if (checked) colorScheme.primary.copy(alpha = 0.32f) else colorScheme.outline.copy(alpha = 0.12f),
+        animationSpec = MolaMotion.standard(MolaMotion.Short),
+        label = "reasonChipBorder",
+    )
 
     Row(
         modifier = Modifier
             .heightIn(min = 32.dp)
             .clip(shape)
             .background(containerColor)
-            .border(1.dp, borderColor, shape)
-            .clickable(
-                enabled = enabled,
-                role = if (hasLevels) Role.Button else Role.Checkbox,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-            ) { onClick() }
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .border(1.dp, borderColor, shape),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Icon(
-            imageVector = ReasoningBulbs.Outline,
-            contentDescription = null,
-            tint = contentColor,
-            modifier = Modifier.size(15.dp),
-        )
-        Text(
-            text = if (effortLabel != null) "推理 · $effortLabel" else "推理",
-            color = contentColor,
-            // 与 ToolChip（联网搜索 / 网页拉取）统一为 labelMedium。
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Medium,
-        )
-        if (hasLevels) {
+        Row(
+            modifier = Modifier
+                .clickable(
+                    enabled = enabled,
+                    role = Role.Checkbox,
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = ripple(),
+                ) { onToggle() }
+                .padding(
+                    start = 12.dp,
+                    end = if (hasLevels) 8.dp else 12.dp,
+                    top = 6.dp,
+                    bottom = 6.dp,
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
             Icon(
-                imageVector = ReasoningBulbs.Chevron,
+                imageVector = ReasoningBulbs.Outline,
                 contentDescription = null,
-                tint = contentColor.copy(alpha = 0.75f),
-                modifier = Modifier.size(13.dp),
+                tint = contentColor,
+                modifier = Modifier.size(15.dp),
             )
+            AnimatedContent(
+                targetState = if (effortLabel != null) "推理 · $effortLabel" else "推理",
+                transitionSpec = {
+                    (fadeIn(MolaMotion.standard(MolaMotion.Short)) + slideInVertically(MolaMotion.standard(MolaMotion.Short)) { it / 3 }) togetherWith
+                        (fadeOut(MolaMotion.standard(MolaMotion.Short)) + slideOutVertically(MolaMotion.standard(MolaMotion.Short)) { -it / 3 }) using
+                        SizeTransform(clip = false)
+                },
+                label = "reasonChipLabel",
+            ) { label ->
+                Text(
+                    text = label,
+                    color = contentColor,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Medium,
+                )
+            }
+        }
+        if (hasLevels) {
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(16.dp)
+                    .background(contentColor.copy(alpha = 0.18f)),
+            )
+            Box(
+                modifier = Modifier
+                    .clickable(
+                        enabled = enabled,
+                        role = Role.Button,
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = ripple(),
+                    ) { onOpenLevels() }
+                    .padding(start = 6.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = ReasoningBulbs.Chevron,
+                    contentDescription = "调整推理强度",
+                    tint = contentColor.copy(alpha = 0.75f),
+                    modifier = Modifier.size(13.dp),
+                )
+            }
         }
     }
 }
@@ -157,7 +205,7 @@ internal fun ReasoningSheet(
     onDismiss: () -> Unit,
     /** 聚合网关 baseUrl：用于判断预算是否应展示为强度。空字符串 = 直连语义。 */
     baseUrl: String = "",
-    /** 非空时展示「推理参数设置」入口（通常仅 BYOK 可编辑模型推理配置）。 */
+    /** 非空时标题栏右侧展示齿轮，直达当前模型推理设置（通常仅 BYOK）。 */
     onOpenModelSettings: (() -> Unit)? = null,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -191,63 +239,84 @@ internal fun ReasoningSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp)
+                .padding(horizontal = 20.dp)
                 .padding(bottom = 26.dp)
                 .windowInsetsPadding(WindowInsets.navigationBars),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("推理强度", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            // 标题行：居中标题 + 右侧齿轮（有设置入口时）
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 40.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "推理强度",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                if (onOpenModelSettings != null) {
+                    IconButton(
+                        onClick = {
+                            onDismiss()
+                            onOpenModelSettings()
+                        },
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .size(40.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = "模型推理设置",
+                            tint = colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+            }
             Text(
                 "强度越高，思考越深入；回答更慢、更耗用量。",
                 style = MaterialTheme.typography.bodySmall,
                 color = colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp, bottom = 18.dp),
+                modifier = Modifier.padding(top = 2.dp, bottom = 16.dp),
             )
 
-            val ratio = when {
-                !displayedOn -> 0f
-                alwaysOn -> displayedIndex / (n - 1).coerceAtLeast(1).toFloat()
-                else -> (displayedIndex - 1) / (n - 2).coerceAtLeast(1).toFloat()
+            val statusLabel = if (displayedOn) ThinkingKinds.effortLabel(displayedEffort) else "已关闭"
+            val statusSub = when {
+                !displayedOn -> "本次对话不进行推理"
+                alwaysOn -> "该模型常开推理，拖动滑杆调整强度"
+                else -> "拖动滑杆或点击档位调整强度"
             }
-            val bulb = when {
-                !displayedOn -> ReasoningBulbs.Off
-                ratio < 0.34f -> ReasoningBulbs.Low
-                ratio < 0.75f -> ReasoningBulbs.Mid
-                else -> ReasoningBulbs.High
-            }
-            val bulbTint by animateColorAsState(
-                targetValue = if (displayedOn) colorScheme.primary else colorScheme.onSurfaceVariant,
-                label = "reasonBulbTint",
-            )
-            // 固定占位：Crossfade 过渡帧若高度变化，会牵动 ModalBottomSheet 整页重测 → 抽屉抖一下。
-            Box(
-                modifier = Modifier.size(34.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Crossfade(targetState = bulb, animationSpec = MolaMotion.standard(MolaMotion.Short), label = "reasonBulb") { icon ->
-                    Icon(icon, contentDescription = null, tint = bulbTint, modifier = Modifier.size(34.dp))
+            AnimatedContent(
+                targetState = Triple(statusLabel, displayedOn, statusSub),
+                transitionSpec = {
+                    (fadeIn(MolaMotion.decelerate(MolaMotion.Short)) +
+                        slideInVertically(MolaMotion.decelerate(MolaMotion.Short)) { it / 4 }) togetherWith
+                        (fadeOut(MolaMotion.standard(MolaMotion.Short)) +
+                            slideOutVertically(MolaMotion.standard(MolaMotion.Short)) { -it / 4 }) using
+                        SizeTransform(clip = false)
+                },
+                label = "reasonStatus",
+            ) { (label, on, sub) ->
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (on) colorScheme.primary else colorScheme.onSurface,
+                        modifier = Modifier.heightIn(min = 28.dp),
+                    )
+                    Text(
+                        text = sub,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .padding(top = 2.dp, bottom = 14.dp)
+                            .heightIn(min = 20.dp),
+                    )
                 }
             }
-            Text(
-                text = if (displayedOn) ThinkingKinds.effortLabel(displayedEffort) else "已关闭",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier
-                    .padding(top = 7.dp)
-                    .heightIn(min = 28.dp),
-            )
-            Text(
-                text = when {
-                    !displayedOn -> "本次对话不进行推理"
-                    alwaysOn -> "该模型常开推理，拖动滑杆调整强度"
-                    else -> "拖动滑杆或点击档位调整强度"
-                },
-                style = MaterialTheme.typography.labelMedium,
-                color = colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .padding(top = 2.dp, bottom = 18.dp)
-                    .heightIn(min = 20.dp),
-            )
 
             ReasoningSlider(
                 stopCount = n,
@@ -259,15 +328,29 @@ internal fun ReasoningSheet(
                 },
             )
 
-            Row(modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
                 stops.forEachIndexed { i, stop ->
                     val sel = i == displayedIndex
                     val tickColor by animateColorAsState(
                         targetValue = if (sel) colorScheme.primary else colorScheme.outlineVariant,
+                        animationSpec = MolaMotion.decelerate(MolaMotion.Short),
                         label = "reasonTick",
                     )
-                    val tickWidth by animateDpAsState(if (sel) 20.dp else 16.dp, MolaMotion.emphasized(MolaMotion.Short), label = "reasonTickW")
-                    val tickHeight by animateDpAsState(if (sel) 6.dp else 4.dp, MolaMotion.emphasized(MolaMotion.Short), label = "reasonTickH")
+                    val tickWidth by animateDpAsState(
+                        if (sel) 20.dp else 14.dp,
+                        MolaMotion.springy(),
+                        label = "reasonTickW",
+                    )
+                    val tickHeight by animateDpAsState(
+                        if (sel) 6.dp else 4.dp,
+                        MolaMotion.springy(),
+                        label = "reasonTickH",
+                    )
+                    val labelColor by animateColorAsState(
+                        targetValue = if (sel) colorScheme.primary else colorScheme.onSurfaceVariant,
+                        animationSpec = MolaMotion.standard(MolaMotion.Short),
+                        label = "reasonTickLabel",
+                    )
                     Column(
                         modifier = Modifier
                             .weight(1f)
@@ -283,7 +366,6 @@ internal fun ReasoningSheet(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        // 外层固定 20×6：选中态只在框内缩放，避免整行高度跳动牵动抽屉。
                         Box(
                             modifier = Modifier.size(width = 20.dp, height = 6.dp),
                             contentAlignment = Alignment.Center,
@@ -298,22 +380,23 @@ internal fun ReasoningSheet(
                         Text(
                             text = stop?.let(ThinkingKinds::effortLabel) ?: "关",
                             style = MaterialTheme.typography.labelSmall,
-                            // 字重变化可能微变行高；固定字重 + 固定行高，选中态只改颜色。
                             fontWeight = FontWeight.SemiBold,
-                            color = if (sel) colorScheme.primary else colorScheme.onSurfaceVariant,
+                            color = labelColor,
                             modifier = Modifier.height(16.dp),
                         )
                     }
                 }
             }
 
-            // 恢复默认 + 技术细节：紧凑成组，避免与上方档位之间出现大片空白。
             val atDefault = displayedOn && displayedEffort == defaultEffort
-            val followAlpha by animateFloatAsState(if (atDefault) 0f else 1f, MolaMotion.standard(MolaMotion.Short), label = "reasonFollow")
-            // 固定紧凑高度 + alpha 动画：拖动跨过默认档时不改变抽屉高度（AnimatedVisibility 会引起抖动）。
+            val followAlpha by animateFloatAsState(
+                if (atDefault) 0f else 1f,
+                MolaMotion.standard(MolaMotion.Short),
+                label = "reasonFollow",
+            )
             Box(
                 modifier = Modifier
-                    .padding(top = 14.dp)
+                    .padding(top = 12.dp)
                     .height(32.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -337,11 +420,10 @@ internal fun ReasoningSheet(
                 )
             }
 
-            // 技术细节折叠：wire 参数 / 预算 token 仅 power user 查看。
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 6.dp),
+                    .padding(top = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
@@ -379,66 +461,13 @@ internal fun ReasoningSheet(
                     )
                 }
             }
-
-            if (onOpenModelSettings != null) {
-                HorizontalDivider(
-                    modifier = Modifier.padding(top = 12.dp, bottom = 2.dp),
-                    color = colorScheme.outline.copy(alpha = 0.12f),
-                )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = ripple(),
-                            role = Role.Button,
-                        ) {
-                            onDismiss()
-                            onOpenModelSettings()
-                        }
-                        .padding(horizontal = 4.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Settings,
-                        contentDescription = null,
-                        tint = colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "推理参数设置",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = colorScheme.onSurface,
-                        )
-                        Text(
-                            text = "调整当前模型的推理设置",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        contentDescription = null,
-                        tint = colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        modifier = Modifier.size(22.dp),
-                    )
-                }
-            }
         }
     }
 }
 
 /**
- * 离散滑杆：交给 Material3 Slider 处理点击、拖动、触摸命中、手势竞争与无障碍。
- *
- * 关键点：不传 `steps`，让滑块位置在拖动期间保持连续、严格跟手——
- * 一旦传了 `steps`，Material3 会在拖动过程中把渲染位置实时吸附到最近档位，
- * 手指连续移动但滑块离散跳动，才会出现「发抖」且档位间无动画的问题。
- * 档位吸附只在松手（或外部切换档位）时通过 [Animatable] 平滑过渡完成。
+ * 离散滑杆：拖动期间连续跟手；松手 / 点档位后用减速曲线平滑吸附。
+ * 拖动中拇指略放大，松手回弹，手感更跟手。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -455,16 +484,18 @@ private fun ReasoningSlider(
     }
     var dragging by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val settleSpec = remember { MolaMotion.emphasized<Float>(MolaMotion.Short) }
+    val settleSpec = remember { MolaMotion.decelerate<Float>(MolaMotion.Medium) }
+    val thumbScale by animateFloatAsState(
+        targetValue = if (dragging) 1.16f else 1f,
+        animationSpec = MolaMotion.springy(),
+        label = "reasonThumbScale",
+    )
 
-    // 点下方档位、点「恢复默认」或外部切换模型时，平滑动画过去；拖动中不允许外部重组抢回位置。
     LaunchedEffect(selectedIndex, stopCount) {
         if (!dragging) position.animateTo(selectedIndex.coerceIn(0, maxIndex).toFloat(), settleSpec)
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        // 下方档位使用等宽单元格；把 Slider 端点缩进到首尾单元格中心，使滑块与文字严格对齐。
-        // Material3 自身还会为 thumb 预留约 10.dp，因此在半单元格宽度上扣除该值。
         val endpointPadding = maxOf(0.dp, maxWidth / (stopCount * 2) - 10.dp)
         Slider(
             value = position.value,
@@ -489,7 +520,11 @@ private fun ReasoningSlider(
             thumb = {
                 Box(
                     modifier = Modifier
-                        .size(26.dp)
+                        .size(28.dp)
+                        .graphicsLayer {
+                            scaleX = thumbScale
+                            scaleY = thumbScale
+                        }
                         .clip(CircleShape)
                         .background(colorScheme.primary),
                     contentAlignment = Alignment.Center,
@@ -527,7 +562,7 @@ private fun ReasoningSlider(
 }
 
 /**
- * 灯泡四态图标：Off 带斜杠、Low 小灯芯、Mid 大灯芯、High 满亮带光芒。
+ * 灯泡四态图标：Outline 用于胶囊；Chevron 用于强度入口。
  */
 private object ReasoningBulbs {
     private const val BULB = "M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.1h6c0-.8.4-1.6 1-2.1A7 7 0 0 0 12 2z"
@@ -554,23 +589,7 @@ private object ReasoningBulbs {
         )
     }
 
-    private fun ImageVector.Builder.filled(pathData: String, alpha: Float = 1f) {
-        addPath(pathData = addPathNodes(pathData), fill = SolidColor(Color.Black), fillAlpha = alpha)
-    }
-
-    private fun dot(r: Float) = "M12 ${9 - r}a$r $r 0 1 1 0 ${2 * r}a$r $r 0 1 1 0 ${-2 * r}z"
-
     val Outline: ImageVector by lazy { build("Outline") {} }
-    val Off: ImageVector by lazy { build("Off") { stroked("M4 4l16 16") } }
-    val Low: ImageVector by lazy { build("Low") { filled(dot(1.6f)) } }
-    val Mid: ImageVector by lazy { build("Mid") { filled(dot(3f)) } }
-    val High: ImageVector by lazy {
-        build("High") {
-            filled(BULB, alpha = 0.28f)
-            filled(dot(3f))
-            stroked("M12 0.6v1.6M4.5 3.5l1.2 1.2M19.5 3.5l-1.2 1.2M1.8 9.5h1.6M20.6 9.5h1.6", width = 1.6f)
-        }
-    }
     val Chevron: ImageVector by lazy {
         ImageVector.Builder(
             name = "ReasoningChevron",

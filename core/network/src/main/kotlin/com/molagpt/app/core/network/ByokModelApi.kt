@@ -392,6 +392,13 @@ fun ByokProvider.modelsEndpoint(): String {
     return "$url${separator}key=${URLEncoder.encode(key, Charsets.UTF_8.name())}"
 }
 
+/** OpenRouter rankings 用应用名（三端统一）。 */
+internal const val OpenRouterAppTitle = "MolaGPT"
+
+/** OpenRouter rankings 用站点 URL（Mobile）。 */
+internal const val OpenRouterRefererUrl =
+    "https://github.com/MOLAaaaaaaa/MolaGPT.Mobile"
+
 fun ByokProvider.applyAuthHeaders(add: (String, String) -> Unit) {
     val key = apiKey?.takeIf { it.isNotBlank() }
     if (key != null) {
@@ -404,8 +411,22 @@ fun ByokProvider.applyAuthHeaders(add: (String, String) -> Unit) {
             ByokProviderType.OPENAI_COMPAT, ByokProviderType.OPENAI_RESPONSE -> add("Authorization", "Bearer $key")
         }
     }
+    // OpenRouter rankings：默认带上 X-Title / HTTP-Referer；用户自定义头优先（见下方）。
+    applyOpenRouterAttributionHeaders(add)
     // 自定义请求头在 auth 之后追加（即使无 key 也应用，支持仅靠自定义头鉴权的网关）。
     customHeaders.forEach { h ->
         if (h.name.isNotBlank()) add(h.name, h.value)
     }
+}
+
+/**
+ * 当 [ByokProvider.baseUrl] 指向 OpenRouter 时，自动附加 rankings 归因头。
+ * 若用户已在 [ByokProvider.customHeaders] 里配置同名头（含 `Referer` 别名），则跳过对应默认值。
+ */
+internal fun ByokProvider.applyOpenRouterAttributionHeaders(add: (String, String) -> Unit) {
+    if (!ThinkingKinds.isOpenRouter(baseUrl)) return
+    val names = customHeaders.mapNotNull { it.name.trim().takeIf { n -> n.isNotEmpty() } }
+    fun has(name: String) = names.any { it.equals(name, ignoreCase = true) }
+    if (!has("HTTP-Referer") && !has("Referer")) add("HTTP-Referer", OpenRouterRefererUrl)
+    if (!has("X-Title")) add("X-Title", OpenRouterAppTitle)
 }

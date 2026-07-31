@@ -84,15 +84,17 @@ fun AssistantStreamingPlaceholder(modifier: Modifier = Modifier) {
     com.molagpt.app.core.render.PulsingDots(modifier = modifier.padding(vertical = 4.dp))
 }
 
-/** 助手消息下方操作栏。重新生成仅在最后一条助手消息可用。 */
+/** 消息下方操作栏。重新生成仅助手最后一条；编辑仅用户消息。 */
 @Composable
 fun MessageActionBar(
     onCopy: () -> Unit,
-    onRegenerate: (() -> Unit)?,
+    onRegenerate: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         ActionChip("复制", onCopy)
+        if (onEdit != null) ActionChip("编辑", onEdit)
         if (onRegenerate != null) ActionChip("重新生成", onRegenerate)
     }
 }

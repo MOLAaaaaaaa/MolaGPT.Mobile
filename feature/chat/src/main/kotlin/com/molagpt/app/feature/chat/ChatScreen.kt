@@ -412,6 +412,8 @@ fun ChatScreen(
                     onRemoveAttachment = viewModel::removeAttachment,
                     onSend = viewModel::send,
                     onStop = viewModel::stop,
+                    editingMessage = state.editingMessage,
+                    onCancelEdit = viewModel::cancelEdit,
                     onOpenModelReasoningSettings = {
                         val model = state.selectedModel ?: return@Composer
                         if (model.providerKind == ProviderKind.BYOK) {
@@ -436,6 +438,8 @@ fun ChatScreen(
                     messages = state.messages,
                     models = state.models,
                     onRegenerate = viewModel::regenerateLast,
+                    onEditUser = viewModel::startEditUser,
+                    canEdit = !state.isStreaming,
                     onNavVersion = viewModel::navVersion,
                 )
             }
