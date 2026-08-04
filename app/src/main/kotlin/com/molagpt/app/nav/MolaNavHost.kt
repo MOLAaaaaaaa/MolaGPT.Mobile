@@ -3,10 +3,15 @@ package com.molagpt.app.nav
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -18,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
@@ -167,18 +173,6 @@ fun MolaNavHost(
         }
 
         composable(Routes.CHAT) {
-            LaunchedEffect(Unit) {
-                // 重试到官方 model_config **拉取成功**为止（不是"列表非空"——BYOK 是本地的，
-                // 官方拉挂了列表照样非空）。带退避,冷启动/网络抖动/临时失败可自恢复。
-                var attempt = 0
-                while (!container.modelRegistry.configLoaded.value && attempt < 5) {
-                    runCatching { container.modelApi.refresh() }
-                    attempt++
-                    if (container.modelRegistry.configLoaded.value || attempt >= 5) break
-                    kotlinx.coroutines.delay(1500L * attempt) // 1.5s, 3s, 4.5s, 6s
-                }
-            }
-
             ChatHost(
                 settings = settings,
                 onOpenSettings = {
@@ -534,9 +528,10 @@ fun MolaNavHost(
         }
     }
 
-    // 进入前台时检查更新（叠在 NavHost 之上）。
+    // 进入前台时检查更新与运营消息（叠在 NavHost 之上）。
     StartupNoticesHost(
         versionName = com.molagpt.app.BuildConfig.VERSION_NAME,
+        settingsStore = container.settingsStore,
     )
     }
 }
@@ -557,6 +552,9 @@ private fun ChatHost(
     val sessionVm: SessionViewModel = viewModel(factory = ViewModelFactories.session(container))
 
     val scope = rememberCoroutineScope()
+    // 抽屉里的删除反馈。ChatHost 没有 Scaffold，所以在根 Box 内自建宿主；
+    // 抽屉盖在聊天页之上，Snackbar 必须画在最外层才可见。
+    val snackbar = remember { SnackbarHostState() }
 
     // 当前会话需要跨二级页面往返和进程重建恢复。
     var currentSessionId by rememberSaveable { mutableStateOf<String?>(Ids.newSessionId()) }
@@ -628,6 +626,10 @@ private fun ChatHost(
                     onOpenImageWorkbench = onOpenImageWorkbench,
                     onNewChatWithModel = { modelId, providerId, kind, personaId ->
                         scope.launch {
+                            // 跨阵营会新建会话，也必须与空白会话直接切换一样更新下次启动默认值。
+                            runCatching {
+                                container.settingsStore.setDefaultModelSelection(modelId, kind, providerId)
+                            }
                             val conversation = container.sessionRepository.create(
                                 title = SessionRepository.DEFAULT_TITLE,
                                 model = modelId,
@@ -676,14 +678,34 @@ private fun ChatHost(
                 },
                 onDelete = { id, nextSessionId ->
                     scope.launch {
-                        sessionVm.delete(id)
+                        // delete() 在 viewModelScope 里跑，join 后再提示，避免「已删除」早于落库。
+                        sessionVm.delete(id).join()
                         if (id == currentSessionId) {
                             currentSessionId = nextSessionId ?: Ids.newSessionId()
                         }
                         container.syncEngine.schedulePush(id)
+                        snackbar.showSnackbar("已删除 1 个对话")
                     }
                 },
+                onDeleteMany = { ids, nextSessionId ->
+                    scope.launch {
+                        val deleted = sessionVm.deleteAll(ids)
+                        if (currentSessionId in ids) {
+                            currentSessionId = nextSessionId ?: Ids.newSessionId()
+                        }
+                        deleted.forEach { container.syncEngine.schedulePush(it) }
+                        snackbar.showSnackbar("已删除 ${deleted.size} 个对话")
+                    }
+                },
+                onRequestAllIds = { sessionVm.allVisibleSessionIds() },
             )
         }
+
+        SnackbarHost(
+            hostState = snackbar,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars),
+        )
     }
 }

@@ -119,8 +119,13 @@ fun ChatScreen(
     // 阵营做成徽章，副标题只留模型名：顶栏 title 区被汉堡和 3~4 个图标夹住，
     // 360dp 下仅约 152dp，再拼提供商名（下拉分组标题里已有）会把模型名挤成「ge…」。
     val modelKindLabel = if (state.providerKind == ProviderKind.BYOK) "BYOK" else "MolaGPT"
+    // 已有明确选中模型时不覆盖为「正在获取」；仅当前阵营是 MolaGPT 且尚未选中时才提示。
     val modelNameText = state.selectedModel?.displayName
-        ?: if (state.isModelRefreshing) "正在获取模型" else "选择模型"
+        ?: if (state.providerKind == ProviderKind.MOLAGPT && state.isModelRefreshing) {
+            "正在获取模型"
+        } else {
+            "选择模型"
+        }
     val conversationTitle = state.title.ifBlank { "新对话" }
     /** 空白会话：无消息、无未发送附件、且不在加载历史中；此时跨阵营切换模型不弹确认窗。 */
     val isBlankConversation = state.messages.isEmpty() &&
@@ -215,7 +220,12 @@ fun ChatScreen(
                                 .clip(RoundedCornerShape(8.dp))
                                 .clickable {
                                     modelMenuOpen = true
-                                    if (state.modelGroups.isEmpty()) viewModel.refreshModels()
+                                    // 当前会话确实属于 MolaGPT 时自动补拉；BYOK 用户仅打开菜单不发官方请求。
+                                    if (state.providerKind == ProviderKind.MOLAGPT &&
+                                        !state.isMolaModelConfigLoaded
+                                    ) {
+                                        viewModel.ensureMolaModelsLoaded()
+                                    }
                                 }
                                 .padding(end = 4.dp),
                         ) {
@@ -253,9 +263,20 @@ fun ChatScreen(
                         if (state.modelGroups.isEmpty()) {
                             DropdownMenuItem(
                                 text = {
-                                    Text(if (state.isModelRefreshing) "正在获取 MolaGPT 模型..." else "未获取到 MolaGPT 模型 · 点此重试")
+                                    Text(
+                                        when {
+                                            state.isModelRefreshing -> "正在获取 MolaGPT 模型..."
+                                            state.isMolaModelConfigLoaded -> "暂无可用 MolaGPT 模型 · 点此刷新"
+                                            else -> "未获取到 MolaGPT 模型 · 点此重试"
+                                        },
+                                    )
                                 },
-                                onClick = { if (!state.isModelRefreshing) viewModel.refreshModels() },
+                                onClick = {
+                                    if (!state.isModelRefreshing) {
+                                        if (state.isMolaModelConfigLoaded) viewModel.refreshModels()
+                                        else viewModel.ensureMolaModelsLoaded()
+                                    }
+                                },
                                 enabled = !state.isModelRefreshing,
                             )
                         } else {
@@ -329,9 +350,20 @@ fun ChatScreen(
                             HorizontalDivider()
                             DropdownMenuItem(
                                 text = {
-                                    Text(if (state.isModelRefreshing) "正在获取 MolaGPT 模型..." else "刷新 MolaGPT 模型列表")
+                                    Text(
+                                        when {
+                                            state.isModelRefreshing -> "正在获取 MolaGPT 模型..."
+                                            state.isMolaModelConfigLoaded -> "刷新 MolaGPT 模型列表"
+                                            else -> "加载 MolaGPT 模型"
+                                        },
+                                    )
                                 },
-                                onClick = { if (!state.isModelRefreshing) viewModel.refreshModels() },
+                                onClick = {
+                                    if (!state.isModelRefreshing) {
+                                        if (state.isMolaModelConfigLoaded) viewModel.refreshModels()
+                                        else viewModel.ensureMolaModelsLoaded()
+                                    }
+                                },
                                 enabled = !state.isModelRefreshing,
                             )
                         }
@@ -437,10 +469,12 @@ fun ChatScreen(
                 MessageList(
                     messages = state.messages,
                     models = state.models,
-                    onRegenerate = viewModel::regenerateLast,
+                    onRegenerate = { viewModel.regenerateLast() },
+                    onRegenerateWithModel = { viewModel.regenerateLast(it) },
                     onEditUser = viewModel::startEditUser,
                     canEdit = !state.isStreaming,
                     onNavVersion = viewModel::navVersion,
+                    onNavEditSnapshot = viewModel::navEditSnapshot,
                 )
             }
             if (state.isLoadingHistory && state.messages.isEmpty()) {
@@ -448,7 +482,8 @@ fun ChatScreen(
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
-            if (state.isModelRefreshing) {
+            // 仅当前阵营依赖官方列表时显示顶栏进度，避免 BYOK 会话被无关刷新打扰。
+            if (state.isModelRefreshing && state.providerKind == ProviderKind.MOLAGPT) {
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
                 )

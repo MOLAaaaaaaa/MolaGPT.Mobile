@@ -40,10 +40,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -83,6 +88,45 @@ object MolaMotion {
     val PopExit: ExitTransition = slideOutHorizontally(standardDecelerate()) { it }
 }
 
+/**
+ * 流式正文的尾部渐隐：给**最后一行的末端**加一段透明度渐变，让新字看起来是「淡出来的」。
+ *
+ * 不按字符切分——长回答下逐字动画会让元素数与重组量随文本线性膨胀。这里只在绘制阶段用一层
+ * 渐变蒙版（`DstIn`）作用于文本末端，开销与文本量无关，观感却接近逐字淡入。
+ *
+ * [active] 为 false（流式结束）时完全不介入绘制，避免给静态文本留下渐变痕迹。
+ * [lastLineEndX] / [lastLineTop] / [lastLineBottom] 由调用方从 `onTextLayout` 传入：渐变必须锚在
+ * **真实行尾**而不是容器右边缘——流式时最后一行往往只写到一半，锚在容器边缘会让渐变落在空白处，
+ * 完全看不到效果。
+ */
+fun Modifier.streamingTailFade(
+    active: Boolean,
+    lastLineEndX: Float,
+    lastLineTop: Float,
+    lastLineBottom: Float,
+    fadeWidth: Dp = 96.dp,
+): Modifier = if (!active || lastLineEndX <= 0f) this else composed {
+    val fadePx = with(LocalDensity.current) { fadeWidth.toPx() }
+    // 需要离屏合成：DstIn 要与已绘制的文本像素做相交，直接画会与背景混合。
+    graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        .drawWithContent {
+            drawContent()
+            val start = (lastLineEndX - fadePx).coerceAtLeast(0f)
+            val end = lastLineEndX.coerceAtMost(size.width)
+            if (end <= start) return@drawWithContent
+            drawRect(
+                brush = Brush.horizontalGradient(
+                    colors = listOf(Color.Black, Color.Black.copy(alpha = 0.22f)),
+                    startX = start,
+                    endX = end,
+                ),
+                topLeft = Offset(start, lastLineTop),
+                size = Size(end - start, (lastLineBottom - lastLineTop).coerceAtLeast(0f)),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+}
+
 /** 骨架屏微光（加载占位）。给元素定好尺寸+圆角后调用即可：`Box(Modifier.height(14.dp).clip(..).shimmer())`。 */
 fun Modifier.shimmer(): Modifier = composed {
     val base = MaterialTheme.colorScheme.surfaceVariant
@@ -120,28 +164,6 @@ fun Modifier.fadeScaleIn(visible: Boolean): Modifier = composed {
         scaleX = s
         scaleY = s
     }
-}
-
-/** 流式打字光标（闪烁细条）。 */
-@Composable
-fun TypingCaret(
-    modifier: Modifier = Modifier,
-    color: Color = MaterialTheme.colorScheme.primary,
-    height: Dp = 18.dp,
-) {
-    val transition = rememberInfiniteTransition(label = "caret")
-    val alpha by transition.animateFloat(
-        initialValue = 1f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(tween(520, easing = LinearEasing), RepeatMode.Reverse),
-        label = "caretAlpha",
-    )
-    Box(
-        modifier = modifier
-            .size(width = 2.dp, height = height)
-            .graphicsLayer { this.alpha = alpha }
-            .background(color),
-    )
 }
 
 /** 等待首 token 的脉冲三点（替代「正在生成…」文字）。 */

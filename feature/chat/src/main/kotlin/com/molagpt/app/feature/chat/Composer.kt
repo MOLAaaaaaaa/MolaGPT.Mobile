@@ -155,10 +155,10 @@ fun Composer(
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp),
         shape = RoundedCornerShape(22.dp),
-        color = colorScheme.surface.copy(alpha = 0.96f),
-        tonalElevation = 3.dp,
-        shadowElevation = 10.dp,
-        border = BorderStroke(1.dp, colorScheme.outline.copy(alpha = 0.14f)),
+        color = colorScheme.surface,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        border = BorderStroke(1.dp, colorScheme.outline.copy(alpha = 0.34f)),
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -298,14 +298,6 @@ fun Composer(
                     selected = false,
                     enabled = toolsEnabled,
                     onClick = onPickImage,
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = if (enterToSend) "Enter 发送" else "Enter 换行",
-                    color = colorScheme.onSurfaceVariant.copy(alpha = 0.74f),
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Crossfade(

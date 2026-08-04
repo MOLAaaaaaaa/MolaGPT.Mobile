@@ -23,7 +23,10 @@ import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.SystemPromptComposer
 import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.core.network.resolveOpeningModelSelection
+import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.core.storage.ChatRepository
+import com.molagpt.app.core.storage.EditSnapshots
 import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.RetryAttempts
 import com.molagpt.app.core.storage.SessionRepository
@@ -58,11 +61,18 @@ class ChatViewModel(
     private val dispatchers: DispatcherProvider,
     private val modelsFlow: StateFlow<List<ProviderModel>>,
     private val modelRefreshingFlow: StateFlow<Boolean>,
-    private val modelRefresher: suspend (ProviderKind) -> List<ProviderModel>,
-    private val settingsFlow: StateFlow<com.molagpt.app.core.storage.AppSettings>,
+    private val modelConfigLoadedFlow: StateFlow<Boolean>,
+    /** false=首次按需加载（含重试），true=用户显式强制刷新。 */
+    private val molaModelLoader: suspend (forceRefresh: Boolean) -> Unit,
+    private val settingsFlow: StateFlow<AppSettings?>,
     /** providerId → BYOK baseUrl 解析器（供推理弹层判断聚合网关/预算折算）；默认返回空串。 */
     private val byokBaseUrlResolver: (String?) -> String = { "" },
     private val defaultModelId: String?,
+    private val defaultProviderKind: ProviderKind? = null,
+    private val defaultProviderId: String? = null,
+    /** 将当前选用模型记为新对话默认（含阵营），供冷启动按需拉模型。 */
+    private val persistDefaultModel: suspend (modelId: String, kind: ProviderKind, providerId: String?) -> Unit =
+        { _, _, _ -> },
     private val tools: EnabledTools,
     useThinking: Boolean,
     reasoningEffort: String,
@@ -72,9 +82,18 @@ class ChatViewModel(
 ) : ViewModel() {
 
     private val conversationId = Ids.conversationIdForSession(sessionId)
-    private val _selectedModel = MutableStateFlow(defaultModelId)
-    private val _conversationProviderId = MutableStateFlow<String?>(ProviderIds.MOLAGPT)
-    private val _conversationProviderKind = MutableStateFlow(ProviderKind.MOLAGPT)
+    private val initialByokChat = modelsFlow.value.filter {
+        it.providerKind == ProviderKind.BYOK && it.supportsChat
+    }
+    private val initialSelection = resolveOpeningModelSelection(
+        defaultModelId = defaultModelId,
+        defaultProviderKind = defaultProviderKind,
+        defaultProviderId = defaultProviderId,
+        byokChatModels = initialByokChat,
+    )
+    private val _selectedModel = MutableStateFlow<String?>(initialSelection.modelId)
+    private val _conversationProviderId = MutableStateFlow(initialSelection.providerId)
+    private val _conversationProviderKind = MutableStateFlow(initialSelection.providerKind)
     private val _conversationPersonaId = MutableStateFlow<String?>(null)
     private val _conversationSystemPrompt = MutableStateFlow<String?>(null)
     private val _conversationSystemPromptMode = MutableStateFlow<String?>(null)
@@ -102,8 +121,10 @@ class ChatViewModel(
             runCatching {
                 syncEngine.loadConversationIfNeeded(sessionId) { _loadingHistory.value = true }
             }
-            restoreConversationModel()
+            val restored = restoreConversationModel()
+            if (!restored) persistReconciledDefaultIfNeeded()
             _loadingHistory.value = false
+            ensureMolaModelsForCurrentProvider()
         }
         // 运行时自校正：本会话流正常完成后，若开启了推理但助手消息无思考片段 → 提示。
         viewModelScope.launch {
@@ -141,6 +162,33 @@ class ChatViewModel(
         )
     }
 
+    /** 新对话把旧格式或失效 BYOK 默认值一次性迁移为已经解析出的有效选择。 */
+    private suspend fun persistReconciledDefaultIfNeeded() {
+        val modelChanged = defaultModelId?.trim() != initialSelection.modelId
+        val providerChanged = when (initialSelection.providerKind) {
+            ProviderKind.BYOK -> defaultProviderId != initialSelection.providerId
+            ProviderKind.MOLAGPT -> !defaultProviderId.isNullOrBlank()
+        }
+        if (defaultProviderKind == null || defaultProviderKind != initialSelection.providerKind ||
+            modelChanged || providerChanged
+        ) {
+            runCatching {
+                persistDefaultModel(
+                    initialSelection.modelId,
+                    initialSelection.providerKind,
+                    initialSelection.providerId,
+                )
+            }
+        }
+    }
+
+    /** 当前实际会话（而非全局默认）需要 MolaGPT 时才加载官方列表。 */
+    private suspend fun ensureMolaModelsForCurrentProvider() {
+        if (_conversationProviderKind.value != ProviderKind.MOLAGPT) return
+        runCatching { molaModelLoader(false) }
+            .onFailure { error -> _error.value = error.message ?: "模型列表刷新失败" }
+    }
+
     private val controls = combine(
         _error, _authExpired, _enabledTools, _useThinking, _reasoningEffort, _reasoningMissHint,
     ) { values ->
@@ -156,7 +204,7 @@ class ChatViewModel(
 
     /** 已启用的 MCP 服务器是否存在——门控对话内 MCP 工具开关，避免空配置时仍向模型暴露 MCP。 */
     private val hasMcpServersFlow: StateFlow<Boolean> = settingsFlow
-        .map { s -> s.byokMcpServers.any { it.enabled } }
+        .map { s -> s?.byokMcpServers?.any { it.enabled } == true }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val providerState = combine(
@@ -193,7 +241,9 @@ class ChatViewModel(
         ChatUiMetaCore(controls, refreshing, loadingHistory, provider.providerId, provider.providerKind, title)
     }
 
-    private val uiMeta = combine(uiMetaCore, _pendingAttachments, _editingMessage) { meta, pending, editing ->
+    private val uiMeta = combine(
+        uiMetaCore, _pendingAttachments, _editingMessage, modelConfigLoadedFlow,
+    ) { meta, pending, editing, configLoaded ->
         ChatUiMeta(
             controls = meta.controls,
             pendingAttachments = pending,
@@ -203,6 +253,7 @@ class ChatViewModel(
             providerId = meta.providerId,
             providerKind = meta.providerKind,
             title = meta.title,
+            isMolaModelConfigLoaded = configLoaded,
         )
     }
 
@@ -233,6 +284,7 @@ class ChatViewModel(
             providerKind = meta.providerKind,
             hasMolaGptModels = models.any { it.providerKind == ProviderKind.MOLAGPT && it.supportsChat },
             hasByokModels = models.any { it.providerKind == ProviderKind.BYOK && it.supportsChat },
+            isMolaModelConfigLoaded = meta.isMolaModelConfigLoaded,
             isModelRefreshing = meta.isModelRefreshing,
             isStreaming = streamState.isStreaming,
             inputEnabled = !streamState.isStreaming,
@@ -293,6 +345,23 @@ class ChatViewModel(
         _conversationProviderId.value = selected.providerId
         _conversationProviderKind.value = selected.providerKind
         adaptThinkingStateTo(selected)
+        viewModelScope.launch {
+            runCatching {
+                persistDefaultModel(selected.id, selected.providerKind, selected.providerId)
+            }
+        }
+    }
+
+    /**
+     * 需要展示/选用 MolaGPT 模型时调用：官方 config 未成功拉取过则触发刷新。
+     * 当前 MolaGPT 会话缺少模型，或 BYOK 用户显式点击“加载 MolaGPT 模型”时使用。
+     */
+    fun ensureMolaModelsLoaded() {
+        if (modelRefreshingFlow.value) return
+        viewModelScope.launch {
+            runCatching { molaModelLoader(false) }
+                .onFailure { error -> _error.value = error.message ?: "模型列表刷新失败" }
+        }
     }
 
     /**
@@ -327,13 +396,9 @@ class ChatViewModel(
     fun refreshModels() {
         if (modelRefreshingFlow.value) return
         viewModelScope.launch {
-            // 只刷新 MolaGPT 可用模型：refresh 内部按当前账户（登录走 registered_user_limits、
-            // 游客走 guest_limits）过滤可见模型。BYOK 模型由用户在服务详情页精选管理、且注册表
-            // 已响应式跟踪落库列表，刷新按钮不应改动它——故不再调 modelRefresher(BYOK)。
-            // 成功后 registry 的 StateFlow 自动 emit，uiState 实时重组——无需手动 tick。
             runCatching {
                 withContext(dispatchers.io) {
-                    modelRefresher(ProviderKind.MOLAGPT)
+                    molaModelLoader(true)
                 }
             }.onFailure { e ->
                 _error.value = e.message ?: "模型列表刷新失败"
@@ -548,16 +613,19 @@ class ChatViewModel(
         if (selectedModel.providerKind == ProviderKind.BYOK &&
             hasImageAttachment &&
             selectedModel.supportsVision != true &&
-            !settingsFlow.value.visionProxyEnabled
+            settingsFlow.value?.visionProxyEnabled != true
         ) {
             _error.value = "当前 BYOK 模型不支持视觉输入，请在「BYOK 工具」设置中开启外挂视觉，或切换到支持视觉的模型"
             return
         }
 
         viewModelScope.launch {
-            // 编辑重发：先删掉被编辑消息及其后所有消息，再走普通发送。
+            // 编辑重发：先把当前整条时间线存为一个历史分支（可切回），再截断重发。
+            // 分支元数据要挂到下面新建的用户消息上——被编辑的那条马上就被删了。
+            var editSnapshotMeta: String? = null
             val editing = _editingMessage.value
             if (editing != null) {
+                editSnapshotMeta = chatRepository.snapshotBeforeEdit(sessionId, editing.messageId)
                 chatRepository.deleteMessagesFrom(sessionId, editing.createdAt)
                 _editingMessage.value = null
             }
@@ -601,6 +669,7 @@ class ChatViewModel(
                     put("sendContent", sendContent)
                     put("displayContent", content)
                 }
+                editSnapshotMeta?.let { put(EditSnapshots.KEY, it) }
             }
             val userMsg = ChatMessage(
                 messageId = Ids.newMessageId(),
@@ -746,30 +815,76 @@ class ChatViewModel(
             else -> file.name.substringAfterLast('.', "文件").uppercase(Locale.US)
         }
 
-    /** 重发：保留旧答案为一个版本，重新生成一版并切到新版本（可在版本间切换）。 */
-    fun regenerateLast() {
+    /** 重发：保留旧答案为一个版本，重新生成一版并切到新版本（可在版本间切换）。
+     *  [overrideModelId] 非空表示换模型重试（对齐 Web 的 startRegenerate(overrideModelKey)）。 */
+    fun regenerateLast(overrideModelId: String? = null) {
+        if (backgroundStreams.isStreaming(sessionId)) return
         val msgs = uiState.value.messages
-        val lastAssistant = msgs.lastOrNull { it.role == Role.ASSISTANT } ?: return
-        val modelId = uiState.value.selectedModelId ?: return
+        // MolaGPT 对齐 Web：只有停在最新编辑版本时才能重试（对应 Web 的「只能重试最新一条回答」）。
+        // 历史快照是冻结的，在其上重生成会在切换分支后丢失（改动无处保存）。BYOK 无此限制——
+        // navEditSnapshot 的 persistBack 会把改动写回该分支。
+        if (_conversationProviderKind.value == ProviderKind.MOLAGPT && onHistoricalEditBranch(msgs)) {
+            _error.value = "请先切换到最新版本，再重新生成"
+            return
+        }
+        val lastAssistantIdx = msgs.indexOfLast { it.role == Role.ASSISTANT }
+        if (lastAssistantIdx < 0) return
+        val lastAssistant = msgs[lastAssistantIdx]
+        val modelId = overrideModelId ?: uiState.value.selectedModelId ?: return
         _selectedModel.value = modelId
         // 已有版本则全部带上；否则把现有答案作为 v0。
         val prior = RetryAttempts.decode(lastAssistant.metadata[RetryAttempts.KEY_ATTEMPTS])
             .ifEmpty { listOf(attemptOf(lastAssistant)) }
+        // 重试上下文 = 该助手回答之前的消息，从当前快照显式截取。不能靠删库后再读 uiState：
+        // uiState 由 combine + Room Flow 异步刷新，删库后 startStream 立刻读到的仍是带旧回答的旧
+        // 快照，旧答案会被当成上下文发给模型（用户观察到的「重新生成携带生成前的回答」）。
+        val historyForRetry = msgs.take(lastAssistantIdx)
         viewModelScope.launch {
-            val selectedModel = uiState.value.selectedModel
+            val selectedModel = uiState.value.models.firstOrNull { it.id == modelId }
+                ?: uiState.value.selectedModel
             sessionRepository.updateModel(
                 sessionId,
                 modelId,
                 selectedModel?.providerId ?: _conversationProviderId.value,
                 selectedModel?.providerKind ?: _conversationProviderKind.value,
             )
+            selectedModel?.let {
+                _conversationProviderId.value = it.providerId
+                _conversationProviderKind.value = it.providerKind
+            }
             chatRepository.deleteMessagesFrom(sessionId, lastAssistant.createdAt)
-            startStream(modelId, priorAttempts = prior)
+            startStream(modelId, priorAttempts = prior, historyOverride = historyForRetry)
         }
+    }
+
+    /** 切换用户消息的编辑分支（delta = -1/+1）：整体换回该分支的时间线。 */
+    fun navEditSnapshot(messageId: String, delta: Int) {
+        if (backgroundStreams.isStreaming(sessionId)) return
+        // BYOK 纯本地、无 Web 冻结快照的约束，离开历史分支时把改动写回该分支（分支可独立编辑）；
+        // MolaGPT 保持 Web 语义，历史分支冻结。
+        val persistBack = _conversationProviderKind.value == ProviderKind.BYOK
+        viewModelScope.launch {
+            if (chatRepository.navigateEditSnapshot(sessionId, messageId, delta, persistBack)) {
+                // 时间线整体换过、消息 id 已重建，旧的 in-flight 帧再叠加就会多出一条。
+                backgroundStreams.clearCompletedInFlight(sessionId)
+                syncEngine.schedulePush(sessionId)
+            }
+        }
+    }
+
+    /** 是否停在某条用户消息的历史编辑分支上（非最新版）。position == total 表示停在最新版。 */
+    private fun onHistoricalEditBranch(msgs: List<ChatMessage>): Boolean {
+        val edited = msgs.lastOrNull {
+            it.role == Role.USER && EditSnapshots.view(it.metadata[EditSnapshots.KEY]) != null
+        } ?: return false
+        val view = EditSnapshots.view(edited.metadata[EditSnapshots.KEY]) ?: return false
+        return view.position < view.total
     }
 
     /** 在重试版本间切换（delta = -1/+1）。改 in-flight 帧并落库,头部模型名随版本变化。 */
     fun navVersion(messageId: String, delta: Int) {
+        // 生成中禁止切换：与 navEditSnapshot、Web 一致，否则切换写库会与流式写入相互覆盖。
+        if (backgroundStreams.isStreaming(sessionId)) return
         val msg = uiState.value.messages.firstOrNull { it.messageId == messageId } ?: return
         val attempts = RetryAttempts.decode(msg.metadata[RetryAttempts.KEY_ATTEMPTS])
         if (attempts.size <= 1) return
@@ -813,12 +928,14 @@ class ChatViewModel(
         latestUserMessage: ChatMessage? = null,
         titleUserMessage: String? = null,
         priorAttempts: List<RetryAttempt> = emptyList(),
+        historyOverride: List<ChatMessage>? = null,
     ) {
         viewModelScope.launch {
             // 取代同会话上一条流由 backgroundStreams.start() 内部完成（取消旧 job + 停旧服务端流 + 落新任务记录）；
             // 此处不再额外 stop()，否则其异步 removeStreamTask 会与 start 的 persistStreamTask 竞争、误删新任务。
-            // 拉历史 + 刚落库的用户消息作为上下文。
-            val historySnapshot = uiState.value.messages.filter { it.role != Role.SYSTEM }
+            // 拉历史 + 刚落库的用户消息作为上下文。[historyOverride] 供重试显式传入截取好的上下文——
+            // 删库后 uiState（combine + Room Flow）不会同步刷新，直接读会把旧回答当上下文带上。
+            val historySnapshot = (historyOverride ?: uiState.value.messages).filter { it.role != Role.SYSTEM }
             val history = if (latestUserMessage == null) {
                 historySnapshot
             } else {
@@ -937,7 +1054,7 @@ class ChatViewModel(
             ProviderKind.MOLAGPT -> enabled.copy(mcp = false, vision = false, imageGeneration = false)
             ProviderKind.BYOK -> {
                 val canTool = providerModel?.supportsToolCalling == true
-                val settings = settingsFlow.value
+                val settings = settingsFlow.value ?: AppSettings()
                 enabled.copy(
                     codeExecution = false,
                     network = enabled.network && canTool,
@@ -996,8 +1113,8 @@ class ChatViewModel(
             .let { if (it.length <= 25) it else it.take(25).trim() + "..." }
             .ifBlank { "无标题对话" }
 
-    private suspend fun restoreConversationModel() {
-        val conversation = sessionRepository.get(sessionId) ?: return
+    private suspend fun restoreConversationModel(): Boolean {
+        val conversation = sessionRepository.get(sessionId) ?: return false
         _conversationProviderId.value = conversation.providerId ?: ProviderIds.MOLAGPT
         _conversationProviderKind.value = conversation.providerKind
         _conversationPersonaId.value = conversation.personaId
@@ -1009,6 +1126,7 @@ class ChatViewModel(
             it.id == _selectedModel.value && it.providerKind == _conversationProviderKind.value
         }
         model?.let { adaptThinkingStateTo(it) }
+        return true
     }
 
     private fun selectedModelFor(
@@ -1059,6 +1177,7 @@ private data class ChatUiMeta(
     val providerId: String?,
     val providerKind: ProviderKind,
     val title: String,
+    val isMolaModelConfigLoaded: Boolean,
 )
 
 private data class ConversationProviderState(

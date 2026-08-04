@@ -71,6 +71,64 @@ class ChatRepository(
         }
 
     /**
+     * 编辑重发前：把当前整条时间线打包成一个历史分支。
+     *
+     * 返回应挂到**新**用户消息上的 editSnapshots 串——被编辑的那条随后会被
+     * [deleteMessagesFrom] 一并删掉，所以分支元数据不能写在它身上。
+     * 返回 null 表示该消息后面没有内容，无需建分支（对齐 Web 的 hasFollowingMessages 判定）。
+     */
+    suspend fun snapshotBeforeEdit(sessionId: String, messageId: String): String? =
+        withContext(dispatchers.io) {
+            val all = messageDao.getAllBySession(sessionId)
+            val target = all.firstOrNull { it.messageId == messageId } ?: return@withContext null
+            if (all.none { it.createdAt > target.createdAt }) return@withContext null
+            val prior = MessageJson.decodeMeta(target.metadataJson)[EditSnapshots.KEY]
+            EditSnapshots.append(prior, EditSnapshots.timelineOf(all), target.createdAt)
+        }
+
+    /**
+     * 切换 [messageId] 的编辑分支（delta = -1/+1）：整体换回该分支的时间线。
+     * 返回 false 表示越界或该消息没有分支。
+     */
+    suspend fun navigateEditSnapshot(
+        sessionId: String,
+        messageId: String,
+        delta: Int,
+        persistBack: Boolean = false,
+    ): Boolean =
+        withContext(dispatchers.io) {
+            val all = messageDao.getAllBySession(sessionId)
+            val timelineNow = all.filterNot { it.role.equals(Role.SYSTEM.name, ignoreCase = true) }
+            // 锚点按「非 system 时间线中的下标」定位：各版本共享前缀，故该下标跨版本稳定；
+            // createdAt 则会随每次编辑重发而变，不能用来匹配。
+            val anchorAt = timelineNow.indexOfFirst { it.messageId == messageId }
+            if (anchorAt < 0) return@withContext false
+            val target = timelineNow[anchorAt]
+            val nav = EditSnapshots.navigate(
+                raw = MessageJson.decodeMeta(target.metadataJson)[EditSnapshots.KEY],
+                delta = delta,
+                liveTimeline = EditSnapshots.timelineOf(all),
+                persistBack = persistBack,
+            ) ?: return@withContext false
+
+            val restored = EditSnapshots.messagesOf(sessionId, nav.timeline)
+            if (restored.isEmpty() || anchorAt > restored.lastIndex) return@withContext false
+            // 快照内部不带分支元数据（避免嵌套膨胀），切换后要挂回锚点那条用户消息。
+            val rebound = restored.mapIndexed { i, m ->
+                if (i != anchorAt) {
+                    m
+                } else {
+                    val meta = MessageJson.decodeMeta(m.metadataJson).toMutableMap()
+                        .apply { put(EditSnapshots.KEY, nav.metadata) }
+                    m.copy(metadataJson = MessageJson.encodeMeta(meta))
+                }
+            }
+            messageDao.replaceAll(sessionId, rebound)
+            conversationDao.refreshListVisibility(sessionId)
+            true
+        }
+
+    /**
      * 发起助手回复流。逐步 emit 已应用 [DeltaCommand] 的助手消息；调用方负责节流后刷新 UI。
      * 无论正常结束、出错还是被取消（用户停止），finally 都会把最终（或部分）消息落库。
      */
@@ -233,12 +291,16 @@ class ChatRepository(
                 } else {
                     frags.add(MessageFragment.Thinking(Ids.newFragmentId(), cmd.chunk, collapsed = false))
                 }
+                // 已收到真实推理内容，连接/工具结果处理占位已结束。
+                if (meta.containsKey("pending")) meta = meta - "pending"
             }
             is DeltaCommand.UpsertTool -> {
                 // 工具作为独立顶层 fragment。已存在则原地更新（流式状态变更），否则追加到末尾，
                 // 与思考/正文按到达顺序交错。绝不嵌进 Thinking。
                 val i = frags.indexOfFirst { it is MessageFragment.ToolCall && it.id == cmd.tool.id }
                 if (i >= 0) frags[i] = cmd.tool else frags.add(cmd.tool)
+                // 工具生命周期本身就是当前活动指示，不再同时显示旧 pending。
+                if (meta.containsKey("pending")) meta = meta - "pending"
             }
             is DeltaCommand.SetSources -> {
                 val i = frags.indexOfFirst { it is MessageFragment.SearchResult }

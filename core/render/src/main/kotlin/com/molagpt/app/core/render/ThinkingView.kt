@@ -38,6 +38,7 @@ fun ThinkingView(
     text: String,
     initiallyCollapsed: Boolean = true,
     durationMs: Long? = null,
+    streaming: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     var collapsed by remember { mutableStateOf(initiallyCollapsed) }
@@ -96,6 +97,7 @@ fun ThinkingView(
                     StreamingMarkdownView(
                         markdown = text,
                         textScale = 0.78f,
+                        tailFade = streaming,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp)

@@ -21,9 +21,14 @@ import kotlinx.serialization.json.intOrNull
  *
  * 注意：reasoning 通道命名、tool_calls 结构、sources 形状存在代理差异；此处覆盖常见形态并做容错。
  */
-class StreamParser(private val json: Json) {
+class StreamParser(
+    private val json: Json,
+    /** Responses 最终回答流可只接收 final_answer；通用解析默认保留全部文本。 */
+    private val responseFinalAnswerOnly: Boolean = false,
+) {
     private val think = InlineThinkSplitter()
     private val webArtifacts = WebToolArtifactSplitter()
+    private val responseMessagePhases = HashMap<String, String>()
 
     fun parse(payload: SsePayload): List<StreamEvent> {
         if (payload.isDone) return finishTail("stop")
@@ -45,6 +50,7 @@ class StreamParser(private val json: Json) {
         parseSources(root)?.let { if (it.isNotEmpty()) events.add(StreamEvent.Sources(it)) }
 
         val eventType = root["type"]?.prim()?.contentOrNull ?: payload.event
+        rememberResponseMessagePhase(root, eventType)
         val choice = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
         val delta = choice?.get("delta") as? JsonObject
 
@@ -140,12 +146,30 @@ class StreamParser(private val json: Json) {
     private fun responseTextDelta(root: JsonObject, eventType: String?): String? {
         val deltaText = root["delta"]?.prim()?.contentOrNull
         return when (eventType) {
-            "response.output_text.delta", "response.refusal.delta" -> deltaText
+            "response.output_text.delta", "response.refusal.delta" -> {
+                val itemId = root["item_id"]?.prim()?.contentOrNull
+                val phase = root["phase"]?.prim()?.contentOrNull
+                    ?: itemId?.let(responseMessagePhases::get)
+                if (responseFinalAnswerOnly && phase.equals("commentary", ignoreCase = true)) {
+                    null
+                } else {
+                    deltaText
+                }
+            }
             // output_text.done 的 text 是完整累积文本；增量 delta 已覆盖全部内容，
             // 再取全量会导致 AppendText 把全文再拼一次 → 重复渲染。
             "response.output_text.done" -> null
             else -> null
         }
+    }
+
+    private fun rememberResponseMessagePhase(root: JsonObject, eventType: String?) {
+        if (eventType != "response.output_item.added" && eventType != "response.output_item.done") return
+        val item = root["item"] as? JsonObject ?: return
+        if (item["type"]?.prim()?.contentOrNull != "message") return
+        val id = item["id"]?.prim()?.contentOrNull ?: return
+        val phase = item["phase"]?.prim()?.contentOrNull ?: return
+        responseMessagePhases[id] = phase
     }
 
     private fun responseThinkingDelta(root: JsonObject, eventType: String?): String? {

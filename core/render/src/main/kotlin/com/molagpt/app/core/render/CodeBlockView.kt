@@ -1,5 +1,6 @@
 package com.molagpt.app.core.render
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
@@ -13,16 +14,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -35,7 +33,7 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun CodeBlockView(language: String?, code: String, modifier: Modifier = Modifier) {
     val clipboard = LocalClipboardManager.current
-    var copied by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val shape = RoundedCornerShape(10.dp)
 
     Column(
@@ -58,12 +56,12 @@ fun CodeBlockView(language: String?, code: String, modifier: Modifier = Modifier
             )
             IconButton(onClick = {
                 clipboard.setText(AnnotatedString(code))
-                copied = true
+                Toast.makeText(context, "复制成功", Toast.LENGTH_SHORT).show()
             }) {
                 Icon(
-                    imageVector = Icons.Filled.Done, // 复制图标用对勾占位（material-icons-core 精简集）
-                    contentDescription = if (copied) "已复制" else "复制",
-                    tint = if (copied) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    imageVector = Icons.Filled.ContentCopy,
+                    contentDescription = "复制",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

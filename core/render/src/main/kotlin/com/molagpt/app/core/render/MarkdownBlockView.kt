@@ -5,9 +5,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,7 +24,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,14 +45,17 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import com.molagpt.app.core.markdown.MdBlock
 import com.molagpt.app.core.markdown.MdInline
+import com.molagpt.app.core.markdown.MdTableAlignment
 
 /**
  * Markdown 行内图片的渲染器（CompositionLocal）。:core:render 不依赖 Coil/:feature:file，
@@ -67,6 +74,11 @@ fun MarkdownBlockView(
     block: MdBlock,
     modifier: Modifier = Modifier,
     textScale: Float = 1f,
+    /**
+     * 流式尾部渐隐：仅对**正在流式输出的最后一个 block** 传 true。
+     * 渐变锚在真实行尾（由文本布局给出），不切分字符，开销与文本量无关。
+     */
+    tailFade: Boolean = false,
 ) {
     val bodyLarge = scaledTextStyle(MaterialTheme.typography.bodyLarge, textScale)
     val bodySmall = scaledTextStyle(MaterialTheme.typography.bodySmall, textScale)
@@ -75,11 +87,13 @@ fun MarkdownBlockView(
             inlines = block.inlines,
             style = scaledTextStyle(headingStyle(block.level), textScale),
             modifier = modifier.padding(vertical = 4.dp),
+            tailFade = tailFade,
         )
         is MdBlock.Paragraph -> InlineContentText(
             inlines = block.inlines,
             style = bodyLarge,
             modifier = modifier.padding(vertical = 2.dp),
+            tailFade = tailFade,
         )
         is MdBlock.Quote -> Row(modifier = modifier.padding(vertical = 2.dp)) {
             Spacer(Modifier.width(3.dp).height(1.dp))
@@ -128,18 +142,40 @@ fun MarkdownBlockView(
 private fun TableView(table: MdBlock.Table, modifier: Modifier, cellStyle: TextStyle) {
     val borderColor = MaterialTheme.colorScheme.outlineVariant
     val headerBg = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    val columnCount = maxOf(
+        table.header.size,
+        table.rows.maxOfOrNull { it.size } ?: 0,
+    )
+    if (columnCount == 0) return
+    // 只按最先稳定下来的表头估算列宽；后续流式追加行不会让整张表来回跳宽。
+    val columnWidths = remember(table.header, columnCount) {
+        List(columnCount) { index -> estimatedTableColumnWidth(table.header.getOrNull(index)) }
+    }
     Column(modifier = modifier.horizontalScroll(rememberScrollState())) {
         if (table.header.isNotEmpty()) {
-            Row {
-                table.header.forEach { cell ->
-                    TableCell(cell, Modifier.background(headerBg), bold = true, style = cellStyle)
+            Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+                repeat(columnCount) { index ->
+                    TableCell(
+                        inlines = table.header.getOrNull(index).orEmpty(),
+                        width = columnWidths[index],
+                        alignment = table.alignments.getOrNull(index) ?: MdTableAlignment.DEFAULT,
+                        modifier = Modifier.background(headerBg).border(0.5.dp, borderColor),
+                        bold = true,
+                        style = cellStyle,
+                    )
                 }
             }
         }
         table.rows.forEach { row ->
-            Row {
-                row.forEach { cell ->
-                    TableCell(cell, Modifier.border(0.5.dp, borderColor), style = cellStyle)
+            Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+                repeat(columnCount) { index ->
+                    TableCell(
+                        inlines = row.getOrNull(index).orEmpty(),
+                        width = columnWidths[index],
+                        alignment = table.alignments.getOrNull(index) ?: MdTableAlignment.DEFAULT,
+                        modifier = Modifier.border(0.5.dp, borderColor),
+                        style = cellStyle,
+                    )
                 }
             }
         }
@@ -149,18 +185,44 @@ private fun TableView(table: MdBlock.Table, modifier: Modifier, cellStyle: TextS
 @Composable
 private fun TableCell(
     inlines: List<MdInline>,
+    width: Dp,
+    alignment: MdTableAlignment,
     modifier: Modifier = Modifier,
     bold: Boolean = false,
     style: TextStyle = TextStyle.Default,
 ) {
     MathText(
         inlines = inlines,
-        style = style,
+        style = style.copy(textAlign = alignment.toTextAlign()),
         modifier = modifier
-            .defaultMinSize(minWidth = 112.dp)
+            .width(width)
+            .fillMaxHeight()
             .padding(horizontal = 10.dp, vertical = 8.dp),
         forceBold = bold,
     )
+}
+
+private fun MdTableAlignment.toTextAlign(): TextAlign = when (this) {
+    MdTableAlignment.CENTER -> TextAlign.Center
+    MdTableAlignment.RIGHT -> TextAlign.End
+    MdTableAlignment.DEFAULT, MdTableAlignment.LEFT -> TextAlign.Start
+}
+
+private fun estimatedTableColumnWidth(header: List<MdInline>?): Dp {
+    val label = buildString {
+        header.orEmpty().forEach { inline ->
+            when (inline) {
+                is MdInline.Text -> append(inline.text)
+                is MdInline.Code -> append(inline.text)
+                is MdInline.Link -> append(inline.text)
+                is MdInline.Image -> append(inline.alt)
+                is MdInline.Math -> append(inline.expr)
+                MdInline.SoftBreak, MdInline.HardBreak -> append(' ')
+            }
+        }
+    }
+    val widthUnits = label.sumOf { char -> if (char.code >= 0x2E80) 1.0 else 0.56 }
+    return (widthUnits * 14.0 + 28.0).coerceIn(112.0, 220.0).toFloat().dp
 }
 
 /**
@@ -173,16 +235,25 @@ private fun InlineContentText(
     style: TextStyle,
     modifier: Modifier,
     forceBold: Boolean = false,
+    tailFade: Boolean = false,
 ) {
     if (inlines.none { it is MdInline.Image }) {
-        MathText(inlines, style, modifier, forceBold)
+        MathText(inlines, style, modifier, forceBold, tailFade)
         return
     }
     val imageRenderer = LocalMarkdownImageRenderer.current
     Column(modifier = modifier) {
-        splitByImage(inlines).forEach { seg ->
+        val segs = splitByImage(inlines)
+        segs.forEachIndexed { index, seg ->
             when (seg) {
-                is InlineSeg.Text -> MathText(seg.inlines, style, Modifier.fillMaxWidth(), forceBold)
+                is InlineSeg.Text -> MathText(
+                    seg.inlines,
+                    style,
+                    Modifier.fillMaxWidth(),
+                    forceBold,
+                    // 只有最后一段文本才是「正在写」的那一段。
+                    tailFade && index == segs.lastIndex,
+                )
                 is InlineSeg.Img -> imageRenderer(seg.url, Modifier.fillMaxWidth().padding(vertical = 4.dp))
             }
         }
@@ -196,6 +267,7 @@ private fun MathText(
     style: TextStyle,
     modifier: Modifier,
     forceBold: Boolean = false,
+    tailFade: Boolean = false,
 ) {
     val density = LocalDensity.current
     val colorArgb = LocalContentColor.current.toArgb()
@@ -205,7 +277,43 @@ private fun MathText(
     val (text, content) = remember(inlines, style, forceBold, colorArgb, accent, fontPx) {
         buildMathAnnotated(inlines, forceBold, fontPx, colorArgb, accent)
     }
-    Text(text = text, modifier = modifier, style = style, inlineContent = content)
+    // 渐变必须锚在真实行尾：流式时最后一行常只写到一半，锚在容器右边缘会让渐变落在空白处。
+    var tail by remember { mutableStateOf(TailGeometry.None) }
+    Text(
+        text = text,
+        modifier = if (tailFade) {
+            modifier.streamingTailFade(
+                active = true,
+                lastLineEndX = tail.endX,
+                lastLineTop = tail.top,
+                lastLineBottom = tail.bottom,
+            )
+        } else {
+            modifier
+        },
+        style = style,
+        inlineContent = content,
+        onTextLayout = if (tailFade) {
+            { layout ->
+                val line = layout.lineCount - 1
+                if (line >= 0) {
+                    val g = TailGeometry(
+                        endX = layout.getLineRight(line),
+                        top = layout.getLineTop(line),
+                        bottom = layout.getLineBottom(line),
+                    )
+                    if (g != tail) tail = g
+                }
+            }
+        } else {
+            {}
+        },
+    )
+}
+
+/** 最后一行的几何信息（行尾 x 与上下边界），用于把渐变精确贴在文字末端。 */
+private data class TailGeometry(val endX: Float, val top: Float, val bottom: Float) {
+    companion object { val None = TailGeometry(0f, 0f, 0f) }
 }
 
 private fun buildMathAnnotated(

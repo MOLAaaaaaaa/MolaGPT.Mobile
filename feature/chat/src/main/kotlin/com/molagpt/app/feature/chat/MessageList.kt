@@ -14,7 +14,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -32,13 +34,16 @@ import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.Role
+import com.molagpt.app.core.model.ToolStatus
+import com.molagpt.app.core.storage.EditSnapshots
 import com.molagpt.app.core.render.LocalMarkdownImageRenderer
+import com.molagpt.app.core.render.MarkdownRenderScheduler
 import com.molagpt.app.core.render.MarkdownBlockView
 import com.molagpt.app.core.render.RenderCache
 import com.molagpt.app.core.storage.RetryAttempts
 import com.molagpt.app.feature.file.RemoteImage
 import com.molagpt.app.feature.webview.MermaidWebView
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -46,32 +51,54 @@ fun MessageList(
     messages: List<ChatMessage>,
     modifier: Modifier = Modifier,
     onRegenerate: () -> Unit = {},
+    onRegenerateWithModel: (String) -> Unit = {},
     onEditUser: (String) -> Unit = {},
     canEdit: Boolean = true,
     models: List<ProviderModel> = emptyList(),
     onNavVersion: (String, Int) -> Unit = { _, _ -> },
+    onNavEditSnapshot: (String, Int) -> Unit = { _, _ -> },
 ) {
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
     var autoFollow by remember { mutableStateOf(true) }
-    // modelId → 选择器 displayName（历史消息/原始 id 也映射成友好名）；models 变化时一并重算。
-    val modelNameOf: (String) -> String = { id -> models.firstOrNull { it.id == id }?.displayName ?: id }
-    val rows by produceState(
-        initialValue = messages.toMessageRows(
+    StreamRenderPacingEffect(messages.any(ChatMessage::isStreaming))
+    val renderRequests = remember { Channel<MessageRenderRequest>(Channel.CONFLATED) }
+    val renderRequest = MessageRenderRequest(messages, models, canEdit)
+    SideEffect {
+        renderRequests.trySend(renderRequest)
+    }
+    DisposableEffect(renderRequests) {
+        onDispose { renderRequests.close() }
+    }
+    val initialRows = remember(renderRequests) {
+        val initialModelNameOf: (String) -> String = { id ->
+            models.firstOrNull { it.id == id }?.displayName ?: id
+        }
+        messages.toMessageRows(
             parseMarkdown = false,
-            modelDisplayNameOf = modelNameOf,
+            modelDisplayNameOf = initialModelNameOf,
             canEditUser = canEdit,
-        ),
-        key1 = messages,
-        key2 = models,
-        key3 = canEdit,
+        )
+    }
+    val rows by produceState(
+        initialValue = initialRows,
+        key1 = renderRequests,
     ) {
-        value = withContext(Dispatchers.Default) {
-            messages.toMessageRows(
-                parseMarkdown = true,
-                modelDisplayNameOf = modelNameOf,
-                canEditUser = canEdit,
-            )
+        var renderedRequest: MessageRenderRequest? = null
+        for (latest in renderRequests) {
+            if (latest == renderedRequest) continue
+            val modelNameOf: (String) -> String = { id ->
+                latest.models.firstOrNull { it.id == id }?.displayName ?: id
+            }
+            val renderedRows = withContext(MarkdownRenderScheduler.dispatcher) {
+                latest.messages.toMessageRows(
+                    parseMarkdown = true,
+                    modelDisplayNameOf = modelNameOf,
+                    canEditUser = latest.canEdit,
+                )
+            }
+            renderedRequest = latest
+            value = renderedRows
         }
     }
 
@@ -121,10 +148,17 @@ fun MessageList(
                 when (row) {
                     is MessageListRow.User -> MessageBubble(message = row.message, modifier = rowModifier)
                     is MessageListRow.Pending -> AssistantPendingText(row.text, rowModifier)
-                    is MessageListRow.Fragment -> FragmentRenderer(fragment = row.fragment, modifier = rowModifier)
+                    is MessageListRow.ToolGroup -> ToolCallGroupRenderer(row.fragments, rowModifier)
+                    is MessageListRow.Fragment -> FragmentRenderer(
+                        fragment = row.fragment,
+                        modifier = rowModifier,
+                        streamingTail = row.streamingTail,
+                    )
                     is MessageListRow.AssistantText -> SelectionContainer(modifier = rowModifier) {
                         Column {
-                            row.blocks.forEach { block ->
+                            row.blocks.forEachIndexed { index, block ->
+                                // 渐隐只加在最后一个 block 上：整段套会把每个段落的行尾都淡掉。
+                                val tail = row.streamingTail && index == row.blocks.lastIndex
                                 when (block) {
                                     is MdBlock.Mermaid -> MermaidWebView(
                                         block.source,
@@ -133,6 +167,7 @@ fun MessageList(
                                     else -> MarkdownBlockView(
                                         block = block,
                                         modifier = Modifier.fillMaxWidth(),
+                                        tailFade = tail,
                                     )
                                 }
                             }
@@ -151,6 +186,8 @@ fun MessageList(
                             } else {
                                 null
                             },
+                            regenerateModels = if (row.canRegenerate) models else emptyList(),
+                            onRegenerateWithModel = onRegenerateWithModel,
                         )
                     }
                     is MessageListRow.Retry -> RetryBar(
@@ -160,6 +197,17 @@ fun MessageList(
                         onNext = { onNavVersion(row.messageId, 1) },
                         modifier = rowModifier,
                     )
+                    is MessageListRow.EditBranch -> Box(
+                        modifier = rowModifier,
+                        contentAlignment = Alignment.CenterEnd,
+                    ) {
+                        RetryBar(
+                            current = row.current,
+                            total = row.total,
+                            onPrev = { onNavEditSnapshot(row.messageId, -1) },
+                            onNext = { onNavEditSnapshot(row.messageId, 1) },
+                        )
+                    }
                 }
             }
         }
@@ -183,6 +231,12 @@ private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToBotto
     val overshoot = last.offset + last.size - info.viewportEndOffset
     if (overshoot > 0) scrollBy(overshoot.toFloat())
 }
+
+private data class MessageRenderRequest(
+    val messages: List<ChatMessage>,
+    val models: List<ProviderModel>,
+    val canEdit: Boolean,
+)
 
 private sealed interface MessageListRow {
     val key: String
@@ -209,10 +263,21 @@ private sealed interface MessageListRow {
     data class Fragment(
         val messageId: String,
         val fragment: MessageFragment,
+        val streamingTail: Boolean,
         override val topPaddingDp: Int,
     ) : MessageListRow {
         override val key = "$messageId:fragment:${fragment.id}"
         override val contentType = fragment::class.simpleName ?: "fragment"
+    }
+
+    /** 连续联网搜索仅在展示层合为一行；原始 ToolCall fragments 仍各自保留。 */
+    data class ToolGroup(
+        val messageId: String,
+        val fragments: List<MessageFragment.ToolCall>,
+        override val topPaddingDp: Int,
+    ) : MessageListRow {
+        override val key = "$messageId:tool-group:${fragments.first().id}"
+        override val contentType = "tool-group"
     }
 
     /** 助手正文：单个 Text fragment 解析出的全部 markdown block，合并渲染以支持跨段选择。 */
@@ -220,6 +285,8 @@ private sealed interface MessageListRow {
         val messageId: String,
         val fragmentId: String,
         val blocks: List<MdBlock>,
+        /** 是否是流式中消息的最后一个正文片段（尾部渐隐只作用于它）。 */
+        val streamingTail: Boolean,
         override val topPaddingDp: Int,
     ) : MessageListRow {
         override val key = "$messageId:text:$fragmentId"
@@ -257,6 +324,17 @@ private sealed interface MessageListRow {
         override val key = "$messageId:retry"
         override val contentType = "retry"
     }
+
+    /** 用户消息的编辑分支切换条；与助手重试版本共用 [RetryBar] 样式。 */
+    data class EditBranch(
+        val messageId: String,
+        val current: Int,
+        val total: Int,
+        override val topPaddingDp: Int,
+    ) : MessageListRow {
+        override val key = "$messageId:branch"
+        override val contentType = "branch"
+    }
 }
 
 private fun List<ChatMessage>.toMessageRows(
@@ -266,6 +344,10 @@ private fun List<ChatMessage>.toMessageRows(
 ): List<MessageListRow> {
     val rows = ArrayList<MessageListRow>()
     val lastAssistantId = lastOrNull { it.role == Role.ASSISTANT }?.messageId
+    val lastUserId = lastOrNull { it.role == Role.USER }?.messageId
+    val lastEditedUserId = lastOrNull {
+        it.role == Role.USER && EditSnapshots.view(it.metadata[EditSnapshots.KEY]) != null
+    }?.messageId
     var firstRowInList = true
 
     fun nextTopPadding(startsMessage: Boolean): Int = when {
@@ -289,6 +371,7 @@ private fun List<ChatMessage>.toMessageRows(
 
         if (message.role == Role.USER) {
             addMessageRow { top -> MessageListRow.User(message, top) }
+            val branches = EditSnapshots.view(message.metadata[EditSnapshots.KEY])
             val copyText = message.metadata["displayContent"]?.takeIf { it.isNotBlank() }
                 ?: message.rawText.orEmpty()
             if (copyText.isNotBlank() || message.attachments.isNotEmpty()) {
@@ -297,8 +380,22 @@ private fun List<ChatMessage>.toMessageRows(
                         messageId = message.messageId,
                         text = copyText,
                         canRegenerate = false,
-                        canEdit = canEditUser,
+                        // 已有分支的、以及最后一条用户消息可编辑；中途消息不给入口，
+                        // 避免在长对话里误编辑（分支条也只挂在最后被编辑的那条上）。
+                        canEdit = canEditUser &&
+                            (branches != null || message.messageId == lastUserId),
                         alignEnd = true,
+                        topPaddingDp = top,
+                    )
+                }
+            }
+            // 与 Web 一致：分支条只显示在「最后一条被编辑过的用户消息」上。
+            if (branches != null && message.messageId == lastEditedUserId) {
+                addRow(startsMessage = false) { top ->
+                    MessageListRow.EditBranch(
+                        messageId = message.messageId,
+                        current = branches.position - 1,
+                        total = branches.total,
                         topPaddingDp = top,
                     )
                 }
@@ -311,23 +408,53 @@ private fun List<ChatMessage>.toMessageRows(
             addMessageRow { top -> MessageListRow.Pending(message.messageId, assistantLabel, top) }
         }
 
-        message.fragments.forEach { fragment ->
+        // 工具已经返回成功、但模型尚未开始下一步输出时，不另加「分析工具结果」提示；
+        // 仅把当前最后一张成功工具卡在展示层继续保持为「进行中」。真实 fragment 状态不变。
+        val heldToolId = message.heldToolProgressId()
+        var fragmentIndex = 0
+        while (fragmentIndex < message.fragments.size) {
+            val fragment = message.fragments[fragmentIndex]
+            val searchTools = consecutiveWebSearchTools(message.fragments, fragmentIndex)
+            if (searchTools.isNotEmpty()) {
+                val displayTools = searchTools.map { tool ->
+                    if (tool.id == heldToolId) tool.copy(status = ToolStatus.RUNNING) else tool
+                }
+                addMessageRow { top -> MessageListRow.ToolGroup(message.messageId, displayTools, top) }
+                fragmentIndex += searchTools.size
+                continue
+            }
+            val streamingTail = message.isStreamingTail(fragment)
             if (parseMarkdown && fragment is MessageFragment.Text) {
                 // 正文 markdown 的所有 block 合并进单个 row，外层套 SelectionContainer：
                 // 这样跨段落可连选（长按拖拽 → 系统复制 toolbar）。拆成多行（每 block 一个 LazyColumn
                 // item）会让 SelectionContainer 止于单 block，无法跨段选择。
                 val blocks = RenderCache.blocks(fragment.markdown)
+                // 尾部渐隐只给「流式中消息的最后一个片段」——中间片段已定稿，跟着虚会显得没写完。
                 addMessageRow { top ->
                     MessageListRow.AssistantText(
                         messageId = message.messageId,
                         fragmentId = fragment.id,
                         blocks = blocks,
+                        streamingTail = streamingTail,
                         topPaddingDp = top,
                     )
                 }
             } else {
-                addMessageRow { top -> MessageListRow.Fragment(message.messageId, fragment, top) }
+                val displayFragment = if (fragment is MessageFragment.ToolCall && fragment.id == heldToolId) {
+                    fragment.copy(status = ToolStatus.RUNNING)
+                } else {
+                    fragment
+                }
+                addMessageRow { top ->
+                    MessageListRow.Fragment(
+                        messageId = message.messageId,
+                        fragment = displayFragment,
+                        streamingTail = streamingTail,
+                        topPaddingDp = top,
+                    )
+                }
             }
+            fragmentIndex += 1
         }
 
         if (message.status == MessageStatus.STREAMING && message.fragments.isEmpty()) {
@@ -365,6 +492,53 @@ private fun List<ChatMessage>.toMessageRows(
     }
 
     return rows
+}
+
+internal fun ChatMessage.isStreamingTail(fragment: MessageFragment): Boolean =
+    status == MessageStatus.STREAMING &&
+        fragment.id == fragments.lastOrNull()?.id &&
+        (fragment is MessageFragment.Text || fragment is MessageFragment.Thinking)
+
+/**
+ * 从 [startIndex] 起收集可聚合的连续联网搜索。
+ * 任意正文、思考或其他工具都会形成分组边界；只有两次及以上才返回分组，
+ * 单次搜索继续使用原有 ToolCall 渲染和运行中展开行为。
+ */
+internal fun consecutiveWebSearchTools(
+    fragments: List<MessageFragment>,
+    startIndex: Int,
+): List<MessageFragment.ToolCall> {
+    if (startIndex !in fragments.indices) return emptyList()
+    val tools = fragments
+        .asSequence()
+        .drop(startIndex)
+        .takeWhile { fragment -> fragment is MessageFragment.ToolCall && fragment.isWebSearchTool() }
+        .map { it as MessageFragment.ToolCall }
+        .toList()
+    return tools.takeIf { it.size > 1 }.orEmpty()
+}
+
+private fun MessageFragment.ToolCall.isWebSearchTool(): Boolean =
+    name == "search_web" || name == "web_search"
+
+/**
+ * 返回流式消息当前需要在展示层继续保持「进行中」的工具。
+ *
+ * 工具真实终态仍会立即写入 fragment；只要模型还没有在它之后输出新的思考或正文，
+ * 最后一张成功工具卡就继续转圈。后续工具出现时它会成为新的最后工具，因此前一张会恢复完成；
+ * 图片等工具产物不算模型续写，图像生成卡也能覆盖等待模型接续的时间。
+ */
+internal fun ChatMessage.heldToolProgressId(): String? {
+    if (status != MessageStatus.STREAMING) return null
+    val toolIndex = fragments.indexOfLast { it is MessageFragment.ToolCall }
+    if (toolIndex < 0) return null
+    val tool = fragments[toolIndex] as MessageFragment.ToolCall
+    if (tool.status != ToolStatus.SUCCESS) return null
+    val modelContinued = fragments
+        .asSequence()
+        .drop(toolIndex + 1)
+        .any { it is MessageFragment.Text || it is MessageFragment.Thinking }
+    return tool.id.takeUnless { modelContinued }
 }
 
 private fun ChatMessage.assistantHeaderLabel(modelDisplayNameOf: (String) -> String): String? {

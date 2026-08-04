@@ -39,11 +39,12 @@ class MainActivity : ComponentActivity() {
         maybeRequestNotificationPermission()
         handleOpenNotificationIntent(intent)
         setContent {
-            val settings by container.settingsStore.settings
-                .collectAsStateWithLifecycle(initialValue = com.molagpt.app.core.storage.AppSettings())
+            val settings by container.settingsFlow.collectAsStateWithLifecycle()
+            val byokModelsReady by container.byokModelsReady.collectAsStateWithLifecycle()
+            val themeMode = settings?.themeMode ?: "auto"
             // App 主题可独立于系统（themeMode），据此同步系统状态栏/导航栏图标明暗，
             // 否则暗色界面下仍是深色图标看不清。
-            val dark = when (settings.themeMode) {
+            val dark = when (themeMode) {
                 "light" -> false
                 "dark" -> true
                 else -> isSystemInDarkTheme()
@@ -55,13 +56,16 @@ class MainActivity : ComponentActivity() {
                 window.setBackgroundDrawable(ColorDrawable(if (dark) 0xFF121212.toInt() else 0xFFFFFFFF.toInt()))
             }
             CompositionLocalProvider(LocalAppContainer provides container) {
-                MolaTheme(themeMode = settings.themeMode) {
+                MolaTheme(themeMode = themeMode) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
                             .background(MaterialTheme.colorScheme.background),
                     ) {
-                        MolaNavHost(settings = settings, modifier = Modifier.fillMaxSize())
+                        val loadedSettings = settings
+                        if (loadedSettings != null && byokModelsReady) {
+                            MolaNavHost(settings = loadedSettings, modifier = Modifier.fillMaxSize())
+                        }
                     }
                 }
             }

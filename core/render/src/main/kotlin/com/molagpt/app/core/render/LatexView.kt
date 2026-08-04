@@ -65,7 +65,7 @@ private object LatexBitmapCache {
 
     @Synchronized
     fun getOrNull(expr: String, textSizePx: Float, colorArgb: Int): Bitmap? {
-        val normalized = expr.trim()
+        val normalized = normalizeJLatexExpression(expr)
         if (normalized.isBlank() || textSizePx <= 0f) return null
         if (failed.get(normalized) == true) return null
         val key = "$normalized|$textSizePx|$colorArgb"
@@ -88,3 +88,25 @@ private object LatexBitmapCache {
         }
     }
 }
+
+/**
+ * JLaTeXMath does not register `equation` or the unnumbered `*` aliases. Numbering is not shown
+ * in this renderer anyway, so convert those wrappers to the equivalent environments it supports.
+ * The caller still owns the original expression and uses it for the text fallback on failure.
+ */
+internal fun normalizeJLatexExpression(expression: String): String {
+    var normalized = expression.trim()
+    EQUATION_ENVIRONMENT.matchEntire(normalized)?.let { match ->
+        normalized = match.groupValues[1].trim()
+    }
+    return STARRED_DISPLAY_ENVIRONMENT.replace(normalized) { match ->
+        "\\${match.groupValues[1]}{${match.groupValues[2]}}"
+    }
+}
+
+private val EQUATION_ENVIRONMENT = Regex(
+    pattern = """\A\s*\\begin\{equation\*?\}([\s\S]*?)\\end\{equation\*?\}\s*\z""",
+)
+private val STARRED_DISPLAY_ENVIRONMENT = Regex(
+    pattern = """\\(begin|end)\{(align|flalign|eqnarray|gather|multline)\*\}""",
+)

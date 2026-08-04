@@ -44,18 +44,23 @@ import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.core.storage.SettingsStore
 import com.molagpt.app.core.storage.SyncEngine
+import com.molagpt.app.core.storage.TracksToggle
 import com.molagpt.app.core.storage.allModels
 import com.molagpt.app.feature.auth.MolaGptAuthService
 import com.molagpt.app.feature.chat.BackgroundStreamManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 手动 DI 容器（不引 Hilt，降低多模块盲构建风险）。在 [com.molagpt.app.MolaApp] 创建一次，
@@ -100,13 +105,10 @@ class AppContainer(
         .joinToString(" ")
         .ifBlank { "Android" }
 
-    /** 最近一次设置快照，供同步/通知/删除策略做无挂起读取；由 init 的收集器持续更新。 */
-    @Volatile
-    private var latestSettings: AppSettings = AppSettings()
-
-    /** 设置 StateFlow（供聊天 VM 订阅 MCP 服务器存在性等门控信号）。 */
-    val settingsFlow: StateFlow<AppSettings> =
-        settingsStore.settings.stateIn(applicationScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, AppSettings())
+    /** null 表示 DataStore 首次快照尚未到达；不得用假默认值创建聊天 VM。 */
+    private val _settingsFlow = MutableStateFlow<AppSettings?>(null)
+    val settingsFlow: StateFlow<AppSettings?> = _settingsFlow.asStateFlow()
+    private val currentSettings: AppSettings get() = settingsFlow.value ?: AppSettings()
 
     private val database = MolaDatabase.build(context)
     val modelRegistry = ModelRegistry()
@@ -116,11 +118,13 @@ class AppContainer(
         dispatchers = dispatchers,
     )
 
-    /** providerId → baseUrl 快照（供聊天页推理弹层判断聚合网关/预算折算，`.value` 无挂起读取）。 */
-    val byokProviderBaseUrls: StateFlow<Map<String, String>> =
-        byokProviderRepository.providers
-            .map { list -> list.associate { it.id to it.baseUrl } }
-            .stateIn(applicationScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyMap())
+    /** BYOK 首次 Room 快照到达后才允许创建聊天 VM，避免把“尚未加载”误判为“没有 BYOK”。 */
+    private val _byokModelsReady = MutableStateFlow(false)
+    val byokModelsReady: StateFlow<Boolean> = _byokModelsReady.asStateFlow()
+
+    /** providerId → baseUrl 快照（与模型注册表共用同一次 providers 订阅）。 */
+    private val _byokProviderBaseUrls = MutableStateFlow<Map<String, String>>(emptyMap())
+    val byokProviderBaseUrls: StateFlow<Map<String, String>> = _byokProviderBaseUrls.asStateFlow()
     val personaRepository = PersonaRepository(
         personaDao = database.personaDao(),
         dispatchers = dispatchers,
@@ -140,6 +144,7 @@ class AppContainer(
     )
 
     val modelApi = ModelApi(http, modelRegistry, shortTokenManager, authApi)
+    private val molaModelLoadMutex = Mutex()
     val byokModelApi = ByokModelApi(http)
     val byokImageApi = ByokImageApi(http)
     val mcpToolListApi = McpToolListApi(http)
@@ -165,7 +170,12 @@ class AppContainer(
         onAuthChanged = {
             shortTokenManager.invalidate()
             accountStatusCache.invalidate()
-            applicationScope.launch { runCatching { modelApi.refresh() } }
+            // 官方列表从未被需要过时不请求；已加载/正在加载则按新登录态重新过滤可用性。
+            applicationScope.launch {
+                if (modelRegistry.configLoaded.value || modelRegistry.isRefreshing.value) {
+                    runCatching { refreshMolaModels() }
+                }
+            }
             // 登录后做一次全量云同步；登出后重置游标（下次按首次全量处理）。
             applicationScope.launch {
                 if (credentialStore.isLoggedIn) {
@@ -190,16 +200,16 @@ class AppContainer(
         http = http,
         providerResolver = { id -> byokProviderRepository.get(id) },
         mcpServersProvider = {
-            latestSettings.byokMcpServers.map { server ->
+            currentSettings.byokMcpServers.map { server ->
                 server.copy(token = credentialStore.loadSecret(byokMcpServerTokenKey(server.id)))
             }
         },
         webSearchOptionsProvider = {
-            val provider = WebSearchProvider.fromId(latestSettings.webSearchProvider)
+            val provider = WebSearchProvider.fromId(currentSettings.webSearchProvider)
             WebSearchOptions(
                 provider = provider,
                 apiKey = credentialStore.loadSecret(webSearchApiKeyKey(provider.id)),
-                maxResults = latestSettings.webSearchMaxResults,
+                maxResults = currentSettings.webSearchMaxResults,
             )
         },
         imageProviderResolver = {
@@ -207,7 +217,7 @@ class AppContainer(
         },
         visionProviderResolver = {
             // 「BYOK 工具 → 视觉理解」配置的目标 `<providerId>::<modelId>`（可跨 provider）→ (目标 provider, modelId)。
-            latestSettings.visionProxyModelKey
+            currentSettings.visionProxyModelKey
                 ?.takeIf { it.contains("::") }
                 ?.let { key ->
                     val providerId = key.substringBefore("::")
@@ -219,10 +229,10 @@ class AppContainer(
         },
         imageGenConfigProvider = {
             ImageGenerationConfig(
-                imageSize = latestSettings.imageGenSize,
-                aspectRatio = latestSettings.imageGenAspectRatio,
-                reasoning = latestSettings.imageGenReasoning,
-                reasoningEffort = latestSettings.imageGenReasoningEffort,
+                imageSize = currentSettings.imageGenSize,
+                aspectRatio = currentSettings.imageGenAspectRatio,
+                reasoning = currentSettings.imageGenReasoning,
+                reasoningEffort = currentSettings.imageGenReasoningEffort,
             )
         },
         byokImageApi = byokImageApi,
@@ -248,7 +258,7 @@ class AppContainer(
         conversationDao = database.conversationDao(),
         messageDao = database.messageDao(),
         dispatchers = dispatchers,
-        cloudSyncEnabled = { latestSettings.cloudSyncEnabled },
+        cloudSyncEnabled = { currentSettings.cloudSyncEnabled },
     )
 
     /** ChatRepository 唯一实例（始终对接真实服务）。 */
@@ -263,8 +273,15 @@ class AppContainer(
     /** 云同步底层调用（会话同步 / 用户设置写入 update_setting）。 */
     val syncApi = SyncApi(http)
 
-    /** 个性化数据接口（人格洞察 / 对话风格偏好）；设置页与个性化管理页共用。 */
+    /** 个性化数据接口（长期记忆条目 / 待确认候选 / 对话风格偏好）；设置页与记忆中心共用。 */
     val userDataApi = UserDataApi(http)
+
+    /** 个性化记忆总开关的共用写入口（账户页与记忆中心共用一份逻辑）。 */
+    val tracksToggle = TracksToggle(
+        store = settingsStore,
+        syncApi = syncApi,
+        jwtProvider = { credentialStore.jwt },
+    )
 
     /**
      * Agent 控制 relay 客户端——手机遥控桌面 Claude Code / Codex 会话。复用登录**长 JWT**
@@ -285,7 +302,7 @@ class AppContainer(
         syncApi = syncApi,
         settingsStore = settingsStore,
         jwtProvider = { credentialStore.jwt },
-        cloudSyncEnabled = { latestSettings.cloudSyncEnabled },
+        cloudSyncEnabled = { currentSettings.cloudSyncEnabled },
         dispatchers = dispatchers,
         scope = applicationScope,
     )
@@ -316,7 +333,7 @@ class AppContainer(
         manager = backgroundStreamManager,
         sessionRepository = sessionRepository,
         scope = applicationScope,
-        notifyEnabled = { latestSettings.completionNotify },
+        notifyEnabled = { currentSettings.completionNotify },
         appForeground = { appForeground.value },
         foregroundSessionId = { foregroundSessionId.value },
     )
@@ -331,7 +348,7 @@ class AppContainer(
         service = agentControlService,
         controller = agentNotificationController,
         scope = applicationScope,
-        notifyEnabled = { latestSettings.completionNotify },
+        notifyEnabled = { currentSettings.completionNotify },
         isAuthenticated = { !credentialStore.jwt.isNullOrBlank() },
     )
 
@@ -375,29 +392,42 @@ class AppContainer(
         // 启动时校验 UA 是否漂移，漂移则静默清 token。
         authService.ensureJwtValidForUa()
 
-        // 设置快照：持续更新本地缓存供无挂起读取。
+        // 设置快照：供 Compose、聊天 VM 与后台服务共用，避免多个 DataStore 订阅和首帧假默认值。
         applicationScope.launch {
-            settingsStore.settings.collect { latestSettings = it }
+            settingsStore.settings
+                .catch { error ->
+                    Logger.w("AppContainer", "load settings failed: ${error.message}", error)
+                    emit(AppSettings())
+                }
+                .collect { settings ->
+                    _settingsFlow.value = settings
+                }
         }
 
-        // BYOK provider 配置变化时刷新运行时模型注册表。
+        // Room Flow 的首次值就是完整本地快照；后续变化同时更新模型与 baseUrl。
         applicationScope.launch {
-            byokProviderRepository.providers.collect { providers ->
-                modelRegistry.updateByok(
-                    providers
-                        .filter { it.enabled }
-                        .flatMap { it.allModels() },
-                )
-            }
+            byokProviderRepository.providers
+                .catch { error ->
+                    Logger.w("AppContainer", "load BYOK providers failed: ${error.message}", error)
+                    emit(emptyList())
+                }
+                .collect { providers ->
+                    _byokProviderBaseUrls.value = providers.associate { it.id to it.baseUrl }
+                    modelRegistry.updateByok(
+                        providers
+                            .filter { it.enabled }
+                            .flatMap { it.allModels() },
+                    )
+                    _byokModelsReady.value = true
+                }
         }
 
-        // 刷新模型 → 对账被杀的在途流任务 → 已登录则做一次启动云同步。
+        // 模型由聊天页按当前实际阵营加载；启动任务不再抢跑重复请求官方列表。
         applicationScope.launch {
-            latestSettings = runCatching { settingsStore.settings.first() }.getOrDefault(AppSettings())
-            runCatching { modelApi.refresh() }
+            settingsFlow.filterNotNull().first()
             reconcileStreamTasks()
             runCatching { personaRepository.ensureSeeded() }
-            if (authService.isLoggedIn && latestSettings.cloudSyncEnabled) {
+            if (authService.isLoggedIn && currentSettings.cloudSyncEnabled) {
                 runCatching { syncEngine.syncNow() }
             }
         }
@@ -422,6 +452,32 @@ class AppContainer(
         applicationScope.launch {
             backgroundStreamManager.completions.collect { syncEngine.schedulePush(it.sessionId) }
         }
+    }
+
+    /** 首次需要官方模型时加载并重试；并发调用串行化，首次成功后其余调用直接复用。 */
+    suspend fun ensureMolaModelsLoaded(maxAttempts: Int = 5) {
+        molaModelLoadMutex.withLock {
+            if (modelRegistry.configLoaded.value) return@withLock
+            val attempts = maxAttempts.coerceAtLeast(1)
+            var lastFailure: Throwable? = null
+            // 覆盖整轮重试（含退避）的加载状态，防止间隙中重复点击排入另一轮请求。
+            modelRegistry.beginRefresh()
+            try {
+                repeat(attempts) { index ->
+                    lastFailure = runCatching { modelApi.refresh() }.exceptionOrNull()
+                    if (modelRegistry.configLoaded.value) return@withLock
+                    if (index < attempts - 1) delay(1_500L * (index + 1))
+                }
+                lastFailure?.let { throw it }
+            } finally {
+                modelRegistry.endRefresh()
+            }
+        }
+    }
+
+    /** 用户手动刷新或登录态变化：强制重新拉取一次，但仍与在途首次加载串行。 */
+    suspend fun refreshMolaModels() {
+        molaModelLoadMutex.withLock { modelApi.refresh() }
     }
 
     /**

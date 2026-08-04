@@ -17,18 +17,21 @@ sealed interface MdBlock {
     data class Table(
         val header: List<List<MdInline>>,
         val rows: List<List<List<MdInline>>>,
+        val alignments: List<MdTableAlignment> = emptyList(),
     ) : MdBlock
     data class Code(val language: String?, val code: String) : MdBlock
     data class Mermaid(val source: String) : MdBlock
-    /** 块级公式（$$ ... $$）。 */
+    /** 块级公式（`$$...$$`、`\[...\]`、math fence 或常见数学 environment）。 */
     data class MathBlock(val expr: String) : MdBlock
     data object Divider : MdBlock
 }
 
+enum class MdTableAlignment { DEFAULT, LEFT, CENTER, RIGHT }
+
 /** 列表项内容：可包含多个块（段落、子列表等）。 */
 data class ListItemContent(val blocks: List<MdBlock>)
 
-/** 行内片段。普通文本携带强调样式；行内公式（$...$）与行内代码单列。 */
+/** 行内片段。普通文本携带强调样式；行内公式（`$...$` / `$$...$$` / `$`…``$` / `\(...\)`）与行内代码单列。 */
 sealed interface MdInline {
     data class Text(
         val text: String,

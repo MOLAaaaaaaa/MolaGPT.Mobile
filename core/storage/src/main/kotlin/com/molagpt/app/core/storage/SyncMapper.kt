@@ -47,6 +47,27 @@ object SyncMapper {
     private const val META_SEND_CONTENT = "sendContent"
     private const val META_ATTACHMENTS = "attachments"
 
+    /** Web 的编辑分支快照；本地按云端原始 JSON 串原样存取，同步纯透传，不做结构化转换。 */
+    const val META_EDIT_SNAPSHOTS = "editSnapshots"
+
+    /** 云端 meta 中本端不认识的字段，原样暂存，上传时回写——防止 Web 新增字段被静默丢弃。 */
+    private const val META_CLOUD_EXTRA = "cloudMetaExtra"
+
+    /** 本端会自行生成、不参与 [META_CLOUD_EXTRA] 透传的 meta 键。 */
+    private val KNOWN_CLOUD_META_KEYS = setOf(
+        META_DISPLAY_CONTENT,
+        META_ATTACHMENTS,
+        META_EDIT_SNAPSHOTS,
+        "sources",
+        "retry",
+        "response_stats",
+        "thinking",
+        "model",
+    )
+
+    /** 仅用于 meta 透传字段的解析/再序列化，容忍服务端未知结构。 */
+    private val syncJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
     private fun isoFormat(): SimpleDateFormat =
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
@@ -72,8 +93,13 @@ object SyncMapper {
         put("model", c.model ?: "auto")
     }
 
-    /** 一条消息 → 服务端持久化对象。 */
-    fun messageToJson(m: MessageEntity): JsonObject = buildJsonObject {
+    /**
+     * 一条消息 → 服务端持久化对象。
+     *
+     * [includeSnapshots] = false 用于写入编辑快照内部的消息：快照里再嵌快照会指数膨胀，
+     * 与 Web 的 `makePersistableMessage(msg, {includeSnapshots:false})` 对齐。
+     */
+    fun messageToJson(m: MessageEntity, includeSnapshots: Boolean = true): JsonObject = buildJsonObject {
         val meta = MessageJson.decodeMeta(m.metadataJson)
         val isUser = m.role.equals(Role.USER.name, ignoreCase = true)
         val visible = if (isUser) visibleContent(m) else webTimelineContent(m)
@@ -87,20 +113,74 @@ object SyncMapper {
         )
         put("timestamp", m.createdAt)
         m.model?.let { put("model", it) }
-        val metaJson = buildJsonObject {
-            if (isUser && sendContent != null) {
-                put(META_DISPLAY_CONTENT, meta[META_DISPLAY_CONTENT]?.takeIf { it.isNotBlank() } ?: visible)
-            }
-            if (isUser && attachments.isNotEmpty()) {
-                put(META_ATTACHMENTS, attachmentsToJson(attachments))
-            }
-            if (!isUser && sources.isNotEmpty()) {
-                put("sources", sourcesToJson(sources))
-            }
+        // 友好模型名（Web 的 model_label）：不写的话快照/同步往返后只剩原始 id，
+        // 模型一旦从列表里消失，抬头就再也显示不出名字。
+        meta["modelDisplayName"]?.takeIf { it.isNotBlank() }?.let { put("model_label", it) }
+        // 先铺未识别的云端字段，已知字段随后覆盖——本地权威，同时保证 Web 新增字段不被丢弃。
+        val metaFields = LinkedHashMap<String, JsonElement>()
+        decodeCloudExtra(meta[META_CLOUD_EXTRA]).forEach { (k, v) -> metaFields[k] = v }
+        if (isUser && sendContent != null) {
+            metaFields[META_DISPLAY_CONTENT] =
+                JsonPrimitive(meta[META_DISPLAY_CONTENT]?.takeIf { it.isNotBlank() } ?: visible)
         }
-        if (metaJson.isNotEmpty()) {
-            put("meta", metaJson)
+        if (isUser && attachments.isNotEmpty()) {
+            metaFields[META_ATTACHMENTS] = attachmentsToJson(attachments)
         }
+        // 编辑分支快照：本地存的就是云端原始 JSON，原样回写。
+        if (isUser && includeSnapshots) {
+            parseJsonObject(meta[META_EDIT_SNAPSHOTS])?.let { metaFields[META_EDIT_SNAPSHOTS] = it }
+        }
+        if (!isUser && sources.isNotEmpty()) {
+            metaFields["sources"] = sourcesToJson(sources)
+        }
+        // 重试版本：本地 RetryAttempt 列表 → Web 的 meta.retry（此前只读不写，换端即丢）。
+        if (!isUser) {
+            retryToJson(meta)?.let { metaFields["retry"] = it }
+        }
+        if (metaFields.isNotEmpty()) {
+            put("meta", JsonObject(metaFields))
+        }
+    }
+
+    /** 本地重试版本 → Web `meta.retry`（`attempts[].content/model/model_label` + `current`）。 */
+    private fun retryToJson(meta: Map<String, String>): JsonObject? {
+        val attempts = RetryAttempts.decode(meta[RetryAttempts.KEY_ATTEMPTS])
+        if (attempts.isEmpty()) return null
+        val current = meta[RetryAttempts.KEY_CURRENT]?.toIntOrNull()
+            ?.coerceIn(0, attempts.lastIndex) ?: attempts.lastIndex
+        return buildJsonObject {
+            put(
+                "attempts",
+                buildJsonArray {
+                    attempts.forEach { a ->
+                        add(
+                            buildJsonObject {
+                                put("content", webTimelineContent(a.fragments, a.rawText))
+                                a.model?.let { put("model", it) }
+                                a.modelDisplayName?.let { put("model_label", it) }
+                            },
+                        )
+                    }
+                },
+            )
+            put("current", current)
+        }
+    }
+
+    private fun parseJsonObject(raw: String?): JsonObject? {
+        if (raw.isNullOrBlank()) return null
+        return runCatching { syncJson.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+    }
+
+    private fun decodeCloudExtra(raw: String?): Map<String, JsonElement> =
+        parseJsonObject(raw)?.filterKeys { it !in KNOWN_CLOUD_META_KEYS } ?: emptyMap()
+
+    /** 云端 meta 中本端不认识的字段 → 原样暂存的 JSON 串。 */
+    private fun encodeCloudExtra(metaObj: JsonObject?): String? {
+        if (metaObj == null) return null
+        val extra = metaObj.filterKeys { it !in KNOWN_CLOUD_META_KEYS }
+        if (extra.isEmpty()) return null
+        return JsonObject(extra).toString()
     }
 
     /** 服务端消息 → 本地实体（把 think/tool/ref/meta 尽量还原成 Android fragments）。 */
@@ -145,6 +225,11 @@ object SyncMapper {
             }
             metaObj?.get("response_stats")?.let { put("response_stats", it.toString()) }
             obj["response_stats"]?.let { put("response_stats", it.toString()) }
+            // 编辑分支快照原样留存（本端不解析结构），上传时回写，保证与 Web 双向不丢。
+            (metaObj?.get(META_EDIT_SNAPSHOTS) as? JsonObject)?.let {
+                put(META_EDIT_SNAPSHOTS, it.toString())
+            }
+            encodeCloudExtra(metaObj)?.let { put(META_CLOUD_EXTRA, it) }
             model?.let { put("modelDisplayName", it) }
             if (role == Role.USER && content != contentForDisplay && (!displayContent.isNullOrBlank() || contentHasHiddenContext)) {
                 put(META_SEND_CONTENT, content)
@@ -828,15 +913,19 @@ object SyncMapper {
         }.trim()
     }
 
-    private fun webTimelineContent(m: MessageEntity): String {
-        val frags = MessageJson.decodeFragments(m.fragmentsJson)
+    private fun webTimelineContent(m: MessageEntity): String =
+        webTimelineContent(MessageJson.decodeFragments(m.fragmentsJson), m.rawText)
+
+    /** fragments（+ 无时间线片段时的 rawText 快路径）→ Web 时间线文本。重试版本上传时复用。 */
+    private fun webTimelineContent(frags: List<MessageFragment>, rawText: String?): String {
         val hasTimelineFragments = frags.any {
             it is MessageFragment.Thinking ||
                 it is MessageFragment.ToolCall ||
                 it is MessageFragment.Image ||
                 it is MessageFragment.SearchResult
         }
-        if (!hasTimelineFragments && !m.rawText.isNullOrBlank()) return m.rawText!!
+        val plainFallback = rawText?.takeIf { it.isNotBlank() }
+        if (!hasTimelineFragments && plainFallback != null) return plainFallback
 
         val hasSearchTool = frags.any { it is MessageFragment.ToolCall && webToolType(it.name) == "web_search" }
         return buildString {

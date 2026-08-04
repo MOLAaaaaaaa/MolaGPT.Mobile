@@ -167,6 +167,7 @@ import com.molagpt.app.core.network.ByokImageAttachment
 import com.molagpt.app.core.network.ByokImageHit
 import com.molagpt.app.core.network.ByokImageWorkbenchConfig
 import com.molagpt.app.core.network.ByokImageWorkbenchResult
+import com.molagpt.app.core.network.UserAgentProvider
 import com.molagpt.app.core.network.looksLikeByokImageReasoningModel
 import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.decodeImageModel
@@ -1116,11 +1117,11 @@ private fun EmptyWorkbenchState(editable: Boolean) {
 @Composable
 private fun UserBubble(record: WorkbenchRecord) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        // 底色与边框二选一：primary 底色已经把用户气泡与结果区分开，边框只是多一层描边。
         Surface(
             modifier = Modifier.fillMaxWidth(0.86f),
             shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 4.dp),
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)),
         ) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (record.refs.isNotEmpty()) {
@@ -1216,10 +1217,10 @@ private fun GeneratedImageCard(path: String, label: String, onClick: () -> Unit)
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var imageLoadFailed by remember(path) { mutableStateOf(false) }
+    // 底色与边框二选一：图片本身就是视觉主体，浅底色足够界定卡片范围，再框一圈只会加重层次。
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
     ) {
         Column {
             Box(
@@ -1650,15 +1651,20 @@ private fun ComposerCard(
     }
 }
 
+/**
+ * 「基于上一张修改」提示条。
+ *
+ * 不套 Surface：外层 ComposerCard 已经是带边框 + 阴影的卡片，这里再加一层带边框的实心面板
+ * 就成了卡中卡。改用一条分隔线把它与下方输入区分开——分组作用一样，视觉层次少一层。
+ */
 @Composable
 private fun ContextStrip(ctx: RecordHit, onClear: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.07f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
-    ) {
-        Row(modifier = Modifier.padding(9.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp),
+        ) {
             AsyncImage(
                 model = decodeImageModel(ctx.path),
                 contentDescription = "上一张",
@@ -1673,6 +1679,7 @@ private fun ContextStrip(ctx: RecordHit, onClear: () -> Unit) {
                 Icon(Icons.Filled.Close, contentDescription = "脱离上下文", modifier = Modifier.size(16.dp))
             }
         }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
     }
 }
 
@@ -2341,6 +2348,7 @@ private suspend fun loadPathAsAttachment(context: Context, path: String): ByokIm
             path.startsWith("file://") -> Uri.parse(path).path?.let { File(it).readBytes() } ?: return@runCatching null
             path.startsWith("http://") || path.startsWith("https://") -> {
                 (URL(path).openConnection() as HttpURLConnection).apply {
+                    setRequestProperty("User-Agent", UserAgentProvider.BROWSER_UA)
                     connectTimeout = 15_000
                     readTimeout = 30_000
                     requestMethod = "GET"
@@ -2557,6 +2565,7 @@ private fun saveImageUrlToGallery(context: Context, url: String): Boolean {
     } else {
         runCatching {
             val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                setRequestProperty("User-Agent", UserAgentProvider.BROWSER_UA)
                 connectTimeout = 20_000
                 readTimeout = 60_000
                 requestMethod = "GET"

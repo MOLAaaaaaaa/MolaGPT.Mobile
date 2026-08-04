@@ -3,9 +3,11 @@ package com.molagpt.app.feature.chat
 import com.molagpt.app.core.common.chunkedTimeWindow
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatRequest
+import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.RetryAttempt
+import com.molagpt.app.core.model.ToolStatus
 import com.molagpt.app.core.storage.ChatRepository
 import com.molagpt.app.core.storage.StreamTaskRecord
 import java.util.concurrent.ConcurrentHashMap
@@ -81,6 +83,19 @@ class BackgroundStreamManager(
         }
     }
 
+    /**
+     * 丢弃已完成的 in-flight 帧，之后完全以库为准。
+     *
+     * 编辑分支切换会整体换掉时间线并重建消息 id，而 UI 合并 in-flight 是按 messageId 去重的：
+     * 残留的旧帧匹配不上任何一条历史，就会作为多余的一条挂在末尾。生成中不清（此时它是唯一数据源）。
+     */
+    fun clearCompletedInFlight(sessionId: String) {
+        if (isStreaming(sessionId)) return
+        stateFor(sessionId).update { state ->
+            if (state.inFlight == null) state else state.copy(inFlight = null)
+        }
+    }
+
     fun start(
         request: ChatRequest,
         assistantMessageId: String,
@@ -122,7 +137,13 @@ class BackgroundStreamManager(
         }
 
         val job = chatRepository.streamAssistant(request, assistantMessageId, priorAttempts)
-            .chunkedTimeWindow(throttleMs)
+            .chunkedTimeWindow(
+                windowMillis = { StreamRenderPacing.windowMillis(throttleMs) },
+                emitImmediately = {
+                    StreamRenderPacing.windowMillis(throttleMs) <= DIRECT_RENDER_WINDOW_MS ||
+                        it.hasRunningTool()
+                },
+            )
             .onEach { batch ->
                 batch.lastOrNull()?.let { msg ->
                     state.value = BackgroundStreamState(
@@ -157,7 +178,13 @@ class BackgroundStreamManager(
             model = record.modelId,
             modelDisplayName = record.modelDisplayName,
         )
-            .chunkedTimeWindow(defaultThrottleMs)
+            .chunkedTimeWindow(
+                windowMillis = { StreamRenderPacing.windowMillis(defaultThrottleMs) },
+                emitImmediately = {
+                    StreamRenderPacing.windowMillis(defaultThrottleMs) <= DIRECT_RENDER_WINDOW_MS ||
+                        it.hasRunningTool()
+                },
+            )
             .onEach { batch ->
                 batch.lastOrNull()?.let { msg ->
                     state.value = BackgroundStreamState(
@@ -244,3 +271,9 @@ class BackgroundStreamManager(
     private fun stateFor(sessionId: String): MutableStateFlow<BackgroundStreamState> =
         states.getOrPut(sessionId) { MutableStateFlow(BackgroundStreamState()) }
 }
+
+private fun ChatMessage.hasRunningTool(): Boolean = fragments.any { fragment ->
+    fragment is MessageFragment.ToolCall && fragment.status == ToolStatus.RUNNING
+}
+
+private const val DIRECT_RENDER_WINDOW_MS = 16L

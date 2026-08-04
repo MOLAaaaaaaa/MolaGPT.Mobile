@@ -28,6 +28,8 @@ data class ChatUiState(
     val providerKind: ProviderKind = ProviderKind.MOLAGPT,
     val hasMolaGptModels: Boolean = false,
     val hasByokModels: Boolean = false,
+    /** 官方配置是否至少成功加载过一次；与“当前账户过滤后列表非空”不是一回事。 */
+    val isMolaModelConfigLoaded: Boolean = false,
     val isModelRefreshing: Boolean = false,
     val isStreaming: Boolean = false,
     val inputEnabled: Boolean = true,

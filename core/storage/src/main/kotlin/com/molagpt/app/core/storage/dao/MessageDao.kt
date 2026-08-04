@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import com.molagpt.app.core.storage.entity.MessageEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -24,6 +25,16 @@ interface MessageDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: MessageEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(entities: List<MessageEntity>)
+
+    /** 编辑分支切换：整体换成另一条时间线，中间态不外泄给 observeMessages。 */
+    @Transaction
+    suspend fun replaceAll(sessionId: String, entities: List<MessageEntity>) {
+        deleteBySession(sessionId)
+        upsertAll(entities)
+    }
 
     @Query("DELETE FROM messages WHERE messageId = :messageId")
     suspend fun deleteById(messageId: String)

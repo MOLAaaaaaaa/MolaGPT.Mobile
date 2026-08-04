@@ -281,18 +281,11 @@ private fun DependencyRow(item: DependencyNotice) {
                 modifier = Modifier.padding(top = 3.dp),
             )
         }
-        Surface(
-            shape = RoundedCornerShape(9.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        ) {
-            Text(
-                item.license,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            )
-        }
+        Text(
+            item.license,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -327,20 +320,17 @@ private fun LicenseExpander() {
                 )
             }
             if (expanded) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.68f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                ) {
-                    Text(
-                        text = LicenseNotice,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(14.dp),
-                    )
-                }
+                HorizontalDivider(
+                    modifier = Modifier.padding(start = 16.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.58f),
+                )
+                Text(
+                    text = LicenseNotice,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 14.dp),
+                )
             }
         }
     }

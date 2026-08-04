@@ -1,5 +1,6 @@
 package com.molagpt.app.feature.settings
 
+import com.molagpt.app.core.network.UserAgentProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -51,7 +52,7 @@ private fun parseVer(v: String): List<Int> =
 private suspend fun fetchGitHub(): UpdateInfo? = withContext(Dispatchers.IO) {
     runCatching {
         val conn = URL(GitHubApiUrl).openConnection()
-        conn.setRequestProperty("User-Agent", "MolaGPT-Android")
+        conn.setRequestProperty("User-Agent", UserAgentProvider.FIXED_UA)
         conn.setRequestProperty("Accept", "application/vnd.github+json")
         conn.connectTimeout = 8_000
         conn.readTimeout = 8_000
@@ -67,6 +68,7 @@ private suspend fun fetchGitHub(): UpdateInfo? = withContext(Dispatchers.IO) {
 private suspend fun fetchManifest(): UpdateInfo? = withContext(Dispatchers.IO) {
     runCatching {
         val conn = URL(ManifestUrl).openConnection()
+        conn.setRequestProperty("User-Agent", UserAgentProvider.FIXED_UA)
         conn.connectTimeout = 8_000
         conn.readTimeout = 8_000
         val obj = remoteFeedJson.parseToJsonElement(conn.getInputStream().bufferedReader().readText()).jsonObject

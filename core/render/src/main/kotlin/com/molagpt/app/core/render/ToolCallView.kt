@@ -40,6 +40,7 @@ fun ToolCallView(
     resultPreview: String?,
     argsJson: String? = null,
     provider: String? = null,
+    expandWhileRunning: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val title = label ?: readableToolName(name)
@@ -47,9 +48,9 @@ fun ToolCallView(
     val preview = resultPreview?.takeIf { it.isNotBlank() }
         ?: argsJson?.takeIf { it.isNotBlank() }?.let { "参数：\n```json\n$it\n```" }
 
-    var collapsed by remember { mutableStateOf(status != ToolStatus.RUNNING) }
-    LaunchedEffect(status) {
-        collapsed = status != ToolStatus.RUNNING
+    var collapsed by remember { mutableStateOf(!expandWhileRunning || status != ToolStatus.RUNNING) }
+    LaunchedEffect(status, expandWhileRunning) {
+        if (expandWhileRunning) collapsed = status != ToolStatus.RUNNING
     }
 
     Column(

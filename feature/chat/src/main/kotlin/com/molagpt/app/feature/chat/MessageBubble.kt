@@ -3,6 +3,8 @@ package com.molagpt.app.feature.chat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,15 +13,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.FileInfo
+import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.feature.file.AttachmentStrip
 
@@ -90,24 +99,55 @@ fun MessageActionBar(
     onCopy: () -> Unit,
     onRegenerate: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
+    /** 长按「重新生成」可换模型重试（对齐 Web 的重试模型下拉）；为空则只保留普通重试。 */
+    regenerateModels: List<ProviderModel> = emptyList(),
+    onRegenerateWithModel: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
+    var modelMenuOpen by remember { mutableStateOf(false) }
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         ActionChip("复制", onCopy)
         if (onEdit != null) ActionChip("编辑", onEdit)
-        if (onRegenerate != null) ActionChip("重新生成", onRegenerate)
+        if (onRegenerate != null) {
+            Box {
+                ActionChip(
+                    text = "重新生成",
+                    onClick = onRegenerate,
+                    onLongClick = if (regenerateModels.isNotEmpty() && onRegenerateWithModel != null) {
+                        { modelMenuOpen = true }
+                    } else {
+                        null
+                    },
+                )
+                DropdownMenu(
+                    expanded = modelMenuOpen,
+                    onDismissRequest = { modelMenuOpen = false },
+                ) {
+                    regenerateModels.forEach { model ->
+                        DropdownMenuItem(
+                            text = { Text(model.displayName) },
+                            onClick = {
+                                modelMenuOpen = false
+                                onRegenerateWithModel?.invoke(model.id)
+                            },
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ActionChip(text: String, onClick: () -> Unit) {
+private fun ActionChip(text: String, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier
             .clip(RoundedCornerShape(50))
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 10.dp, vertical = 5.dp),
     )
 }

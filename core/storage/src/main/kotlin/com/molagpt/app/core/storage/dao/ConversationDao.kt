@@ -27,6 +27,21 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")
     suspend fun getById(sessionId: String): ConversationEntity?
 
+    /** 批量删除用：一次取回多个会话，逐条判定墓碑 / 硬删。调用方需按 SQLite 变量上限分批。 */
+    @Query("SELECT * FROM conversations WHERE sessionId IN (:sessionIds)")
+    suspend fun getByIds(sessionIds: List<String>): List<ConversationEntity>
+
+    /** 「全选」用：可见性条件与 [pagingSource] 保持一致，否则会选中列表上看不见的会话。 */
+    @Query(
+        """
+        SELECT sessionId FROM conversations
+        WHERE deletedAt IS NULL
+          AND visibleInList = 1
+        ORDER BY pinned DESC, updatedAt DESC
+        """,
+    )
+    suspend fun allVisibleSessionIds(): List<String>
+
     /** 观察单个会话（用于顶栏标题随重命名实时刷新）。 */
     @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")
     fun observeById(sessionId: String): Flow<ConversationEntity?>

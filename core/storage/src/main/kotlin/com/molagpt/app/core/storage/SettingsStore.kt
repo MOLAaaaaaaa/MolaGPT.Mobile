@@ -8,8 +8,10 @@ import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.molagpt.app.core.model.ByokMcpServer
+import com.molagpt.app.core.model.ProviderKind
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -24,6 +26,10 @@ private const val DEFAULT_MODEL_ID = "auto"
 data class AppSettings(
     val themeMode: String = "auto", // auto | light | dark
     val defaultModel: String? = DEFAULT_MODEL_ID,
+    /** 默认模型阵营；null 表示旧数据，由 [defaultModel] + 本地 BYOK 列表反查。 */
+    val defaultProviderKind: ProviderKind? = null,
+    /** 默认 BYOK 的 providerId；MolaGPT / 未设置时为 null。 */
+    val defaultProviderId: String? = null,
     val throttleMs: Long = 16L,
     val enterToSend: Boolean = false,
     val temperature: Double = 0.7,
@@ -76,6 +82,10 @@ class SettingsStore(private val context: Context) {
         AppSettings(
             themeMode = p[Keys.THEME] ?: "auto",
             defaultModel = p[Keys.DEFAULT_MODEL] ?: DEFAULT_MODEL_ID,
+            defaultProviderKind = p[Keys.DEFAULT_PROVIDER_KIND]?.let { raw ->
+                runCatching { ProviderKind.valueOf(raw) }.getOrNull()
+            },
+            defaultProviderId = p[Keys.DEFAULT_PROVIDER_ID],
             throttleMs = p[Keys.THROTTLE_MS] ?: 16L,
             enterToSend = p[Keys.ENTER_TO_SEND] ?: false,
             temperature = p[Keys.TEMPERATURE] ?: 0.7,
@@ -107,7 +117,22 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun setThemeMode(v: String) = edit { it[Keys.THEME] = v }
-    suspend fun setDefaultModel(v: String?) = edit { if (v == null) it.remove(Keys.DEFAULT_MODEL) else it[Keys.DEFAULT_MODEL] = v }
+
+    /** 写入默认模型及其阵营（新对话 / 冷启动按需拉模型会读这里）。 */
+    suspend fun setDefaultModelSelection(
+        modelId: String,
+        providerKind: ProviderKind,
+        providerId: String?,
+    ) = edit {
+        it[Keys.DEFAULT_MODEL] = modelId.trim().ifBlank { DEFAULT_MODEL_ID }
+        it[Keys.DEFAULT_PROVIDER_KIND] = providerKind.name
+        if (providerId.isNullOrBlank() || providerKind != ProviderKind.BYOK) {
+            it.remove(Keys.DEFAULT_PROVIDER_ID)
+        } else {
+            it[Keys.DEFAULT_PROVIDER_ID] = providerId
+        }
+    }
+
     suspend fun setThrottleMs(v: Long) = edit { it[Keys.THROTTLE_MS] = v }
     suspend fun setEnterToSend(v: Boolean) = edit { it[Keys.ENTER_TO_SEND] = v }
     suspend fun setTemperature(v: Double) = edit { it[Keys.TEMPERATURE] = v }
@@ -158,6 +183,19 @@ class SettingsStore(private val context: Context) {
     /** 登出/删除云端数据后重置游标，下次按首次全量同步处理。 */
     suspend fun resetSyncCursor() = edit { it.remove(Keys.SYNC_CURSOR) }
 
+    /** 已弹过的运营消息 id（每个 id 只弹一次）；不进 [AppSettings] 流，避免无关订阅方重组。 */
+    suspend fun seenOpsMessageIds(): Set<String> =
+        context.settingsDataStore.data.map { it[Keys.SEEN_OPS_MESSAGE_IDS] ?: emptySet() }.first()
+
+    suspend fun addSeenOpsMessageId(id: String) = edit {
+        it[Keys.SEEN_OPS_MESSAGE_IDS] = (it[Keys.SEEN_OPS_MESSAGE_IDS] ?: emptySet()) + id
+    }
+
+    /** 服务端已下架的消息 id 顺带清理，防止已读集无限增长；重新上架即重新展示。 */
+    suspend fun retainSeenOpsMessageIds(valid: Set<String>) = edit {
+        it[Keys.SEEN_OPS_MESSAGE_IDS] = (it[Keys.SEEN_OPS_MESSAGE_IDS] ?: emptySet()) intersect valid
+    }
+
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         context.settingsDataStore.edit(block)
     }
@@ -170,6 +208,8 @@ class SettingsStore(private val context: Context) {
     private object Keys {
         val THEME = stringPreferencesKey("theme_mode")
         val DEFAULT_MODEL = stringPreferencesKey("default_model")
+        val DEFAULT_PROVIDER_KIND = stringPreferencesKey("default_provider_kind")
+        val DEFAULT_PROVIDER_ID = stringPreferencesKey("default_provider_id")
         val THROTTLE_MS = longPreferencesKey("throttle_ms")
         val ENTER_TO_SEND = booleanPreferencesKey("enter_to_send")
         val TEMPERATURE = doublePreferencesKey("temperature")
@@ -195,5 +235,6 @@ class SettingsStore(private val context: Context) {
         val LAST_SYNC_AT = longPreferencesKey("last_sync_at")
         val SYNC_CURSOR = stringPreferencesKey("sync_cursor_iso")
         val COMPLETION_NOTIFY = booleanPreferencesKey("completion_notify")
+        val SEEN_OPS_MESSAGE_IDS = stringSetPreferencesKey("seen_ops_message_ids")
     }
 }

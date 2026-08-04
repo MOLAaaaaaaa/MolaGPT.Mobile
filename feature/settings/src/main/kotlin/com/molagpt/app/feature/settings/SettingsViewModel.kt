@@ -19,12 +19,12 @@ import com.molagpt.app.core.network.ByokImageWorkbenchResult
 import com.molagpt.app.core.network.ByokModelApi
 import com.molagpt.app.core.network.McpToolListApi
 import com.molagpt.app.core.network.MolaApiException
-import com.molagpt.app.core.network.SyncApi
 import com.molagpt.app.core.storage.ByokProviderRepository
 import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.core.storage.CredentialStore
 import com.molagpt.app.core.storage.SettingsStore
 import com.molagpt.app.core.storage.SyncEngine
+import com.molagpt.app.core.storage.TracksToggle
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -38,9 +38,8 @@ import kotlinx.coroutines.withContext
 class SettingsViewModel(
     private val store: SettingsStore,
     private val syncEngine: SyncEngine,
-    private val syncApi: SyncApi,
-    /** 持久登录 JWT 提供者；同步个性化开关到服务端用（游客为空时仅本地）。 */
-    private val jwtProvider: () -> String?,
+    /** 个性化记忆总开关的共用写入口（与个性化页共用，避免两份不一致的实现）。 */
+    private val tracksToggle: TracksToggle,
     /** 账号配额状态缓存（容器级，跨 VM 重建存活；设置页只读，不每次重拉）。 */
     private val accountStatus: AccountStatusCache,
     private val byokProviders: ByokProviderRepository,
@@ -231,14 +230,13 @@ class SettingsViewModel(
         }
     }
 
+    /**
+     * 个性化记忆总开关。写入逻辑收敛在 [TracksToggle]（与个性化页共用一份）。
+     * 失败时本地已回滚，这里只负责把原因说给用户——旧实现在未登录时静默失败。
+     */
     fun setTracks(v: Boolean) = viewModelScope.launch {
-        // 乐观写本地并同步服务端 personalized_memory_enabled；失败时回滚本地。
-        store.setTracksEnabled(v)
-        val jwt = jwtProvider()?.takeIf { it.isNotBlank() } ?: return@launch
-        val ok = runCatching {
-            withContext(dispatchers.io) { syncApi.updateSetting(jwt, "personalized_memory_enabled", v) }
-        }.getOrDefault(false)
-        if (!ok) store.setTracksEnabled(!v)
+        val result = withContext(dispatchers.io) { tracksToggle.setTracksEnabled(v) }
+        result.message?.let { _byokStatus.value = it }
     }
 
     fun setCompletionNotify(v: Boolean) = viewModelScope.launch { store.setCompletionNotify(v) }
