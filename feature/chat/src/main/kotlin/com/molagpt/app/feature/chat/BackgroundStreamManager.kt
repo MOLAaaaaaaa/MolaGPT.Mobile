@@ -48,6 +48,11 @@ class BackgroundStreamManager(
     /** providerId + modelId → 相对 apiUrl（来自 ModelRegistry）；落库进任务记录，供被杀后续传直接复用。 */
     private val apiUrlResolver: (providerId: String?, modelId: String) -> String,
     private val defaultThrottleMs: Long = 16L,
+    /**
+     * 首轮回答完成后的自动标题。挂在这里而非 ViewModel，是因为本管理器持有 application scope——
+     * 用户答案一出来就退出会话时，绑 viewModelScope 的标题请求会被取消。
+     */
+    private val titleGenerator: suspend (sessionId: String) -> Unit = {},
 ) {
     /** 一次生成正常完成（COMPLETE）的事件，供完成通知消费。 */
     data class Completion(
@@ -61,6 +66,8 @@ class BackgroundStreamManager(
         val streamSessionId: String,
         val providerKind: ProviderKind,
         val job: Job,
+        /** 本轮结束后是否自动起标题（仅首轮为 true；重试/重生成不改已有标题）。 */
+        val generateTitle: Boolean = false,
     )
 
     private val states = ConcurrentHashMap<String, MutableStateFlow<BackgroundStreamState>>()
@@ -101,6 +108,7 @@ class BackgroundStreamManager(
         assistantMessageId: String,
         throttleMs: Long,
         priorAttempts: List<RetryAttempt> = emptyList(),
+        generateTitleOnFinish: Boolean = false,
     ) {
         // 取代同会话上一条流：本地取消旧 job（不走 stop() 的异步 removeStreamTask，避免与下面的 persist 竞争）。
         val previous = tasks.remove(request.sessionId)
@@ -160,7 +168,13 @@ class BackgroundStreamManager(
             }
             .launchIn(scope)
 
-        tasks[request.sessionId] = Task(request.sessionId, request.streamSessionId, request.providerKind, job)
+        tasks[request.sessionId] = Task(
+            sessionId = request.sessionId,
+            streamSessionId = request.streamSessionId,
+            providerKind = request.providerKind,
+            job = job,
+            generateTitle = generateTitleOnFinish,
+        )
         publishActiveCount()
     }
 
@@ -233,6 +247,8 @@ class BackgroundStreamManager(
         scope.launch { chatRepository.removeStreamTask(sessionId) }
         if (stateFor(sessionId).value.inFlight?.status == MessageStatus.COMPLETE) {
             _completions.tryEmit(Completion(sessionId, conversationId, modelDisplayName))
+            // 标题失败不该影响正常收尾，也不该冒泡到 UI——内部已自行回退占位标题。
+            if (current.generateTitle) scope.launch { runCatching { titleGenerator(sessionId) } }
         }
     }
 

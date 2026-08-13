@@ -6,6 +6,7 @@ import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.StreamEvent
+import com.molagpt.app.core.model.TitleRequest
 import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.core.network.dto.ChatRequestBody
 import com.molagpt.app.core.network.dto.WireEnabledTools
@@ -199,16 +200,12 @@ class MolaGptChatService(
 
     override suspend fun fetchFiles(conversationId: String): List<FileInfo> = emptyList()
 
-    override suspend fun generateTitle(
-        sessionId: String,
-        firstUserMessage: String,
-        assistantMessage: String,
-    ): String {
-        val jwt = runCatching { shortTokenManager.freshToken() }.getOrNull()
-            ?: return fallbackTitle(firstUserMessage)
-        val user = firstUserMessage.trim()
-        val assistantPreview = assistantMessage.trim().take(1000)
-        if (user.isBlank() || assistantPreview.isBlank()) return fallbackTitle(firstUserMessage)
+    override suspend fun generateTitle(request: TitleRequest): String {
+        val fallback = request.fallbackTitle()
+        val jwt = runCatching { shortTokenManager.freshToken() }.getOrNull() ?: return fallback
+        val user = request.firstUserText.orEmpty().trim()
+        val assistantPreview = request.lastAssistantText.orEmpty().trim().take(1000)
+        if (user.isBlank() || assistantPreview.isBlank()) return fallback
         return runCatching {
             val resp = http.client.post(MolaEndpoints.absolute(MolaEndpoints.GENERATE_TITLE)) {
                 header(HttpHeaders.Authorization, "Bearer $jwt")
@@ -248,23 +245,7 @@ class MolaGptChatService(
                         ?.jsonPrimitive
                         ?.contentOrNull,
             )
-        }.getOrNull()?.takeIf { it.isNotBlank() } ?: fallbackTitle(firstUserMessage)
-    }
-
-    private fun fallbackTitle(s: String): String =
-        s.replace('\r', ' ')
-            .replace('\n', ' ')
-            .trim()
-            .let { if (it.length <= 25) it else it.take(25).trim() + "..." }
-            .ifBlank { "无标题对话" }
-
-    private fun cleanGeneratedTitle(raw: String?): String? {
-        var title = raw?.trim() ?: return null
-        title = title.replace(Regex("^[\"'“”‘’「」『』《》]+|[\"'“”‘’「」『』《》]+$"), "")
-        title = title.replace(Regex("^标题\\s*[:：]\\s*", RegexOption.IGNORE_CASE), "").trim()
-        title = title.trim('。', '，', ',', '.', ':', '：', ';', '；', '!', '！', '?', '？')
-        if (title.length > 30) title = title.take(30).trim()
-        return title.ifBlank { null }
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: fallback
     }
 
     private fun buildBody(req: ChatRequest): ChatRequestBody = ChatRequestBody(

@@ -78,11 +78,16 @@ class SettingsViewModel(
 
     fun setThemeMode(v: String) = viewModelScope.launch { store.setThemeMode(v) }
     fun setEnterToSend(v: Boolean) = viewModelScope.launch { store.setEnterToSend(v) }
+    fun setShowAgentControlShortcut(v: Boolean) =
+        viewModelScope.launch { store.setShowAgentControlShortcut(v) }
+    fun setShowImageWorkbenchShortcut(v: Boolean) =
+        viewModelScope.launch { store.setShowImageWorkbenchShortcut(v) }
     fun setTemperature(v: Double) = viewModelScope.launch { store.setTemperature(v) }
     fun setUseThinking(v: Boolean) = viewModelScope.launch { store.setUseThinking(v) }
     fun setReasoningEffort(v: String) = viewModelScope.launch { store.setReasoningEffort(v) }
-    fun setTools(network: Boolean, steel: Boolean, code: Boolean) =
-        viewModelScope.launch { store.setTools(network, steel, code) }
+    fun setWebAccessTools(enabled: Boolean) =
+        viewModelScope.launch { store.setWebAccessTools(enabled) }
+    fun setCodeTool(enabled: Boolean) = viewModelScope.launch { store.setCodeTool(enabled) }
 
     /** 清空一次性状态文案（新页面 Snackbar 消费后调用，避免重复弹出）。 */
     fun clearByokStatus() { _byokStatus.value = null }
@@ -169,6 +174,10 @@ class SettingsViewModel(
         store.setVisionProxy(enabled, modelKey)
     }
 
+    fun setAutoTitle(enabled: Boolean, modelKey: String?) = viewModelScope.launch {
+        store.setAutoTitle(enabled, modelKey)
+    }
+
     fun setImageGenConfig(
         enabled: Boolean,
         modelKey: String?,
@@ -190,6 +199,19 @@ class SettingsViewModel(
                 .filter { it.enabled }
                 .flatMap { p ->
                     p.models.filter { it.supportsVision }.map {
+                        ModelOption("${p.id}::${it.id}", "${p.name} / ${it.displayName}")
+                    }
+                }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 标题模型候选：所有已启用 provider 的对话模型（挂个便宜小模型最划算）。 */
+    val titleModelOptions: StateFlow<List<ModelOption>> = byokProviderList
+        .map { providers ->
+            providers
+                .filter { it.enabled }
+                .flatMap { p ->
+                    p.models.filter { it.supportsChat }.map {
                         ModelOption("${p.id}::${it.id}", "${p.name} / ${it.displayName}")
                     }
                 }

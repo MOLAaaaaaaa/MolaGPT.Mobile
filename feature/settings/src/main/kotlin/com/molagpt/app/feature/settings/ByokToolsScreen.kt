@@ -77,6 +77,7 @@ fun ByokToolsScreen(
     val s by viewModel.settings.collectAsStateWithLifecycle()
     val visionOptions by viewModel.visionModelOptions.collectAsStateWithLifecycle()
     val imageGenOptions by viewModel.imageGenModelOptions.collectAsStateWithLifecycle()
+    val titleOptions by viewModel.titleModelOptions.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     fun showSnack(msg: String) = scope.launch { snackbar.showSnackbar(msg) }
@@ -159,6 +160,14 @@ fun ByokToolsScreen(
                 onOpenImageWorkbench = onOpenImageWorkbench,
                 onOpenByokProviders = onOpenByokProviders,
                 onNoModels = { showSnack("当前无可用图像模型，请先在自定义 API 模型中添加并启用图像生成模型") },
+            )
+
+            AutoTitleCard(
+                enabled = s.autoTitleEnabled,
+                modelKey = s.titleModelKey,
+                options = titleOptions,
+                onChange = viewModel::setAutoTitle,
+                onOpenByokProviders = onOpenByokProviders,
             )
 
             Box(Modifier.padding(bottom = 16.dp))
@@ -403,6 +412,57 @@ private fun VisionProxyCard(
                     options.forEach { opt ->
                         DropdownMenuItem(text = { Text(opt.label) },
                             onClick = { onChange(true, opt.key); expanded = false })
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── 会话标题（默认跟随当前对话模型；可挂个便宜小模型专门起名） ──
+
+@Composable
+private fun AutoTitleCard(
+    enabled: Boolean,
+    modelKey: String?,
+    options: List<SettingsViewModel.ModelOption>,
+    onChange: (enabled: Boolean, modelKey: String?) -> Unit,
+    onOpenByokProviders: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val followChatModel = "跟随当前对话模型"
+    val selectedLabel = options.firstOrNull { it.key == modelKey }?.label ?: followChatModel
+    SectionTitle("会话标题")
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+            ToggleRow(
+                "自动生成标题",
+                enabled,
+                subtitle = "首轮回答后发出一次请求来自动生成对话标题",
+                onChange = { onChange(it, modelKey) },
+            )
+            if (enabled) {
+                Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.weight(1f)) {
+                        Text(selectedLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    TextButton(onClick = onOpenByokProviders) { Text("模型管理") }
+                }
+                androidx.compose.material3.DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    // 首项＝不指定，回退到会话自己的模型（零配置即可用）。
+                    DropdownMenuItem(
+                        text = { Text(followChatModel) },
+                        onClick = { onChange(true, null); expanded = false },
+                    )
+                    options.forEach { opt ->
+                        DropdownMenuItem(
+                            text = { Text(opt.label) },
+                            onClick = { onChange(true, opt.key); expanded = false },
+                        )
                     }
                 }
             }

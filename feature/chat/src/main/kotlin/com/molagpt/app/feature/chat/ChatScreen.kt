@@ -70,6 +70,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -93,6 +94,8 @@ import com.molagpt.app.feature.file.LocalSharedTransitionScope
 fun ChatScreen(
     viewModel: ChatViewModel,
     enterToSend: Boolean,
+    showAgentControlShortcut: Boolean,
+    showImageWorkbenchShortcut: Boolean,
     onOpenDrawer: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
@@ -301,27 +304,56 @@ fun ChatScreen(
                                     } == true
                                     DropdownMenuItem(
                                         text = {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                modifier = Modifier.fillMaxWidth(),
-                                            ) {
-                                                Text(
-                                                    model.displayName,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis,
-                                                    modifier = Modifier.weight(1f),
-                                                )
-                                                if (selected) {
-                                                    Spacer(Modifier.width(12.dp))
-                                                    Icon(
-                                                        Icons.Filled.Check,
-                                                        contentDescription = "当前模型",
-                                                        tint = MaterialTheme.colorScheme.primary,
-                                                        modifier = Modifier.size(18.dp),
+                                            Column(modifier = Modifier.fillMaxWidth()) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                ) {
+                                                    Text(
+                                                        model.displayName,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f),
                                                     )
+                                                    // 点数档位：$ 越多扣得越狠。服务端给什么画什么。
+                                                    model.creditSymbol?.takeIf { it.isNotEmpty() }?.let { sym ->
+                                                        Spacer(Modifier.width(8.dp))
+                                                        Text(
+                                                            sym,
+                                                            style = MaterialTheme.typography.labelMedium,
+                                                            fontFamily = FontFamily.Monospace,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        )
+                                                    }
+                                                    if (selected) {
+                                                        Spacer(Modifier.width(12.dp))
+                                                        Icon(
+                                                            Icons.Filled.Check,
+                                                            contentDescription = "当前模型",
+                                                            tint = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.size(18.dp),
+                                                        )
+                                                    }
                                                 }
+                                                // 挡住的原因直接用服务端文案。首行是标题（如「今日点数已用完」），
+                                                // 菜单项里只放得下这一行。
+                                                model.quotaMessage
+                                                    ?.lineSequence()
+                                                    ?.firstOrNull { it.isNotBlank() }
+                                                    ?.let { msg ->
+                                                        Text(
+                                                            msg,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.error,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                    }
                                             }
                                         },
+                                        // 额度/风控挡住的模型留在列表里但不可选（与 Web 一致）。
+                                        // 直接从列表删掉会让「点数用完」表现为模型凭空消失。
+                                        enabled = !model.quotaBlocked,
                                         onClick = {
                                             modelMenuOpen = false
                                             if (sameKind || isBlankConversation) {
@@ -380,11 +412,15 @@ fun ChatScreen(
                             Icon(Icons.Filled.Add, contentDescription = "新对话")
                         }
                     }
-                    IconButton(onClick = onOpenAgentControl) {
-                        AgentMonitorIcon(MaterialTheme.colorScheme.onSurface)
+                    if (showAgentControlShortcut) {
+                        IconButton(onClick = onOpenAgentControl) {
+                            AgentMonitorIcon(MaterialTheme.colorScheme.onSurface)
+                        }
                     }
-                    IconButton(onClick = onOpenImageWorkbench) {
-                        Icon(Icons.Filled.Palette, contentDescription = "图像工作台")
+                    if (showImageWorkbenchShortcut) {
+                        IconButton(onClick = onOpenImageWorkbench) {
+                            Icon(Icons.Filled.Palette, contentDescription = "图像工作台")
+                        }
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")
@@ -435,6 +471,7 @@ fun ChatScreen(
                     pendingAttachments = state.pendingAttachments,
                     activePersona = activePersona,
                     showPersonaChip = isActiveConversation,
+                    onSetWebAccess = viewModel::setWebAccessTools,
                     onSetNetwork = viewModel::setNetworkTool,
                     onSetSteel = viewModel::setSteelTool,
                     onToggleThinking = viewModel::setUseThinking,

@@ -31,6 +31,16 @@ data class ProviderModel(
     val thinkingConfig: ThinkingConfig? = null,
     /** BYOK: 覆盖该模型请求体顶层字段（type: string|number|boolean|json）。 */
     val customBody: List<CustomBodyParam> = emptyList(),
+    /**
+     * MolaGPT 点数额度/风控暂时挡住了这个模型。模型仍留在列表里置灰不可选（与 Web 一致），
+     * 不从列表移除：点数是全站共享的，耗尽时所有计费模型都会被挡，按可用性硬过滤
+     * 会把整个模型选择器清空。BYOK 模型恒为 false。
+     */
+    val quotaBlocked: Boolean = false,
+    /** [quotaBlocked] 时展示给用户的原因，直接用服务端 `status.php` 的 message。 */
+    val quotaMessage: String? = null,
+    /** 点数档位符号：`""`=免费，`"$"`..`"$$$$"`，null=未定价或不适用（BYOK）。 */
+    val creditSymbol: String? = null,
 )
 
 /** 用户自定义请求体覆写项。[type] ∈ string|number|boolean|json，决定 [value] 如何解析成 JSON 值。 */

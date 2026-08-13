@@ -32,11 +32,15 @@ data class AppSettings(
     val defaultProviderId: String? = null,
     val throttleMs: Long = 16L,
     val enterToSend: Boolean = false,
+    /** 是否在聊天页顶栏显示 Agent 控制快捷按钮。 */
+    val showAgentControlShortcut: Boolean = false,
+    /** 是否在聊天页顶栏显示图像工作台快捷按钮。 */
+    val showImageWorkbenchShortcut: Boolean = false,
     val temperature: Double = 0.7,
     val useThinking: Boolean = false,
     val reasoningEffort: String = "medium",
-    val toolNetwork: Boolean = false,
-    val toolSteel: Boolean = false,
+    val toolNetwork: Boolean = true,
+    val toolSteel: Boolean = true,
     val toolCode: Boolean = true,
     val byokMcpServers: List<ByokMcpServer> = emptyList(),
     /** 联网搜索服务商 id（duckduckgo/tavily/exa）；key 单独经 CredentialStore 加密存储。 */
@@ -60,6 +64,10 @@ data class AppSettings(
     val imageGenReasoning: Boolean = false,
     /** 出图推理强度（reasoning.effort）。 */
     val imageGenReasoningEffort: String = "medium",
+    /** 自动会话标题：首轮回答完成后让模型给会话起名（消耗用户自己的额度）。 */
+    val autoTitleEnabled: Boolean = true,
+    /** 标题模型 "<providerId>::<modelId>"；null = 跟随当前对话模型。 */
+    val titleModelKey: String? = null,
     /** 云同步开关（个人中心）。 */
     val cloudSyncEnabled: Boolean = false,
     /** MolaGPT Tracks（个性化记忆）开关。 */
@@ -88,11 +96,13 @@ class SettingsStore(private val context: Context) {
             defaultProviderId = p[Keys.DEFAULT_PROVIDER_ID],
             throttleMs = p[Keys.THROTTLE_MS] ?: 16L,
             enterToSend = p[Keys.ENTER_TO_SEND] ?: false,
+            showAgentControlShortcut = p[Keys.SHOW_AGENT_CONTROL_SHORTCUT] ?: false,
+            showImageWorkbenchShortcut = p[Keys.SHOW_IMAGE_WORKBENCH_SHORTCUT] ?: false,
             temperature = p[Keys.TEMPERATURE] ?: 0.7,
             useThinking = p[Keys.USE_THINKING] ?: false,
             reasoningEffort = p[Keys.REASONING_EFFORT] ?: "medium",
-            toolNetwork = p[Keys.TOOL_NETWORK] ?: false,
-            toolSteel = p[Keys.TOOL_STEEL] ?: false,
+            toolNetwork = p[Keys.TOOL_NETWORK] ?: true,
+            toolSteel = p[Keys.TOOL_STEEL] ?: true,
             toolCode = p[Keys.TOOL_CODE] ?: true,
             byokMcpServers = decodeMcpServers(p[Keys.BYOK_MCP_SERVERS]),
             webSearchProvider = p[Keys.WEB_SEARCH_PROVIDER] ?: "duckduckgo",
@@ -109,6 +119,8 @@ class SettingsStore(private val context: Context) {
             imageGenAspectRatio = p[Keys.IMAGE_GEN_ASPECT_RATIO] ?: "1:1",
             imageGenReasoning = p[Keys.IMAGE_GEN_REASONING] ?: false,
             imageGenReasoningEffort = p[Keys.IMAGE_GEN_REASONING_EFFORT] ?: "medium",
+            autoTitleEnabled = p[Keys.AUTO_TITLE_ENABLED] ?: true,
+            titleModelKey = p[Keys.TITLE_MODEL_KEY],
             cloudSyncEnabled = p[Keys.CLOUD_SYNC] ?: false,
             tracksEnabled = p[Keys.TRACKS] ?: false,
             lastSyncAt = p[Keys.LAST_SYNC_AT] ?: 0L,
@@ -135,14 +147,16 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setThrottleMs(v: Long) = edit { it[Keys.THROTTLE_MS] = v }
     suspend fun setEnterToSend(v: Boolean) = edit { it[Keys.ENTER_TO_SEND] = v }
+    suspend fun setShowAgentControlShortcut(v: Boolean) = edit { it[Keys.SHOW_AGENT_CONTROL_SHORTCUT] = v }
+    suspend fun setShowImageWorkbenchShortcut(v: Boolean) = edit { it[Keys.SHOW_IMAGE_WORKBENCH_SHORTCUT] = v }
     suspend fun setTemperature(v: Double) = edit { it[Keys.TEMPERATURE] = v }
     suspend fun setUseThinking(v: Boolean) = edit { it[Keys.USE_THINKING] = v }
     suspend fun setReasoningEffort(v: String) = edit { it[Keys.REASONING_EFFORT] = v }
-    suspend fun setTools(network: Boolean, steel: Boolean, code: Boolean) = edit {
-        it[Keys.TOOL_NETWORK] = network
-        it[Keys.TOOL_STEEL] = steel
-        it[Keys.TOOL_CODE] = code
+    suspend fun setWebAccessTools(enabled: Boolean) = edit {
+        it[Keys.TOOL_NETWORK] = enabled
+        it[Keys.TOOL_STEEL] = enabled
     }
+    suspend fun setCodeTool(enabled: Boolean) = edit { it[Keys.TOOL_CODE] = enabled }
     suspend fun setByokMcpServers(servers: List<ByokMcpServer>) = edit {
         it[Keys.BYOK_MCP_SERVERS] = json.encodeToString(servers)
     }
@@ -168,6 +182,10 @@ class SettingsStore(private val context: Context) {
         it[Keys.IMAGE_GEN_ASPECT_RATIO] = aspectRatio.ifBlank { "1:1" }
         it[Keys.IMAGE_GEN_REASONING] = reasoning
         it[Keys.IMAGE_GEN_REASONING_EFFORT] = reasoningEffort.ifBlank { "medium" }
+    }
+    suspend fun setAutoTitle(enabled: Boolean, modelKey: String?) = edit {
+        it[Keys.AUTO_TITLE_ENABLED] = enabled
+        if (modelKey.isNullOrBlank()) it.remove(Keys.TITLE_MODEL_KEY) else it[Keys.TITLE_MODEL_KEY] = modelKey
     }
     suspend fun setCloudSyncEnabled(v: Boolean) = edit { it[Keys.CLOUD_SYNC] = v }
     suspend fun setTracksEnabled(v: Boolean) = edit { it[Keys.TRACKS] = v }
@@ -212,6 +230,8 @@ class SettingsStore(private val context: Context) {
         val DEFAULT_PROVIDER_ID = stringPreferencesKey("default_provider_id")
         val THROTTLE_MS = longPreferencesKey("throttle_ms")
         val ENTER_TO_SEND = booleanPreferencesKey("enter_to_send")
+        val SHOW_AGENT_CONTROL_SHORTCUT = booleanPreferencesKey("show_agent_control_shortcut")
+        val SHOW_IMAGE_WORKBENCH_SHORTCUT = booleanPreferencesKey("show_image_workbench_shortcut")
         val TEMPERATURE = doublePreferencesKey("temperature")
         val USE_THINKING = booleanPreferencesKey("use_thinking")
         val REASONING_EFFORT = stringPreferencesKey("reasoning_effort")
@@ -230,6 +250,8 @@ class SettingsStore(private val context: Context) {
         val IMAGE_GEN_ASPECT_RATIO = stringPreferencesKey("image_gen_aspect_ratio")
         val IMAGE_GEN_REASONING = booleanPreferencesKey("image_gen_reasoning")
         val IMAGE_GEN_REASONING_EFFORT = stringPreferencesKey("image_gen_reasoning_effort")
+        val AUTO_TITLE_ENABLED = booleanPreferencesKey("auto_title_enabled")
+        val TITLE_MODEL_KEY = stringPreferencesKey("title_model_key")
         val CLOUD_SYNC = booleanPreferencesKey("cloud_sync_enabled")
         val TRACKS = booleanPreferencesKey("tracks_enabled")
         val LAST_SYNC_AT = longPreferencesKey("last_sync_at")

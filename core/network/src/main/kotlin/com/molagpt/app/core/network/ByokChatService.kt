@@ -14,6 +14,7 @@ import com.molagpt.app.core.model.StreamEvent
 import com.molagpt.app.core.model.ThinkingConfig
 import com.molagpt.app.core.model.ThinkingKinds
 import com.molagpt.app.core.model.ThinkingParamKind
+import com.molagpt.app.core.model.TitleRequest
 import com.molagpt.app.core.model.ToolStatus
 import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.core.model.WebSearchOptions
@@ -46,7 +47,9 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import java.net.URLEncoder
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -66,6 +69,13 @@ class ByokChatService(
     private val visionProviderResolver: suspend () -> Pair<ByokProvider, String>? = { null },
     /** 聊天内 generate_image 出图参数（来自 BYOK 工具设置的「图像生成」卡）。 */
     private val imageGenConfigProvider: suspend () -> ImageGenerationConfig = { ImageGenerationConfig() },
+    /** 「BYOK 工具 → 会话标题」总开关；关闭时 [generateTitle] 直接回退占位标题，不打任何请求。 */
+    private val autoTitleEnabled: () -> Boolean = { true },
+    /**
+     * 标题模型目标解析：读设置里的 `<providerId>::<modelId>`（**可跨 provider**，通常挂个便宜小模型）。
+     * 返回 null 表示未配置，[generateTitle] 回退到会话自身的 provider/模型。
+     */
+    private val titleProviderResolver: suspend () -> Pair<ByokProvider, String>? = { null },
     /** 复用工作台同一出图路径（按 imageFormat 分派，OpenRouter 走 chat/completions）。 */
     private val byokImageApi: ByokImageApi = ByokImageApi(http),
     /** 把出图字节存为本地文件，返回 Coil 可加载的 url（file://...）；返回 null 表示存盘失败（回退内联 data URI）。 */
@@ -110,6 +120,126 @@ class ByokChatService(
     )
 
     suspend fun fetchFiles(conversationId: String): List<FileInfo> = emptyList()
+
+    // ── 会话标题 ────────────────────────────────────────────────────────────────
+    //
+    // 用**用户自己的 provider** 生成，绝不经 MolaGPT 服务器：BYOK 用户可能压根没登录账号，
+    // 把对话内容送去我们服务器也违背 BYOK 的隐私预期。
+    // 任何失败（未配置/HTTP 错/解析不出/清洗后为空）都静默回退到占位标题——标题是锦上添花，
+    // 绝不能因此打扰用户，更不能把错误报文写成会话名。
+
+    suspend fun generateTitle(request: TitleRequest): String {
+        val fallback = request.fallbackTitle()
+        if (!autoTitleEnabled() || request.messages.isEmpty()) return fallback
+        val (provider, modelId) = resolveTitleTarget(request) ?: return fallback
+        val prompt = buildTitlePrompt(request.messages, Locale.getDefault().displayName)
+        val raw = runCatching {
+            withContext(dispatchers.io) { requestTitle(provider, modelId, prompt) }
+        }.getOrNull()
+        return cleanGeneratedTitle(raw) ?: fallback
+    }
+
+    /** 目标优先级：设置里显式指定的标题模型 → 会话自身的 provider/模型（零配置可用）。 */
+    private suspend fun resolveTitleTarget(request: TitleRequest): Pair<ByokProvider, String>? {
+        titleProviderResolver()?.takeIf { it.first.enabled }?.let { return it }
+        val provider = providerResolver(request.providerId)?.takeIf { it.enabled } ?: return null
+        val modelId = request.modelId.trim().ifBlank { return null }
+        return provider to modelId
+    }
+
+    private fun requestTitle(provider: ByokProvider, modelId: String, prompt: String): String? {
+        val body = buildTitleBody(provider, modelId, prompt)
+        val url = if (provider.type == ByokProviderType.GEMINI) {
+            geminiEndpoint(provider, modelId, stream = false)
+        } else {
+            provider.endpoint(provider.chatPath)
+        }
+        val req = Request.Builder()
+            .url(url)
+            .apply {
+                // Gemini 的 key 走 URL query（见 geminiEndpoint），其余协议走鉴权头。
+                if (provider.type != ByokProviderType.GEMINI) {
+                    provider.applyAuthHeaders { name, value -> header(name, value) }
+                }
+                if (provider.type == ByokProviderType.ANTHROPIC) header("anthropic-version", "2023-06-01")
+            }
+            .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
+            .build()
+        return http.okHttp.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) null else parseTitleResponse(provider.type, http.json, text)
+        }
+    }
+
+    /**
+     * 标题请求体：单条 user 消息、非流式、不带工具、不带角色系统提示（否则猫娘人格会把标题写成「喵～」）。
+     *
+     * **不设 max_tokens**：给推理模型设小上限会让预算全花在思考上、正文返回空。
+     * 控成本靠下面显式关思考，不靠截断。
+     */
+    private fun buildTitleBody(provider: ByokProvider, modelId: String, prompt: String): JsonObject =
+        when (provider.type) {
+            ByokProviderType.OPENAI_COMPAT -> buildJsonObject {
+                put("model", modelId)
+                put("stream", false)
+                put("temperature", TITLE_TEMPERATURE)
+                putJsonArray("messages") {
+                    addJsonObject {
+                        put("role", "user")
+                        put("content", prompt)
+                    }
+                }
+                // DeepSeek / Kimi / Qwen 默认开思考，必须显式发禁用参数（复用聊天同一套 kind 分派）。
+                addOpenAiThinking(provider, modelId, requestedThinking = false, reasoningEffort = "")
+                applyModelCustomBody(provider, modelId)
+            }
+
+            ByokProviderType.OPENAI_RESPONSE -> buildJsonObject {
+                put("model", modelId)
+                put("stream", false)
+                putJsonArray("input") {
+                    addJsonObject {
+                        put("role", "user")
+                        putJsonArray("content") {
+                            addJsonObject {
+                                put("type", "input_text")
+                                put("text", prompt)
+                            }
+                        }
+                    }
+                }
+                applyModelCustomBody(provider, modelId)
+            }
+
+            // max_tokens 是 Anthropic 必填字段；不发 thinking 即为关闭。
+            ByokProviderType.ANTHROPIC -> buildJsonObject {
+                put("model", modelId)
+                put("max_tokens", ANTHROPIC_TITLE_MAX_TOKENS)
+                put("temperature", TITLE_TEMPERATURE)
+                put("stream", false)
+                putJsonArray("messages") {
+                    addJsonObject {
+                        put("role", "user")
+                        put("content", prompt)
+                    }
+                }
+                applyModelCustomBody(provider, modelId)
+            }
+
+            // Gemini 不发 thinkingConfig：thinkingBudget=0 在部分模型（Gemini 3 Pro）上会 400，
+            // 与其冒 400 的险不如让它思考，反正解析时会跳过 thought 分片。
+            ByokProviderType.GEMINI -> buildJsonObject {
+                putJsonArray("contents") {
+                    addJsonObject {
+                        put("role", "user")
+                        putJsonArray("parts") {
+                            addJsonObject { put("text", prompt) }
+                        }
+                    }
+                }
+                applyModelCustomBody(provider, modelId)
+            }
+        }
 
     private fun streamOpenAiCompatible(provider: ByokProvider, request: ChatRequest): Flow<StreamEvent> = flow {
         val baseMessages = buildMessages(provider, request)
@@ -570,7 +700,7 @@ class ByokChatService(
             messages.forEach { add(it) }
         }
         if (includeTools && request.enabledTools.hasByokTools) put("tools", toolDefinitions(provider, request))
-        addOpenAiThinking(provider, request)
+        addOpenAiThinking(provider, request.modelId, request.useThinking, request.reasoningEffort)
         applyModelCustomBody(provider, request.modelId)
     }
 
@@ -595,15 +725,20 @@ class ByokChatService(
         provider.models.firstOrNull { it.id == modelId }?.thinkingConfig?.alwaysOn == true ||
             ThinkingKinds.isKimiK3(modelId)
 
-    /** 向 OpenAI-compat 请求体追加推理参数（top-level 字段，按 kind 分派）。 */
+    /**
+     * 向 OpenAI-compat 请求体追加推理参数（top-level 字段，按 kind 分派）。
+     * 聊天与后台任务（标题生成）共用：后者传 [requestedThinking] = false 拿到显式禁用参数。
+     */
     private fun JsonObjectBuilder.addOpenAiThinking(
         provider: ByokProvider,
-        request: ChatRequest,
+        modelId: String,
+        requestedThinking: Boolean,
+        reasoningEffort: String,
     ) {
-        val kind = effectiveThinkingKind(provider, request.modelId)
+        val kind = effectiveThinkingKind(provider, modelId)
         if (kind == ThinkingParamKind.NONE) return
-        val alwaysOn = isAlwaysOnThinking(provider, request.modelId)
-        val useThinking = request.useThinking || alwaysOn
+        val alwaysOn = isAlwaysOnThinking(provider, modelId)
+        val useThinking = requestedThinking || alwaysOn
         if (!useThinking) {
             // 关闭：仅对需要显式禁用的 kind 发禁用参数，其余省略（更安全）。
             when (kind) {
@@ -614,8 +749,8 @@ class ByokChatService(
             }
             return
         }
-        val effort = request.reasoningEffort.ifBlank {
-            provider.models.firstOrNull { it.id == request.modelId }?.thinkingConfig
+        val effort = reasoningEffort.ifBlank {
+            provider.models.firstOrNull { it.id == modelId }?.thinkingConfig
                 ?.let { ThinkingKinds.resolveDefaultEffort(it) }
                 ?: ThinkingKinds.MEDIUM
         }
@@ -1691,6 +1826,8 @@ class ByokChatService(
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         const val MAX_TOOL_ROUNDS = 3
+        const val TITLE_TEMPERATURE = 0.3
+        const val ANTHROPIC_TITLE_MAX_TOKENS = 2048
     }
 
     private data class ToolCall(

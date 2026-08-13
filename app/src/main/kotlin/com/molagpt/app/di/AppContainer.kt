@@ -38,6 +38,7 @@ import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.core.storage.ByokProviderRepository
 import com.molagpt.app.core.storage.ChatRepository
+import com.molagpt.app.core.storage.ConversationTitler
 import com.molagpt.app.core.storage.CredentialStore
 import com.molagpt.app.core.storage.MolaDatabase
 import com.molagpt.app.core.storage.PersonaRepository
@@ -227,6 +228,20 @@ class AppContainer(
                         ?.let { it to modelId }
                 }
         },
+        autoTitleEnabled = { currentSettings.autoTitleEnabled },
+        titleProviderResolver = {
+            // 「BYOK 工具 → 会话标题」里指定的 `<providerId>::<modelId>`（可跨 provider，通常挂个便宜小模型）；
+            // 未配置时返回 null，由 ByokChatService 回退到会话自身的模型。
+            currentSettings.titleModelKey
+                ?.takeIf { it.contains("::") }
+                ?.let { key ->
+                    val providerId = key.substringBefore("::")
+                    val modelId = key.substringAfter("::")
+                    byokProviderRepository.get(providerId)
+                        ?.takeIf { it.enabled }
+                        ?.let { it to modelId }
+                }
+        },
         imageGenConfigProvider = {
             ImageGenerationConfig(
                 imageSize = currentSettings.imageGenSize,
@@ -307,10 +322,18 @@ class AppContainer(
         scope = applicationScope,
     )
 
+    /** 会话自动标题（首轮答完触发；手动「重新生成标题」也走它）。 */
+    val conversationTitler = ConversationTitler(
+        chatRepository = chatRepository,
+        sessionRepository = sessionRepository,
+        dispatchers = dispatchers,
+    )
+
     val backgroundStreamManager = BackgroundStreamManager(
         chatRepository = chatRepository,
         scope = applicationScope,
         apiUrlResolver = { providerId, modelId -> modelRegistry.apiUrlFor(providerId, modelId) },
+        titleGenerator = { sessionId -> conversationTitler.generate(sessionId) },
     )
 
     /** App 是否在前台（MainActivity onStart/onStop 维护），用于完成通知抑制。 */

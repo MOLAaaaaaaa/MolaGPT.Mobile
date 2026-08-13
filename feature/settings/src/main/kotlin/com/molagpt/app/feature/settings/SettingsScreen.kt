@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.outlined.DesktopWindows
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -138,6 +140,18 @@ fun SettingsScreen(
                 onSelect = viewModel::setThemeMode,
             )
             ToggleRow("Enter 发送（关闭则换行）", s.enterToSend, viewModel::setEnterToSend)
+            ToggleRow(
+                label = "在顶部显示 Agent 控制按钮",
+                checked = s.showAgentControlShortcut,
+                onChange = viewModel::setShowAgentControlShortcut,
+                leadingIcon = Icons.Outlined.DesktopWindows,
+            )
+            ToggleRow(
+                label = "在顶部显示图像工作台按钮",
+                checked = s.showImageWorkbenchShortcut,
+                onChange = viewModel::setShowImageWorkbenchShortcut,
+                leadingIcon = Icons.Filled.Palette,
+            )
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             SectionTitle("远程控制")
@@ -158,6 +172,7 @@ fun SettingsScreen(
         }
     }
 }
+
 /**
  * MolaGPT 账户入口卡：单行，副标题承担登录态显示。
  *

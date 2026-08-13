@@ -4,6 +4,7 @@ import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.StreamEvent
+import com.molagpt.app.core.model.TitleRequest
 import kotlinx.coroutines.flow.Flow
 
 class RoutingChatService(
@@ -38,9 +39,10 @@ class RoutingChatService(
     override suspend fun fetchFiles(conversationId: String): List<FileInfo> =
         molaGpt.fetchFiles(conversationId)
 
-    override suspend fun generateTitle(
-        sessionId: String,
-        firstUserMessage: String,
-        assistantMessage: String,
-    ): String = molaGpt.generateTitle(sessionId, firstUserMessage, assistantMessage)
+    override suspend fun generateTitle(request: TitleRequest): String =
+        if (request.providerKind == ProviderKind.BYOK) {
+            byok.generateTitle(request)
+        } else {
+            molaGpt.generateTitle(request)
+        }
 }

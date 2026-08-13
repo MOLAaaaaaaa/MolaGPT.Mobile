@@ -617,6 +617,8 @@ private fun ChatHost(
                 ChatScreen(
                     viewModel = chatVm,
                     enterToSend = settings.enterToSend,
+                    showAgentControlShortcut = settings.showAgentControlShortcut,
+                    showImageWorkbenchShortcut = settings.showImageWorkbenchShortcut,
                     onOpenDrawer = { drawerOpen = true },
                     onOpenSettings = onOpenSettings,
                     onOpenByokModelSettings = onOpenByokModelSettings,

@@ -23,6 +23,7 @@ import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.SystemPromptComposer
 import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.core.model.titleFallback
 import com.molagpt.app.core.network.resolveOpeningModelSelection
 import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.core.storage.ChatRepository
@@ -37,7 +38,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -410,6 +410,10 @@ class ChatViewModel(
         _enabledTools.value = _enabledTools.value.copy(network = enabled)
     }
 
+    fun setWebAccessTools(enabled: Boolean) {
+        _enabledTools.value = _enabledTools.value.copy(network = enabled, steelBrowser = enabled)
+    }
+
     fun setSteelTool(enabled: Boolean) {
         _enabledTools.value = _enabledTools.value.copy(steelBrowser = enabled)
     }
@@ -633,7 +637,7 @@ class ChatViewModel(
             val titleSeed = content.ifBlank { _pendingAttachments.value.firstOrNull()?.name ?: "附件" }
             sessionRepository.ensure(
                 sessionId = sessionId,
-                title = fallbackTitle(titleSeed),
+                title = titleFallback(titleSeed),
                 model = modelId,
                 providerId = selectedModel.providerId,
                 providerKind = selectedModel.providerKind,
@@ -693,7 +697,7 @@ class ChatViewModel(
             startStream(
                 modelId = modelId,
                 latestUserMessage = userMsg.copy(attachments = requestReady),
-                titleUserMessage = titleSeed.takeIf { shouldGenerateTitle },
+                generateTitleOnFinish = shouldGenerateTitle,
             )
         }
     }
@@ -926,7 +930,8 @@ class ChatViewModel(
     private fun startStream(
         modelId: String,
         latestUserMessage: ChatMessage? = null,
-        titleUserMessage: String? = null,
+        /** 仅首轮为 true：本轮答完后由后台流管理器起标题（重试/重生成不改已有标题）。 */
+        generateTitleOnFinish: Boolean = false,
         priorAttempts: List<RetryAttempt> = emptyList(),
         historyOverride: List<ChatMessage>? = null,
     ) {
@@ -1005,8 +1010,7 @@ class ChatViewModel(
                 reasoningEffort = effectiveEffort,
                 enabledTools = requestTools,
             )
-            backgroundStreams.start(request, assistantId, throttleMs, priorAttempts)
-            observeTitleAfterFirstTurn(assistantId, titleUserMessage)
+            backgroundStreams.start(request, assistantId, throttleMs, priorAttempts, generateTitleOnFinish)
             // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，
             // Room 落库的同一条消息不会与之重复显示，也避免“清空→回灌”的瞬时闪烁。
         }
@@ -1051,7 +1055,17 @@ class ChatViewModel(
     private fun resolveRequestTools(providerModel: ProviderModel?): EnabledTools {
         val enabled = _enabledTools.value
         return when (_conversationProviderKind.value) {
-            ProviderKind.MOLAGPT -> enabled.copy(mcp = false, vision = false, imageGeneration = false)
+            ProviderKind.MOLAGPT -> {
+                // 合并开关上线前两项可独立保存；任一旧开关开启，都迁移为完整的联网能力。
+                val webAccess = enabled.network || enabled.steelBrowser
+                enabled.copy(
+                    network = webAccess,
+                    steelBrowser = webAccess,
+                    mcp = false,
+                    vision = false,
+                    imageGeneration = false,
+                )
+            }
             ProviderKind.BYOK -> {
                 val canTool = providerModel?.supportsToolCalling == true
                 val settings = settingsFlow.value ?: AppSettings()
@@ -1066,52 +1080,6 @@ class ChatViewModel(
             }
         }
     }
-
-    private fun observeTitleAfterFirstTurn(assistantId: String, firstUserMessage: String?) {
-        if (firstUserMessage == null) return
-        viewModelScope.launch {
-            val assistant = backgroundStreams.observe(sessionId)
-                .map { it.inFlight }
-                .filter { it != null && it.messageId == assistantId && it.status == MessageStatus.COMPLETE }
-                .first()
-                ?: return@launch
-            generateTitleAfterFirstTurn(firstUserMessage, assistant)
-        }
-    }
-
-    private fun generateTitleAfterFirstTurn(firstUserMessage: String, assistantMessage: ChatMessage) {
-        // BYOK 没有 MolaGPT 的标题生成端点：用首条用户消息派生标题（会话行在新建时占位为「新对话」，这里改名）。
-        if (_conversationProviderKind.value == ProviderKind.BYOK) {
-            val title = fallbackTitle(firstUserMessage)
-            if (title.isNotBlank()) {
-                viewModelScope.launch { sessionRepository.rename(sessionId, title) }
-            }
-            return
-        }
-        val assistantText = assistantMessage.rawText
-            ?: assistantMessage.fragments
-                .filterIsInstance<com.molagpt.app.core.model.MessageFragment.Text>()
-                .joinToString("\n") { it.markdown }
-                .takeIf { it.isNotBlank() }
-            ?: return
-        if (assistantText.isBlank()) return
-        viewModelScope.launch {
-            runCatching {
-                withContext(dispatchers.io) {
-                    chatRepository.generateTitle(sessionId, firstUserMessage, assistantText)
-                }
-            }.onSuccess { title ->
-                if (title.isNotBlank()) sessionRepository.rename(sessionId, title)
-            }
-        }
-    }
-
-    private fun fallbackTitle(content: String): String =
-        content.replace('\r', ' ')
-            .replace('\n', ' ')
-            .trim()
-            .let { if (it.length <= 25) it else it.take(25).trim() + "..." }
-            .ifBlank { "无标题对话" }
 
     private suspend fun restoreConversationModel(): Boolean {
         val conversation = sessionRepository.get(sessionId) ?: return false

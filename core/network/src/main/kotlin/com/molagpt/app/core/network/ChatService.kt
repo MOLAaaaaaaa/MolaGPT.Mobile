@@ -3,6 +3,7 @@ package com.molagpt.app.core.network
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.StreamEvent
+import com.molagpt.app.core.model.TitleRequest
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -35,8 +36,11 @@ interface ChatService {
     /** 拉取会话已上传文件列表。 */
     suspend fun fetchFiles(conversationId: String): List<FileInfo>
 
-    /** 生成会话标题（真实：generateTitle.php）。 */
-    suspend fun generateTitle(sessionId: String, firstUserMessage: String, assistantMessage: String): String
+    /**
+     * 生成会话标题。按 [TitleRequest.providerKind] 分派：
+     * MolaGPT 走 generateTitle.php；BYOK 走用户自己的 provider（见 [ByokChatService.generateTitle]）。
+     */
+    suspend fun generateTitle(request: TitleRequest): String
 }
 
 /** stream_cache 会话状态快照（check_stream_status.php 的单条结果）。 */

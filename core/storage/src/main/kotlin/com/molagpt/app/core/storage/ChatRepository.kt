@@ -10,6 +10,7 @@ import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
+import com.molagpt.app.core.model.TitleRequest
 import com.molagpt.app.core.network.ChatService
 import com.molagpt.app.core.network.ChatStreamController
 import com.molagpt.app.core.network.webTypingPaced
@@ -52,8 +53,11 @@ class ChatRepository(
     suspend fun messageCount(sessionId: String): Int =
         withContext(dispatchers.io) { messageDao.count(sessionId) }
 
-    suspend fun generateTitle(sessionId: String, firstUserMessage: String, assistantMessage: String): String =
-        chatService.generateTitle(sessionId, firstUserMessage, assistantMessage)
+    suspend fun generateTitle(request: TitleRequest): String = chatService.generateTitle(request)
+
+    /** 一次性取整会话消息（标题生成取尾窗口用）。 */
+    suspend fun allMessages(sessionId: String): List<ChatMessage> =
+        withContext(dispatchers.io) { messageDao.getAllBySession(sessionId).map { it.toDomain() } }
 
     /** 图片上传转发（基础版）：直接转 [ChatService.uploadFile]，结果用于待发送附件条与消息附件。 */
     suspend fun uploadImage(

@@ -42,16 +42,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.AccountStatus
+import com.molagpt.app.core.model.CreditsInfo
 import com.molagpt.app.core.model.QuotaItem
 import com.molagpt.app.core.render.shimmer
 
 /**
  * MolaGPT 账户页（二级页）。
  *
- * 本 App 的发展方向是 **BYOK 优先**（对齐 CherryStudio / RikkaHub），账户体系退居幕后：
+ * 本 App 的发展方向是 **BYOK 优先**，账户体系退居幕后：
  * 设置根页只保留一行入口，账户域的全部内容集中到这里——账户信息、配额、云同步、
  * 个性化记忆、MolaGPT 账户工具。
  *
@@ -165,10 +167,10 @@ fun MolaAccountScreen(
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             SectionTitle("账户工具")
             MolaGptToolsSection(
-                network = s.toolNetwork,
-                steel = s.toolSteel,
+                webAccess = s.toolNetwork || s.toolSteel,
                 code = s.toolCode,
-                onChange = viewModel::setTools,
+                onWebAccessChange = viewModel::setWebAccessTools,
+                onCodeChange = viewModel::setCodeTool,
             )
         }
     }
@@ -278,12 +280,15 @@ private fun AccountHero(
 
 @Composable
 private fun QuotaSection(status: AccountStatus?, loading: Boolean, onRefresh: () -> Unit) {
+    val credits = status?.credits
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(
             text = when {
                 status == null && loading -> "正在获取配额…"
                 status == null -> "未获取到配额"
                 status.quotas.isEmpty() -> "暂无配额信息"
+                // 档位与结算口径由 CreditsSummary 给，这里不重复。
+                credits != null -> "额度用量"
                 else -> "额度每日重置"
             },
             style = MaterialTheme.typography.bodySmall,
@@ -309,28 +314,94 @@ private fun QuotaSection(status: AccountStatus?, loading: Boolean, onRefresh: ()
             )
         }
     }
-    status?.quotas?.forEach { q -> QuotaRow(q) }
+    if (credits != null) {
+        CreditsSummary(credits)
+    }
+    status?.quotas?.forEach { q -> QuotaRow(q, credits) }
+    if (credits != null && status.quotas.isNotEmpty()) {
+        Text(
+            text = "次数按平均对话长度估算，实际随对话长短浮动。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+    }
+}
+
+/**
+ * 点数模式的一级信息：只回答「我还剩多少」，且**只用百分比**——点数余额本身不露出，
+ * 与 Web 面板一致。逐模型的进度条在这里没有意义：只有一份共享额度，能变的只是花得快慢。
+ */
+@Composable
+private fun CreditsSummary(credits: CreditsInfo) {
+    val tone = if (credits.exhausted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("额度剩余", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(
+                text = "${credits.remainingPercent}%",
+                style = MaterialTheme.typography.titleMedium,
+                color = tone,
+            )
+        }
+        LinearProgressIndicator(
+            progress = { credits.usedFraction },
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            color = tone,
+        )
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            Text(
+                text = credits.tierLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = credits.windowLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (credits.exhausted) {
+            Text(
+                text = "额度已耗尽，${credits.recoveryLabel}。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+    }
 }
 
 @Composable
-private fun QuotaRow(q: QuotaItem) {
+private fun QuotaRow(q: QuotaItem, credits: CreditsInfo?) {
+    // 点数模式下逐模型上限全是 -1，只能给「按当前余额还能用几次」。
+    val uses = credits?.estimatedUses(q.creditMultiplier)
     val valueText = when {
-        q.used != null && q.limit != null -> "${q.used} / ${q.limit}"
-        q.used != null && q.unlimited -> "${q.used} / 无限"
+        credits == null && q.used != null && q.limit != null -> "${q.used} / ${q.limit}"
+        credits == null && q.used != null && q.unlimited -> "${q.used} / 无限"
+        credits != null && q.creditMultiplier == null -> "暂不可用"
+        // 不写「不限次数」：倍率归零可能只是免费额度池还没烧完，池子一满就跳回原价。
+        credits != null && uses == Int.MAX_VALUE -> "不消耗额度"
+        credits != null && uses != null && uses <= 0 -> "额度不足"
+        credits != null && uses != null -> "约 $uses 次"
         !q.available -> "不可用"
         q.unlimited -> "无限"
         else -> "剩余 ${q.remaining}"
     }
+    val isBad = !q.available || (credits != null && (q.creditMultiplier == null || (uses != null && uses <= 0)))
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(q.displayName, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            CreditSymbol(q.creditSymbol)
             Text(
                 text = valueText,
                 style = MaterialTheme.typography.bodySmall,
-                color = if (!q.available) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (isBad) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 8.dp),
             )
         }
-        // 仅在上限/已用均已知时画进度条。
+        // 仅在上限/已用均已知时画进度条（旧口径）；点数模式下没有逐模型分母。
         q.usedFraction?.let { f ->
             LinearProgressIndicator(
                 progress = { f },
@@ -339,6 +410,31 @@ private fun QuotaRow(q: QuotaItem) {
             )
         }
     }
+}
+
+/** 档位符号：`""`=限免，`"$"`..`"$$$$"`，null=未定价（不画）。分级由服务端决定。 */
+@Composable
+private fun CreditSymbol(symbol: String?) {
+    if (symbol == null) return
+    if (symbol.isEmpty()) {
+        Text(
+            // 「限免」而非「免费」：免费额度池只在池子没烧完时把倍率压到 0。
+            text = "限免",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.tertiary,
+        )
+        return
+    }
+    Text(
+        text = symbol,
+        style = MaterialTheme.typography.labelMedium,
+        fontFamily = FontFamily.Monospace,
+        color = when (symbol.length) {
+            1 -> MaterialTheme.colorScheme.tertiary
+            2 -> MaterialTheme.colorScheme.onSurfaceVariant
+            else -> MaterialTheme.colorScheme.error
+        },
+    )
 }
 
 @Composable
@@ -409,15 +505,15 @@ private fun TracksCard(
 }
 
 /**
- * MolaGPT 账户工具卡片：联网搜索 / 网页拉取 / 代码执行——由 MolaGPT 服务端执行，
+ * MolaGPT 账户工具卡片：联网搜索（同时包含网页读取）/ 代码执行——由 MolaGPT 服务端执行，
  * 仅对 MolaGPT 账户模型生效。BYOK 的对应能力在设置页「对话工具 › BYOK 自定义工具」。
  */
 @Composable
 private fun MolaGptToolsSection(
-    network: Boolean,
-    steel: Boolean,
+    webAccess: Boolean,
     code: Boolean,
-    onChange: (network: Boolean, steel: Boolean, code: Boolean) -> Unit,
+    onWebAccessChange: (Boolean) -> Unit,
+    onCodeChange: (Boolean) -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
@@ -437,9 +533,8 @@ private fun MolaGptToolsSection(
                     )
                 }
             }
-            ToggleRow("联网搜索", network, onChange = { onChange(it, steel, code) })
-            ToggleRow("网页拉取", steel, onChange = { onChange(network, it, code) })
-            ToggleRow("代码执行", code, onChange = { onChange(network, steel, it) })
+            ToggleRow("联网搜索", webAccess, onChange = onWebAccessChange)
+            ToggleRow("代码执行", code, onChange = onCodeChange)
         }
     }
 }

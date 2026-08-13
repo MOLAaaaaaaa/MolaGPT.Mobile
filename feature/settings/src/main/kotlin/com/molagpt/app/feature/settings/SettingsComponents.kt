@@ -24,6 +24,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 
 /**
@@ -42,7 +43,7 @@ internal fun SectionTitle(text: String) {
     )
 }
 
-/** 开关行：标题 + 可选副标题 + Switch（统一白/暗白圆点配色）。 */
+/** 开关行：可选图标 + 标题 + 可选副标题 + Switch（统一白/暗白圆点配色）。 */
 @Composable
 internal fun ToggleRow(
     label: String,
@@ -50,11 +51,21 @@ internal fun ToggleRow(
     onChange: (Boolean) -> Unit,
     enabled: Boolean = true,
     subtitle: String? = null,
+    leadingIcon: ImageVector? = null,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        leadingIcon?.let {
+            Icon(
+                imageVector = it,
+                contentDescription = null,
+                tint = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant
+                       else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f),
+                modifier = Modifier.padding(end = 12.dp).size(22.dp),
+            )
+        }
         androidx.compose.foundation.layout.Column(modifier = Modifier.weight(1f)) {
             Text(
                 label,
