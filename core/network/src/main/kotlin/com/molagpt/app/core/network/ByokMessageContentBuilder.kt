@@ -4,6 +4,7 @@ import com.molagpt.app.core.model.Attachment
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.MessageFragment
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -13,7 +14,8 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * 把 [ChatMessage] 转成 Anthropic / Gemini 原生内容格式。
  * 当 [replaceImagesWithText] 为 true 时，图片附件替换为 `[图片#N]` 文本占位符，
- * 与 [OpenAiMessageContentBuilder] 保持同一全局序号规则，供 `view_image` 工具索引。
+ * 与 [OpenAiMessageContentBuilder] 保持同一全局序号规则（都取自 [AttachmentParts]），
+ * 供 `view_image` 工具索引。
  */
 internal object ByokMessageContentBuilder {
     fun anthropicContent(
@@ -28,35 +30,52 @@ internal object ByokMessageContentBuilder {
                 put("text", text)
             }
         }
-        message.attachments
-            .filter { it.isDocumentInput && !it.remoteUrl.isNullOrBlank() }
-            .forEach { attachment ->
-                if (attachment.isImage) {
-                    if (replaceImagesWithText) {
-                        val n = imageOrdinal.incrementAndGet()
-                        val label = imagePlaceholderLabel(n, attachment.name)
-                        addJsonObject {
-                            put("type", "text")
-                            put("text", label)
-                        }
-                        return@forEach
-                    }
-                }
-                val data = parseDataUrl(attachment.remoteUrl!!)
+        AttachmentParts.orderedImages(message).forEach { attachment ->
+            val n = imageOrdinal.incrementAndGet()
+            if (replaceImagesWithText || attachment.unavailable) {
                 addJsonObject {
-                    put("type", if (attachment.isImage) "image" else "document")
-                    put("source", buildJsonObject {
-                        if (data != null) {
-                            put("type", "base64")
-                            put("media_type", data.mimeType.ifBlank { attachment.mimeType })
-                            put("data", data.base64)
-                        } else {
-                            put("type", "url")
-                            put("url", attachment.remoteUrl!!)
-                        }
-                    })
+                    put("type", "text")
+                    put("text", AttachmentParts.imageLabel(n, attachment))
                 }
+                return@forEach
             }
+            val data = parseDataUrl(attachment.remoteUrl!!)
+            addJsonObject {
+                put("type", "image")
+                put("source", buildJsonObject {
+                    if (data != null) {
+                        put("type", "base64")
+                        put("media_type", data.mimeType.ifBlank { attachment.mimeType })
+                        put("data", data.base64)
+                    } else {
+                        put("type", "url")
+                        put("url", attachment.remoteUrl!!)
+                    }
+                })
+            }
+        }
+        AttachmentParts.unavailableDocuments(message).forEach { attachment ->
+            addJsonObject {
+                put("type", "text")
+                put("text", AttachmentParts.unavailableLabel(attachment))
+            }
+        }
+        AttachmentParts.binaryDocuments(message).forEach { attachment ->
+            val data = parseDataUrl(attachment.remoteUrl!!)
+            addJsonObject {
+                put("type", "document")
+                put("source", buildJsonObject {
+                    if (data != null) {
+                        put("type", "base64")
+                        put("media_type", data.mimeType.ifBlank { attachment.mimeType })
+                        put("data", data.base64)
+                    } else {
+                        put("type", "url")
+                        put("url", attachment.remoteUrl!!)
+                    }
+                })
+            }
+        }
     }
 
     fun geminiParts(
@@ -66,31 +85,35 @@ internal object ByokMessageContentBuilder {
     ): JsonArray = buildJsonArray {
         val text = message.sendableText()
         if (text.isNotBlank()) addJsonObject { put("text", text) }
-        message.attachments
-            .filter { it.isDocumentInput && !it.remoteUrl.isNullOrBlank() }
-            .forEach { attachment ->
-                if (attachment.isImage) {
-                    if (replaceImagesWithText) {
-                        val n = imageOrdinal.incrementAndGet()
-                        addJsonObject { put("text", imagePlaceholderLabel(n, attachment.name)) }
-                        return@forEach
-                    }
-                }
-                val data = parseDataUrl(attachment.remoteUrl!!)
-                addJsonObject {
-                    if (data != null) {
-                        put("inlineData", buildJsonObject {
-                            put("mimeType", data.mimeType.ifBlank { attachment.mimeType })
-                            put("data", data.base64)
-                        })
-                    } else {
-                        put("fileData", buildJsonObject {
-                            put("mimeType", attachment.mimeType)
-                            put("fileUri", attachment.remoteUrl!!)
-                        })
-                    }
-                }
+        AttachmentParts.orderedImages(message).forEach { attachment ->
+            val n = imageOrdinal.incrementAndGet()
+            if (replaceImagesWithText || attachment.unavailable) {
+                addJsonObject { put("text", AttachmentParts.imageLabel(n, attachment)) }
+            } else {
+                addJsonObject { putMediaPart(attachment) }
             }
+        }
+        AttachmentParts.unavailableDocuments(message).forEach { attachment ->
+            addJsonObject { put("text", AttachmentParts.unavailableLabel(attachment)) }
+        }
+        AttachmentParts.binaryDocuments(message).forEach { attachment ->
+            addJsonObject { putMediaPart(attachment) }
+        }
+    }
+
+    private fun JsonObjectBuilder.putMediaPart(attachment: Attachment) {
+        val data = parseDataUrl(attachment.remoteUrl!!)
+        if (data != null) {
+            put("inlineData", buildJsonObject {
+                put("mimeType", data.mimeType.ifBlank { attachment.mimeType })
+                put("data", data.base64)
+            })
+        } else {
+            put("fileData", buildJsonObject {
+                put("mimeType", attachment.mimeType)
+                put("fileUri", attachment.remoteUrl!!)
+            })
+        }
     }
 
     private fun ChatMessage.sendableText(): String {
@@ -100,17 +123,6 @@ internal object ByokMessageContentBuilder {
             (fragment as? MessageFragment.Text)?.markdown.orEmpty()
         }
     }
-
-    private val Attachment.isDocumentInput: Boolean
-        get() = isImage || mimeType.contains("pdf", ignoreCase = true)
-
-    private val Attachment.isImage: Boolean
-        get() = mimeType.startsWith("image/")
-
-    private fun imagePlaceholderLabel(ordinal: Int, fileName: String?): String =
-        fileName?.takeIf { it.isNotBlank() }
-            ?.let { "[图片#$ordinal: $it]" }
-            ?: "[图片#$ordinal]"
 
     private fun parseDataUrl(value: String): DataUrl? {
         if (!value.startsWith("data:", ignoreCase = true)) return null

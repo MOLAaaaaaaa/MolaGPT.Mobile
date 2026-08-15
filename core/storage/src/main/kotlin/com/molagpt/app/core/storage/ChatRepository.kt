@@ -67,6 +67,20 @@ class ChatRepository(
         conversationId: String,
     ): FileInfo = chatService.uploadFile(bytes, fileName, mimeType, conversationId)
 
+    /**
+     * 当前仍被消息引用的本地附件相对路径。供启动时回收孤儿文件——
+     * 会话删除、编辑截断都会留下没人引用的托管副本，不清理会一直占着磁盘。
+     */
+    suspend fun referencedAttachmentPaths(): Set<String> = withContext(dispatchers.io) {
+        messageDao.allMetadataWithAttachments()
+            .asSequence()
+            .flatMap { metadataJson ->
+                MessageJson.decodeAttachments(MessageJson.decodeMeta(metadataJson)["attachments"]).asSequence()
+            }
+            .mapNotNull { it.localPath?.takeIf(String::isNotBlank) }
+            .toSet()
+    }
+
     /** regenerate / edit 的本地裁剪：删掉指定时间点及之后的消息，随后由 ViewModel 重新发起。 */
     suspend fun deleteMessagesFrom(sessionId: String, fromCreatedAt: Long) =
         withContext(dispatchers.io) {

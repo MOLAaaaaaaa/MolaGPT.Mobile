@@ -2,12 +2,12 @@ package com.molagpt.app.feature.chat
 
 import android.content.Context
 import android.net.Uri
-import android.provider.OpenableColumns
-import android.util.Base64
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.Attachment
+import com.molagpt.app.core.model.AttachmentKind
+import com.molagpt.app.core.model.AttachmentMime
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.EnabledTools
@@ -32,6 +32,9 @@ import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.RetryAttempts
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.core.storage.SyncEngine
+import com.molagpt.app.feature.file.AttachmentEncoder
+import com.molagpt.app.feature.file.AttachmentStore
+import com.molagpt.app.feature.file.DocumentTextExtractor
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -82,6 +85,10 @@ class ChatViewModel(
 ) : ViewModel() {
 
     private val conversationId = Ids.conversationIdForSession(sessionId)
+
+    /** BYOK 附件的本地托管目录与文本抽取器。BYOK 不经服务端，附件字节只在本机流转。 */
+    private val attachmentStore = AttachmentStore(appContext)
+    private val documentExtractor = DocumentTextExtractor(attachmentStore)
     private val initialByokChat = modelsFlow.value.filter {
         it.providerKind == ProviderKind.BYOK && it.supportsChat
     }
@@ -444,28 +451,38 @@ class ChatViewModel(
         dismissReasoningMissHint()
     }
 
-    /** 选取附件后即时处理：MolaGPT 走上传，BYOK 只在发送前临时转 data URL，落库永远只存轻量 URI。 */
+    /**
+     * 选取附件后即时处理：MolaGPT 走服务端上传；BYOK **立即把文件复制进本地托管目录**，
+     * 之后一切读取都基于这份副本。
+     *
+     * 之前 BYOK 只存 `content://` URI 就算完成，重开 App 后 SAF 临时授权已失效，
+     * 历史里的图片/PDF 会静默从请求中消失（见 [AttachmentStore] 的说明）。
+     */
     fun attachFile(uri: Uri) {
         val tempId = Ids.newFragmentId()
         viewModelScope.launch {
-            val meta = withContext(dispatchers.io) { readFile(uri) }
+            val meta = withContext(dispatchers.io) { attachmentStore.probe(uri) }
             if (meta == null) {
                 _error.value = "无法读取所选附件"
                 return@launch
             }
-            val (bytes, name, mime) = meta
+            val (name, mime, size) = meta
             val isByokAttachment = _conversationProviderKind.value == ProviderKind.BYOK
-            if (isByokAttachment && !isByokSupportedAttachmentMime(mime)) {
+            val rejectReason = when {
+                !isByokAttachment -> null
+                else -> AttachmentMime.unsupportedReason(mime, name)
+            }
+            if (rejectReason != null) {
                 _pendingAttachments.update {
                     it + FileInfo(
                         id = tempId,
                         name = name,
                         mimeType = mime,
-                        sizeBytes = bytes.size.toLong(),
+                        sizeBytes = size.takeIf { bytes -> bytes >= 0 },
                         uploadStatus = UploadStatus.FAILED,
                     )
                 }
-                _error.value = "BYOK 支持图片、文本和 PDF 附件"
+                _error.value = rejectReason
                 return@launch
             }
             _pendingAttachments.update {
@@ -473,17 +490,29 @@ class ChatViewModel(
                     id = tempId,
                     name = name,
                     mimeType = mime,
-                    sizeBytes = bytes.size.toLong(),
+                    sizeBytes = size.takeIf { bytes -> bytes >= 0 },
                     uploadStatus = UploadStatus.UPLOADING,
                 )
             }
             if (isByokAttachment) {
+                val relativePath = withContext(dispatchers.io) { attachmentStore.save(uri, meta) }
+                if (relativePath == null) {
+                    _pendingAttachments.update { list ->
+                        list.map { if (it.id == tempId) it.copy(uploadStatus = UploadStatus.FAILED) else it }
+                    }
+                    _error.value = if (size > AttachmentStore.MAX_FILE_BYTES) {
+                        "附件超过 ${AttachmentStore.MAX_FILE_BYTES / 1024 / 1024}MB 上限"
+                    } else {
+                        "附件保存失败，请重试"
+                    }
+                    return@launch
+                }
                 _pendingAttachments.update { list ->
                     list.map {
                         if (it.id == tempId) {
                             it.copy(
-                                url = uri.toString(),
-                                localPath = uri.toString(),
+                                url = AttachmentStore.displayUrl(appContext, relativePath),
+                                localPath = relativePath,
                                 uploadStatus = UploadStatus.UPLOADED,
                             )
                         } else {
@@ -491,6 +520,16 @@ class ChatViewModel(
                         }
                     }
                 }
+                return@launch
+            }
+            val bytes = withContext(dispatchers.io) {
+                runCatching { appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+            }
+            if (bytes == null) {
+                _pendingAttachments.update { list ->
+                    list.map { if (it.id == tempId) it.copy(uploadStatus = UploadStatus.FAILED) else it }
+                }
+                _error.value = "无法读取所选附件"
                 return@launch
             }
             runCatching { chatRepository.uploadImage(bytes, name, mime, conversationId) }
@@ -526,38 +565,6 @@ class ChatViewModel(
         _pendingAttachments.update { list -> list.filterNot { it.id == id } }
     }
 
-    private fun readFile(uri: Uri): Triple<ByteArray, String, String>? = runCatching {
-        val resolver = appContext.contentResolver
-        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return@runCatching null
-        val mime = resolver.getType(uri) ?: "application/octet-stream"
-        val name = queryDisplayName(uri) ?: "attachment_${System.currentTimeMillis()}.${mimeExt(mime)}"
-        Triple(bytes, name, mime)
-    }.getOrNull()
-
-    private fun queryDisplayName(uri: Uri): String? = runCatching {
-        appContext.contentResolver
-            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { c ->
-                if (c.moveToFirst()) {
-                    val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0) c.getString(idx) else null
-                } else {
-                    null
-                }
-            }
-    }.getOrNull()
-
-    private fun mimeExt(mime: String): String = when {
-        mime.contains("png") -> "png"
-        mime.contains("webp") -> "webp"
-        mime.contains("gif") -> "gif"
-        mime.contains("json") -> "json"
-        mime.contains("markdown") -> "md"
-        mime.startsWith("text/") -> "txt"
-        mime.contains("pdf") -> "pdf"
-        else -> "bin"
-    }
-
     /** 编辑用户消息：文案填入 Composer，附件回填待发送区；发送时截断该条及之后后重发。 */
     fun startEditUser(messageId: String) {
         if (backgroundStreams.isStreaming(sessionId)) return
@@ -576,14 +583,18 @@ class ChatViewModel(
             revision = System.currentTimeMillis(),
         )
         _pendingAttachments.value = msg.attachments.map { attachment ->
+            val missing = attachment.localPath != null && !attachmentStore.exists(attachment.localPath)
             FileInfo(
                 id = attachment.id,
                 name = attachment.name,
                 mimeType = attachment.mimeType,
                 sizeBytes = attachment.sizeBytes,
-                url = attachment.thumbnailUrl ?: attachment.remoteUrl,
+                url = AttachmentStore.displayUrl(appContext, attachment.localPath)
+                    ?: attachment.thumbnailUrl
+                    ?: attachment.remoteUrl,
+                localPath = attachment.localPath,
                 sandboxPath = attachment.sandboxPath,
-                uploadStatus = UploadStatus.UPLOADED,
+                uploadStatus = if (missing || attachment.unavailable) UploadStatus.MISSING else UploadStatus.UPLOADED,
             )
         }
         _error.value = null
@@ -595,11 +606,14 @@ class ChatViewModel(
         _pendingAttachments.value = emptyList()
     }
 
+    /** 已就绪可发送：MolaGPT 看服务端 url/sandboxPath，BYOK 看本地托管副本。 */
+    private val FileInfo.isReadyToSend: Boolean
+        get() = uploadStatus == UploadStatus.UPLOADED &&
+            (!url.isNullOrBlank() || !sandboxPath.isNullOrBlank() || !localPath.isNullOrBlank())
+
     fun send(text: String) {
         val content = text.trim()
-        val hasReadyAttachment = _pendingAttachments.value.any {
-            it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank())
-        }
+        val hasReadyAttachment = _pendingAttachments.value.any { it.isReadyToSend }
         if ((content.isEmpty() && !hasReadyAttachment) || backgroundStreams.isStreaming(sessionId)) return
         val visibleModels = modelsFlow.value.filter { it.providerKind == _conversationProviderKind.value && it.supportsChat }
         val selectedModel = selectedModelFor(_selectedModel.value, _conversationProviderId.value, visibleModels)
@@ -610,9 +624,7 @@ class ChatViewModel(
 
         // 非视觉 BYOK 模型上传图片时，必须开启外挂视觉工具，否则上游 API 会拒收 image_url。
         val hasImageAttachment = _pendingAttachments.value.any {
-            it.uploadStatus == UploadStatus.UPLOADED &&
-                it.mimeType?.startsWith("image/") == true &&
-                (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank())
+            it.isReadyToSend && AttachmentMime.isImage(AttachmentMime.resolve(it.mimeType, it.name))
         }
         if (selectedModel.providerKind == ProviderKind.BYOK &&
             hasImageAttachment &&
@@ -648,26 +660,29 @@ class ChatViewModel(
             _conversationProviderKind.value = selectedModel.providerKind
             val now = System.currentTimeMillis()
             val storedReady = _pendingAttachments.value
-                .filter { it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank()) }
-                .map {
+                .filter { it.isReadyToSend }
+                .map { file ->
+                    val managed = !file.localPath.isNullOrBlank()
                     Attachment(
-                        id = it.id,
-                        name = it.name,
-                        mimeType = it.mimeType ?: "image/*",
-                        remoteUrl = it.url,
-                        sandboxPath = it.sandboxPath,
-                        label = attachmentLabel(it),
-                        thumbnailUrl = it.url,
-                        sizeBytes = it.sizeBytes,
+                        id = file.id,
+                        name = file.name,
+                        mimeType = AttachmentMime.resolve(file.mimeType, file.name),
+                        localPath = file.localPath,
+                        // 托管附件不落 remoteUrl/thumbnailUrl：显示用的 file:// 是绝对路径，跨安装即失效。
+                        remoteUrl = file.url.takeUnless { managed },
+                        thumbnailUrl = file.url.takeUnless { managed },
+                        sandboxPath = file.sandboxPath,
+                        label = AttachmentMime.label(file.mimeType, file.name),
+                        sizeBytes = file.sizeBytes,
                     )
                 }
-            val requestReady = if (selectedModel.providerKind == ProviderKind.BYOK) {
-                withContext(dispatchers.io) { hydrateByokAttachments(storedReady) }
+            val prepared = if (selectedModel.providerKind == ProviderKind.BYOK) {
+                withContext(dispatchers.io) { prepareByokAttachments(storedReady) }
             } else {
-                storedReady
+                PreparedAttachments(storedReady, buildSandboxHint(storedReady))
             }
-            val attachmentHint = buildAttachmentHint(requestReady, selectedModel.providerKind)
-            val sendContent = attachmentHint?.let { appendHiddenSystemHint(content, it) } ?: content
+            val requestReady = prepared.attachments
+            val sendContent = prepared.hint?.let { appendHiddenSystemHint(content, it) } ?: content
             val messageMetadata = buildMap {
                 if (sendContent != content) {
                     put("sendContent", sendContent)
@@ -709,10 +724,8 @@ class ChatViewModel(
             "$content\n\n✝[系统提示: $hint]✝"
         }
 
-    private fun buildAttachmentHint(attachments: List<Attachment>, providerKind: ProviderKind): String? {
-        if (providerKind == ProviderKind.BYOK) return buildByokAttachmentHint(attachments)
-        return buildSandboxHint(attachments)
-    }
+    /** 一次 IO 准备的产物：请求用的附件副本 + 要注入的提示词。 */
+    private data class PreparedAttachments(val attachments: List<Attachment>, val hint: String?)
 
     private fun buildSandboxHint(attachments: List<Attachment>): String? {
         if (attachments.isEmpty()) return null
@@ -723,85 +736,121 @@ class ChatViewModel(
         return "用户已上传以下文件到沙箱：\n${lines.joinToString("\n")}"
     }
 
+    /**
+     * BYOK 发送前的一次性准备（IO 线程）：托管副本 → 请求用的 data URL + 注入提示词。
+     * 抽文本和编码在同一趟里做完，避免为了把抽取结果传出去再往领域模型上加字段。
+     */
+    private fun prepareByokAttachments(attachments: List<Attachment>): PreparedAttachments {
+        val hydrated = hydrateByokAttachments(attachments)
+        return PreparedAttachments(hydrated, buildByokAttachmentHint(hydrated))
+    }
+
+    /**
+     * 构造注入提示词。相比旧版的裸文本拼接，这里补齐三件事：
+     * - 截断**如实披露**（`truncated="已给/总共"`），模型知道自己看到的是残缺内容；
+     * - 读不到的附件降级成 `error` 属性，而不是从请求里静默消失；
+     * - 无条件声明图片/图表/公式/扫描页提取不出来——即便这次文字抽取成功了，
+     *   带文字层的 PDF 里照样可能有模型看不到的图表。
+     */
     private fun buildByokAttachmentHint(attachments: List<Attachment>): String? {
-        val fileSections = attachments
-            .filterNot { it.mimeType.startsWith("image/") }
-            .mapIndexed { index, attachment ->
-                buildString {
-                    append(index + 1)
-                    append(". ")
-                    append(attachment.name)
-                    append(" (")
-                    append(attachment.mimeType)
-                    append(")")
-                    val text = decodeTextDataUrl(attachment.remoteUrl, attachment.mimeType)
-                    if (!text.isNullOrBlank()) {
-                        append("\n")
-                        append(text.take(12_000))
-                    } else if (isPdfMime(attachment.mimeType)) {
-                        append("\nPDF 已随消息附加。")
-                    }
-                }
+        val sections = attachments.mapNotNull { attachment -> attachment.toHintSection() }
+        if (sections.isEmpty()) return null
+        return buildString {
+            append("用户已附加以下文件：\n\n")
+            append(sections.joinToString("\n\n"))
+            append("\n\n")
+            append(ATTACHMENT_FIDELITY_NOTE)
+        }
+    }
+
+    /** @return 该附件在提示词里的片段；图片走多模态通道且正常可用时返回 null（不占提示词）。 */
+    private fun Attachment.toHintSection(): String? {
+        val isImage = AttachmentMime.isImage(mimeType)
+        if (unavailable) {
+            val reason = if (isImage) "图片文件丢失，无法读取" else "文件丢失，无法读取"
+            return "<attached_file name=\"${name.attr()}\" mime=\"${mimeType.attr()}\" error=\"$reason\" />"
+        }
+        if (isImage) return null
+
+        val extracted = documentExtractor.extract(localPath, mimeType)
+        val text = extracted?.text.orEmpty()
+
+        // 一、抽到了文字层：内联正文，超长按实际比例披露。
+        if (text.isNotBlank()) {
+            val head = text.take(MAX_INLINE_TEXT_CHARS)
+            val truncated = if (head.length < extracted!!.totalChars) {
+                " truncated=\"${head.length}/${extracted.totalChars}\""
+            } else {
+                ""
             }
-        if (fileSections.isEmpty()) return null
-        return "用户已附加以下文件内容：\n${fileSections.joinToString("\n\n")}"
+            return "<attached_file name=\"${name.attr()}\" mime=\"${mimeType.attr()}\"$truncated>\n" +
+                head + "\n</attached_file>"
+        }
+
+        // 二、没有文字层但原件跟着发了（扫描件 PDF，或这台设备抽不了）：说清楚为什么。
+        if (!remoteUrl.isNullOrBlank()) {
+            val why = if (extracted != null) "未提取到文字层，可能是扫描件或纯图片文档；" else ""
+            return "<attached_file name=\"${name.attr()}\" mime=\"${mimeType.attr()}\" " +
+                "delivery=\"binary\" note=\"${why}已附上文件原件\" />"
+        }
+
+        // 三、既没文字也没原件。
+        val reason = when {
+            !AttachmentMime.isPdf(mimeType) -> "无法转换为文本"
+            (attachmentStore.resolve(localPath)?.length() ?: 0L) > AttachmentEncoder.MAX_INLINE_BYTES ->
+                "文件超过 ${AttachmentEncoder.MAX_INLINE_BYTES / 1024 / 1024}MB，未随消息发送"
+
+            else -> "文件读取失败，未随消息发送"
+        }
+        return "<attached_file name=\"${name.attr()}\" mime=\"${mimeType.attr()}\" error=\"$reason\" />"
     }
 
-    private fun decodeTextDataUrl(value: String?, mimeType: String): String? {
-        if (value.isNullOrBlank() || !isTextLikeMime(mimeType)) return null
-        val comma = value.indexOf(',')
-        if (!value.startsWith("data:", ignoreCase = true) || comma <= 5) return null
-        val meta = value.substring(5, comma)
-        if (!meta.contains(";base64", ignoreCase = true)) return null
-        val encoded = value.substring(comma + 1)
-        return runCatching {
-            String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8)
-        }.getOrNull()
-    }
+    /** XML 属性值转义：文件名里出现引号/尖括号时不能破坏标签结构。 */
+    private fun String.attr(): String = replace("&", "&amp;")
+        .replace("\"", "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
 
-    private fun isTextLikeMime(mimeType: String): Boolean {
-        val lower = mimeType.lowercase(Locale.US)
-        return lower.startsWith("text/") ||
-            lower.contains("json") ||
-            lower.contains("xml") ||
-            lower.contains("csv") ||
-            lower.contains("yaml") ||
-            lower.contains("markdown") ||
-            lower.contains("javascript")
-    }
-
-    private fun isPdfMime(mimeType: String): Boolean =
-        mimeType.lowercase(Locale.US).contains("pdf")
-
-    private fun isByokSupportedAttachmentMime(mimeType: String): Boolean =
-        mimeType.startsWith("image/") || isTextLikeMime(mimeType) || isPdfMime(mimeType)
-
+    /**
+     * 托管副本 → 请求用的 `data:` URL。**只作用于本次请求的副本，不落库**
+     * （落库前 :core:storage 也会再剥一次 base64）。
+     *
+     * 读不到就标 [Attachment.unavailable]：请求里跳过，但气泡上仍显示、提示词里仍有一条
+     * error 说明——旧实现是悄悄把 remoteUrl 置 null，附件就此人间蒸发。
+     */
     private fun hydrateByokAttachments(attachments: List<Attachment>): List<Attachment> =
         attachments.map { attachment ->
-            val source = attachment.remoteUrl?.takeIf { it.isNotBlank() } ?: return@map attachment
-            if (source.startsWith("data:", ignoreCase = true) || source.startsWith("http", ignoreCase = true)) {
-                return@map attachment
+            // 云端同步下来的历史附件本来就是 http(s) URL，直接用。
+            attachment.remoteUrl?.takeIf { it.startsWith("http", ignoreCase = true) }?.let { return@map attachment }
+
+            val file = attachmentStore.resolve(attachment.localPath)
+                ?: return@map attachment.copy(remoteUrl = null, thumbnailUrl = null, unavailable = true)
+
+            val kind = AttachmentMime.classify(attachment.mimeType, attachment.name)
+            val encoded = when (kind) {
+                AttachmentKind.IMAGE -> AttachmentEncoder.encodeImage(file)
+                // 抽得到文字层就不再发二进制：正文已经进了提示词，再塞一份 base64 是纯浪费
+                // （抽取结果有缓存，这里的重复调用不会真的重解一遍）。
+                AttachmentKind.PDF ->
+                    if (documentExtractor.extract(attachment.localPath, attachment.mimeType)?.text.isNullOrBlank()) {
+                        AttachmentEncoder.encodeRaw(file, attachment.mimeType)
+                    } else {
+                        null
+                    }
+                // 文本/DOCX 的内容已经进了提示词，不必再作为二进制重复发一份。
+                AttachmentKind.TEXT, AttachmentKind.DOCUMENT, AttachmentKind.UNSUPPORTED -> null
             }
-            val bytes = readUriBytes(source) ?: return@map attachment.copy(remoteUrl = null, thumbnailUrl = null)
-            val dataUrl = "data:${attachment.mimeType};base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
-            attachment.copy(remoteUrl = dataUrl, thumbnailUrl = null)
+            // 图片编码失败（文件损坏/格式解不开）意味着这张图根本发不出去，必须标记；
+            // 否则它既不在图片通道里，提示词里也没有它——又变成静默消失。
+            val imageEncodeFailed = kind == AttachmentKind.IMAGE && encoded == null
+            attachment.copy(remoteUrl = encoded, thumbnailUrl = null, unavailable = imageEncodeFailed)
         }
 
-    private fun readUriBytes(value: String): ByteArray? = runCatching {
-        val uri = Uri.parse(value)
-        when (uri.scheme?.lowercase(Locale.US)) {
-            "content", "android.resource" -> appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            "file" -> java.io.File(requireNotNull(uri.path)).takeIf { it.exists() }?.readBytes()
-            else -> null
-        }
-    }.getOrNull()
-
-    private fun Attachment.typeLabel(): String =
-        when {
-            mimeType.startsWith("image/") -> "图片文件"
-            isPdfMime(mimeType) -> "PDF 文件"
-            else -> "数据文件"
-        }
+    private fun Attachment.typeLabel(): String = when {
+        AttachmentMime.isImage(mimeType) -> "图片文件"
+        AttachmentMime.isPdf(mimeType) -> "PDF 文件"
+        else -> "数据文件"
+    }
 
     private fun Attachment.sandboxInputPath(): String {
         val fileName = sandboxPath
@@ -811,13 +860,6 @@ class ChatViewModel(
             ?: name
         return "/input/$fileName"
     }
-
-    private fun attachmentLabel(file: FileInfo): String =
-        when {
-            file.mimeType?.startsWith("image/") == true -> "图片"
-            file.mimeType?.let { isPdfMime(it) } == true -> "PDF"
-            else -> file.name.substringAfterLast('.', "文件").uppercase(Locale.US)
-        }
 
     /** 重发：保留旧答案为一个版本，重新生成一版并切到新版本（可在版本间切换）。
      *  [overrideModelId] 非空表示换模型重试（对齐 Web 的 startRegenerate(overrideModelKey)）。 */
@@ -1115,6 +1157,21 @@ class ChatViewModel(
         "autoLLM" -> "auto"
         "default" -> defaultModelId ?: "auto"
         else -> modelId.trim()
+    }
+
+    private companion object {
+        /** 单个附件内联进提示词的字符上限；超出部分按 `truncated` 属性如实告知模型。 */
+        const val MAX_INLINE_TEXT_CHARS = 12_000
+
+        /**
+         * 无条件附在附件提示词末尾。哪怕这次文字抽取完全成功也要说——带文字层的 PDF 和
+         * Word 里照样有图表、公式截图、复杂表格排版是抽不出来的，模型必须知道自己看到的
+         * 可能不是全部。
+         */
+        const val ATTACHMENT_FIDELITY_NOTE =
+            "说明：以上仅为从文件中提取的纯文本。文件内的图片、图表、公式、扫描页、手写内容和" +
+                "复杂表格排版无法提取，可能存在你看不到的信息。若用户的问题涉及这些内容，" +
+                "请主动说明你只能看到文本部分。"
     }
 }
 

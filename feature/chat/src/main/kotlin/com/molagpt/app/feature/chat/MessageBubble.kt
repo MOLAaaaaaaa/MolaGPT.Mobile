@@ -30,6 +30,7 @@ import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.feature.file.AttachmentStore
 import com.molagpt.app.feature.file.AttachmentStrip
 
 /** 用户气泡（助手消息由 MessageList 按块/片段成行渲染，不走这里）。 */
@@ -48,15 +49,22 @@ fun MessageBubble(message: ChatMessage, modifier: Modifier = Modifier) {
                 .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.22f), bubbleShape)
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
+            val context = androidx.compose.ui.platform.LocalContext.current
             val files = message.attachments.map { attachment ->
+                // 托管副本只存相对路径，显示用的 file:// 绝对路径在这里现算——不落库，
+                // 免得 App 数据目录变动后库里留一堆失效的绝对路径。
+                val localUrl = AttachmentStore.displayUrl(context, attachment.localPath)
+                val missing = attachment.unavailable ||
+                    (attachment.localPath != null && localUrl == null)
                 FileInfo(
                     id = attachment.id,
                     name = attachment.name,
                     mimeType = attachment.mimeType,
                     sizeBytes = attachment.sizeBytes,
-                    url = attachment.thumbnailUrl ?: attachment.remoteUrl,
+                    url = localUrl ?: attachment.thumbnailUrl ?: attachment.remoteUrl,
+                    localPath = attachment.localPath,
                     sandboxPath = attachment.sandboxPath,
-                    uploadStatus = UploadStatus.UPLOADED,
+                    uploadStatus = if (missing) UploadStatus.MISSING else UploadStatus.UPLOADED,
                 )
             }
             if (files.isNotEmpty()) {

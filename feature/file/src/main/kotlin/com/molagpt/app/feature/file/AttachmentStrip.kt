@@ -21,6 +21,12 @@ import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.UploadStatus
 
+private fun statusLabel(status: UploadStatus): String? = when (status) {
+    UploadStatus.FAILED -> "上传失败"
+    UploadStatus.MISSING -> "附件不可用"
+    UploadStatus.PENDING, UploadStatus.UPLOADING, UploadStatus.UPLOADED -> null
+}
+
 /** 输入框上方的待发送/已上传文件条（横向）。 */
 @Composable
 fun AttachmentStrip(files: List<FileInfo>, modifier: Modifier = Modifier) {
@@ -44,8 +50,10 @@ fun FileChip(file: FileInfo, modifier: Modifier = Modifier) {
         }
         Column(modifier = Modifier.padding(start = if (file.uploadStatus == UploadStatus.UPLOADING) 8.dp else 0.dp)) {
             Text(file.name, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (file.uploadStatus == UploadStatus.FAILED) {
-                Text("上传失败", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+            // 附件不可用必须显式说出来：本地副本没了的话请求里也带不上，
+            // 只显示个文件名会让人以为模型看到了。
+            statusLabel(file.uploadStatus)?.let { label ->
+                Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
             }
         }
     }

@@ -34,48 +34,36 @@ object OpenAiMessageContentBuilder {
             Role.TOOL -> "tool"
         }
         val text = message.plainText()
-        val images = message.attachments.filter {
-            it.mimeType.startsWith("image/") && !it.remoteUrl.isNullOrBlank()
-        }
+        val images = AttachmentParts.orderedImages(message)
+        // OpenAI 的 file_data 只接受 data URL，远程 URL 形态的 PDF 在这里发不出去。
         val files = if (includeFileParts) {
-            message.attachments.filter {
-                it.mimeType.contains("pdf", ignoreCase = true) &&
-                    it.remoteUrl?.startsWith("data:", ignoreCase = true) == true
-            }
+            AttachmentParts.binaryDocuments(message)
+                .filter { it.remoteUrl!!.startsWith("data:", ignoreCase = true) }
         } else {
             emptyList()
         }
+        val missing = AttachmentParts.unavailableDocuments(message)
 
-        val content = when {
-            images.isEmpty() && files.isEmpty() -> JsonPrimitive(text)
-            replaceImagesWithText -> buildJsonArray {
-                if (text.isNotEmpty()) {
-                    add(buildJsonObject { put("type", "text"); put("text", text) })
-                }
-                images.forEach { img ->
-                    val n = imageOrdinal.incrementAndGet()
-                    val label = img.name.takeIf { it.isNotBlank() }
-                        ?.let { "[图片#$n: $it]" }
-                        ?: "[图片#$n]"
-                    add(buildJsonObject { put("type", "text"); put("text", label) })
-                }
-                files.forEach { file ->
+        if (images.isEmpty() && files.isEmpty() && missing.isEmpty()) {
+            return WireMessage(role, JsonPrimitive(text))
+        }
+
+        val content = buildJsonArray {
+            if (text.isNotEmpty()) {
+                add(buildJsonObject { put("type", "text"); put("text", text) })
+            }
+            images.forEach { img ->
+                // 每张图都消耗一个序号，不论这次是否真的发得出去——序号必须与
+                // AttachmentParts.orderedImages 的下标严格对应，view_image 才能按 N 取到正确的图。
+                val n = imageOrdinal.incrementAndGet()
+                if (replaceImagesWithText || img.unavailable) {
                     add(
                         buildJsonObject {
-                            put("type", "file")
-                            putJsonObject("file") {
-                                put("filename", file.name)
-                                put("file_data", file.remoteUrl!!)
-                            }
+                            put("type", "text")
+                            put("text", AttachmentParts.imageLabel(n, img))
                         },
                     )
-                }
-            }
-            else -> buildJsonArray {
-                if (text.isNotEmpty()) {
-                    add(buildJsonObject { put("type", "text"); put("text", text) })
-                }
-                images.forEach { img ->
+                } else {
                     add(
                         buildJsonObject {
                             put("type", "image_url")
@@ -83,17 +71,26 @@ object OpenAiMessageContentBuilder {
                         },
                     )
                 }
-                files.forEach { file ->
-                    add(
-                        buildJsonObject {
-                            put("type", "file")
-                            putJsonObject("file") {
-                                put("filename", file.name)
-                                put("file_data", file.remoteUrl!!)
-                            }
-                        },
-                    )
-                }
+            }
+            // 丢失的附件明确告知模型，而不是从请求里静默消失。
+            missing.forEach { file ->
+                add(
+                    buildJsonObject {
+                        put("type", "text")
+                        put("text", AttachmentParts.unavailableLabel(file))
+                    },
+                )
+            }
+            files.forEach { file ->
+                add(
+                    buildJsonObject {
+                        put("type", "file")
+                        putJsonObject("file") {
+                            put("filename", file.name)
+                            put("file_data", file.remoteUrl!!)
+                        }
+                    },
+                )
             }
         }
         return WireMessage(role, content)

@@ -49,6 +49,7 @@ import com.molagpt.app.core.storage.TracksToggle
 import com.molagpt.app.core.storage.allModels
 import com.molagpt.app.feature.auth.MolaGptAuthService
 import com.molagpt.app.feature.chat.BackgroundStreamManager
+import com.molagpt.app.feature.file.AttachmentStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -450,6 +451,7 @@ class AppContainer(
             settingsFlow.filterNotNull().first()
             reconcileStreamTasks()
             runCatching { personaRepository.ensureSeeded() }
+            sweepOrphanAttachments()
             if (authService.isLoggedIn && currentSettings.cloudSyncEnabled) {
                 runCatching { syncEngine.syncNow() }
             }
@@ -501,6 +503,17 @@ class AppContainer(
     /** 用户手动刷新或登录态变化：强制重新拉取一次，但仍与在途首次加载串行。 */
     suspend fun refreshMolaModels() {
         molaModelLoadMutex.withLock { modelApi.refresh() }
+    }
+
+    /**
+     * 启动回收：删掉 `filesDir/attachments` 下已经没有任何消息引用的托管副本。
+     * 会话删除和编辑截断都不经过附件层，孤儿只能靠这一步统一清理。
+     */
+    private suspend fun sweepOrphanAttachments() {
+        runCatching {
+            val referenced = chatRepository.referencedAttachmentPaths()
+            AttachmentStore(appContext).sweep(referenced)
+        }
     }
 
     /**

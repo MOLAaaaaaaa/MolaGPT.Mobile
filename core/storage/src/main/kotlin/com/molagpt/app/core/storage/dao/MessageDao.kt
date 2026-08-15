@@ -48,4 +48,8 @@ interface MessageDao {
 
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun count(sessionId: String): Int
+
+    /** 附件孤儿回收用：附件信息编码在 metadataJson 里，取全量交给上层解析。 */
+    @Query("SELECT metadataJson FROM messages WHERE metadataJson LIKE '%localPath%'")
+    suspend fun allMetadataWithAttachments(): List<String>
 }

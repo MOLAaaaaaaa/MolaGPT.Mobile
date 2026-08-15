@@ -117,7 +117,8 @@ fun Composer(
         text = edit.text
     }
     val hasReadyAttachment = pendingAttachments.any {
-        it.uploadStatus == UploadStatus.UPLOADED && (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank())
+        it.uploadStatus == UploadStatus.UPLOADED &&
+            (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank() || !it.localPath.isNullOrBlank())
     }
     val canSend = enabled && (text.isNotBlank() || hasReadyAttachment)
     val colorScheme = MaterialTheme.colorScheme
@@ -381,22 +382,23 @@ private fun PendingAttachmentRow(files: List<FileInfo>, onRemove: (String) -> Un
                     CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(8.dp))
                 }
+                val problem = when (file.uploadStatus) {
+                    UploadStatus.FAILED -> "失败"
+                    UploadStatus.MISSING -> "不可用"
+                    else -> null
+                }
                 Text(
                     text = file.name,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (file.uploadStatus == UploadStatus.FAILED) {
-                        colorScheme.error
-                    } else {
-                        colorScheme.onSurfaceVariant
-                    },
+                    color = if (problem != null) colorScheme.error else colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 120.dp),
                 )
-                if (file.uploadStatus == UploadStatus.FAILED) {
+                if (problem != null) {
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "失败",
+                        text = problem,
                         style = MaterialTheme.typography.labelSmall,
                         color = colorScheme.error,
                     )

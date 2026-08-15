@@ -1026,12 +1026,16 @@ class ByokChatService(
     private suspend fun viewImage(provider: ByokProvider, request: ChatRequest, call: ToolCall): String {
         val index = call.arg("image_index")?.toIntOrNull() ?: return "Missing image_index"
         val query = call.arg("query")
+        // 必须与 content builder 用同一份有序列表：那边给不可用的图也留了序号，
+        // 这里若过滤掉，后面每一张图的下标都会左移，模型按 [图片#N] 取到的就不是它要的那张。
         val allImages = request.messages
             .filter { it.role == com.molagpt.app.core.model.Role.USER }
-            .flatMap { it.attachments }
-            .filter { it.mimeType.startsWith("image/") && !it.remoteUrl.isNullOrBlank() }
+            .flatMap { AttachmentParts.orderedImages(it) }
         val image = allImages.getOrNull(index - 1)
             ?: return "Image index $index out of range (1-${allImages.size})"
+        if (image.unavailable || image.remoteUrl.isNullOrBlank()) {
+            return "Image $index (${image.name}) is no longer available on this device."
+        }
         return analyzeImage(provider, request, image.remoteUrl!!, query)
     }
 
