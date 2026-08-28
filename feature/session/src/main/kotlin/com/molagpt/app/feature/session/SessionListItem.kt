@@ -1,6 +1,7 @@
 package com.molagpt.app.feature.session
 
 import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.storage.SessionHit
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -19,6 +20,8 @@ sealed interface SessionListItem {
         val conversation: Conversation,
         val time: String,
         val groupLabel: String,
+        /** 正文命中片段；标题命中或非搜索态为 null，UI 据此决定是否展示第二行。 */
+        val snippet: String? = null,
     ) : SessionListItem {
         override val key: String = conversation.sessionId
         override val contentType: String = "conversation"
@@ -46,7 +49,8 @@ internal class SessionListGrouping(
         startWeek = startToday - DAYS_IN_RECENT_GROUP * MILLIS_PER_DAY
     }
 
-    fun row(conversation: Conversation): SessionListItem.Row {
+    fun row(hit: SessionHit): SessionListItem.Row {
+        val conversation = hit.conversation
         val groupLabel = when {
             conversation.pinned -> GROUP_PINNED
             conversation.updatedAt >= startToday -> GROUP_TODAY
@@ -57,6 +61,7 @@ internal class SessionListGrouping(
             conversation = conversation,
             time = timeLabel(conversation.updatedAt, startToday, startWeek, timeFormat, dateFormat),
             groupLabel = groupLabel,
+            snippet = hit.matchedSnippet?.let(::normalizeSnippet)?.takeIf { it.isNotEmpty() },
         )
     }
 

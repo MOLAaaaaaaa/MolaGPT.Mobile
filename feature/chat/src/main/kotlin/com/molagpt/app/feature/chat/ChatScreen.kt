@@ -1,8 +1,10 @@
 package com.molagpt.app.feature.chat
 
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -62,6 +64,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -74,16 +77,25 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.molagpt.app.core.model.AttachmentMime
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.feature.chat.persona.PersonaPickerSheet
 import com.molagpt.app.feature.chat.persona.PersonaWelcome
+import com.molagpt.app.feature.file.CameraCapture
 import com.molagpt.app.feature.file.ImagePreviewOverlay
 import com.molagpt.app.feature.file.LocalAnimatedVisibilityScope
 import com.molagpt.app.feature.file.LocalImagePreviewUrl
 import com.molagpt.app.feature.file.LocalSharedTransitionScope
+
+/**
+ * 一次多选图片的上限。系统 Photo Picker 自身也有平台上限
+ * （`MediaStore.getPickImagesMaxLimit()`），取两者较小值生效，这里只是别让用户一次塞太多。
+ */
+private const val MAX_IMAGES_PER_PICK = 9
 
 /**
  * 聊天页（单 Activity 内的主屏）。顶栏：菜单(打开会话抽屉) + 模型选择下拉；
@@ -141,9 +153,37 @@ fun ChatScreen(
         Toast.makeText(context, "已开启新对话", Toast.LENGTH_SHORT).show()
         onNewChat()
     }
-    val pickFile = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri -> uri?.let(viewModel::attachFile) }
+    // —— 附件三条路径 ——
+    // 都不需要任何权限：Photo Picker 零权限、SAF 自己就是授权入口、拍照委托系统相机 app。
+    // 见 AndroidManifest 里的说明。
+
+    /**
+     * 拍照的目标文件。必须 [rememberSaveable]：相机是另一个进程的 Activity，本进程在低内存
+     * 机器上会被回收重建，普通 remember 回来就是 null，照片明明拍好了却取不到。
+     */
+    var pendingPhotoUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    val takePhoto = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { saved ->
+        val target = pendingPhotoUri
+        pendingPhotoUri = null
+        // saved=false 表示用户在相机里取消了，空文件留给 CameraCapture 下次清理。
+        if (saved && target != null) viewModel.attachFile(target)
+    }
+    val pickImages = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES_PER_PICK),
+    ) { uris -> viewModel.attachFiles(uris) }
+    val pickDocuments = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris -> viewModel.attachFiles(uris) }
+
+    /** 系统选择器在个别定制 ROM 上会缺失或被禁用，起不来就提示而不是崩掉。 */
+    val launchPicker = { what: String, block: () -> Unit ->
+        runCatching(block).onFailure {
+            Toast.makeText(context, "无法打开$what", Toast.LENGTH_SHORT).show()
+        }
+        Unit
+    }
 
     if (state.authExpired) {
         androidx.compose.runtime.LaunchedEffect(Unit) { onAuthExpired() }
@@ -262,7 +302,11 @@ fun ChatScreen(
                             )
                         }
                     }
-                    DropdownMenu(expanded = modelMenuOpen, onDismissRequest = { modelMenuOpen = false }) {
+                    DropdownMenu(
+                        expanded = modelMenuOpen,
+                        onDismissRequest = { modelMenuOpen = false },
+                        properties = PopupProperties(focusable = false),
+                    ) {
                         if (state.modelGroups.isEmpty()) {
                             DropdownMenuItem(
                                 text = {
@@ -477,7 +521,33 @@ fun ChatScreen(
                     onToggleThinking = viewModel::setUseThinking,
                     onSetReasoningEffort = viewModel::setReasoningEffort,
                     onOpenPersonaPicker = { personaSheetOpen = true },
-                    onPickImage = { pickFile.launch(arrayOf("*/*")) },
+                    onTakePhoto = {
+                        launchPicker("相机") {
+                            val target = CameraCapture.newPhotoUri(context)
+                                ?: error("无法创建拍照文件")
+                            pendingPhotoUri = target
+                            takePhoto.launch(target)
+                        }
+                    },
+                    onPickImages = {
+                        launchPicker("相册") {
+                            pickImages.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        }
+                    },
+                    onPickFiles = {
+                        launchPicker("文件选择器") {
+                            // MolaGPT 账户的附件进服务端沙箱，什么格式都收，不能收窄；
+                            // BYOK 全在本机解析，收不了的直接在选择器里置灰。
+                            val types = if (state.providerKind == ProviderKind.BYOK) {
+                                AttachmentMime.BYOK_PICKER_MIME_TYPES.toTypedArray()
+                            } else {
+                                arrayOf("*/*")
+                            }
+                            pickDocuments.launch(types)
+                        }
+                    },
                     onRemoveAttachment = viewModel::removeAttachment,
                     onSend = viewModel::send,
                     onStop = viewModel::stop,

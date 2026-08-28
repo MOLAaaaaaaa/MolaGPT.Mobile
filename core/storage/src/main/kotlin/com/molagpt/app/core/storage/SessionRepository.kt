@@ -25,14 +25,24 @@ class SessionRepository(
     /** 云同步开启时删除走墓碑（待 push delete），否则直接硬删（游客无需保留墓碑）。 */
     private val cloudSyncEnabled: () -> Boolean = { false },
 ) {
-    fun pagedSessions(): Flow<PagingData<Conversation>> =
-        Pager(
-            config = PagingConfig(
-                pageSize = SESSION_ROWS_PER_PAGE,
-                enablePlaceholders = false,
-            ),
-            pagingSourceFactory = { conversationDao.pagingSource() },
-        ).flow.map { pagingData -> pagingData.map { it.toDomain() } }
+    fun pagedSessions(searchQuery: String = ""): Flow<PagingData<SessionHit>> {
+        val query = searchQuery.trim().take(MAX_SEARCH_QUERY_CHARS).takeIf { it.isNotEmpty() }
+        val config = PagingConfig(
+            pageSize = SESSION_ROWS_PER_PAGE,
+            enablePlaceholders = false,
+        )
+        // 两个 DAO 方法的元素类型不同（实体 vs 搜索投影），共用一个 pagingSourceFactory
+        // 推不出公共类型，所以按分支各建各的 Pager。
+        return if (query == null) {
+            Pager(config) { conversationDao.pagingSource() }.flow
+                .map { pagingData -> pagingData.map { SessionHit(it.toDomain()) } }
+        } else {
+            Pager(config) { conversationDao.searchPagingSource(query) }.flow
+                .map { pagingData ->
+                    pagingData.map { SessionHit(it.conversation.toDomain(), it.matchedSnippet) }
+                }
+        }
+    }
 
     suspend fun create(
         title: String = DEFAULT_TITLE,
@@ -178,5 +188,20 @@ class SessionRepository(
         // 新会话的占位标题：预创建行（如跨阵营切换进入 BYOK）以此标题落库，
         // 首条消息发送时由 ensure 替换为消息内容。
         const val DEFAULT_TITLE = "新对话"
+
+        /**
+         * 搜索词长度上限：限制输入框可输入长度，同时避免超长 needle 在每次防抖后反复全表扫。
+         * 裁剪只在 [pagedSessions] 收口一次。
+         */
+        const val MAX_SEARCH_QUERY_CHARS = 200
     }
 }
+
+/**
+ * 侧边栏的一行搜索/列表结果。
+ * [matchedSnippet] 只在「正文命中」时非空（标题命中或非搜索态为 null），UI 据此决定是否展示第二行。
+ */
+data class SessionHit(
+    val conversation: Conversation,
+    val matchedSnippet: String? = null,
+)

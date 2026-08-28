@@ -670,6 +670,7 @@ private fun ChatHost(
             SessionDrawer(
                 sessions = sessionVm.sessionItems,
                 currentSessionId = currentSessionId,
+                drawerOpen = drawerOpen,
                 onNewChat = {
                     currentSessionId = Ids.newSessionId()
                     drawerOpen = false

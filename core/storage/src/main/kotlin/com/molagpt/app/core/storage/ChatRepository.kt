@@ -2,15 +2,18 @@ package com.molagpt.app.core.storage
 
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.ChatMessage
+import com.molagpt.app.core.model.ChatMessageMetadataKeys
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.DeltaCommand
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
+import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.TitleRequest
+import com.molagpt.app.core.model.Usage
 import com.molagpt.app.core.network.ChatService
 import com.molagpt.app.core.network.ChatStreamController
 import com.molagpt.app.core.network.webTypingPaced
@@ -164,18 +167,30 @@ class ChatRepository(
             createdAt = start,
             updatedAt = start,
             model = request.modelId,
+            // 不写 pending 文案：等首 token 的反馈交给正文位置的骨架屏，头部行从头到尾都显示模型名，
+            // 首 token 到达时头部零变化。pending 字段留给真正有增量信息的场景——重试进度、工具命令标签。
             metadata = mapOf(
-                "pending" to "正在连接…",
                 "modelDisplayName" to (request.modelDisplayName ?: request.modelId),
             ),
         )
         emit(msg)
+        var firstTokenAt: Long? = null
+        var usage: Usage? = null
         try {
             chatService.sendMessage(request).webTypingPaced().collect { event ->
-                controller.toCommands(event).forEach { cmd -> msg = applyCommand(msg, cmd) }
+                controller.toCommands(event).forEach { cmd ->
+                    // usage 可能分两次到（先 finish_reason 后 usage-only chunk），后到的非空值覆盖。
+                    if (cmd is DeltaCommand.Complete) cmd.usage?.let { usage = it }
+                    msg = applyCommand(msg, cmd)
+                }
+                // 首个 fragment 落地 = 用户看到第一个字，作为 TTFT 的终点。
+                if (firstTokenAt == null && msg.fragments.isNotEmpty()) {
+                    firstTokenAt = System.currentTimeMillis()
+                }
                 emit(msg.copy(updatedAt = System.currentTimeMillis()))
             }
             if (msg.status == MessageStatus.STREAMING) msg = msg.copy(status = MessageStatus.COMPLETE)
+            msg = msg.withRequestStats(request.providerKind, usage, start, firstTokenAt)
             // 重生成：把本次答案追加为新版本，让 in-flight 帧立即带上版本信息(切换栏才会显示)。
             if (priorAttempts.isNotEmpty()) msg = msg.withAttempts(priorAttempts)
             emit(msg)
@@ -280,6 +295,29 @@ class ChatRepository(
         )
     }
 
+    /**
+     * 把本次请求的统计信息写进元数据，供聊天页的统计行展示（[com.molagpt.app.core.model.MessageStats]）。
+     *
+     * 只对 BYOK 生效：MolaGPT 官方链路计费口径是「次数」而不是 token，展示 token 统计会误导。
+     * usage 缺失（provider 没上报、或用户中途停止）时只写耗时，各字段互不依赖。
+     */
+    private fun ChatMessage.withRequestStats(
+        providerKind: ProviderKind,
+        usage: Usage?,
+        startedAt: Long,
+        firstTokenAt: Long?,
+    ): ChatMessage {
+        if (providerKind != ProviderKind.BYOK) return this
+        val stats = buildMap {
+            usage?.promptTokens?.let { put(ChatMessageMetadataKeys.PROMPT_TOKENS, it.toString()) }
+            usage?.completionTokens?.let { put(ChatMessageMetadataKeys.COMPLETION_TOKENS, it.toString()) }
+            usage?.cachedTokens?.let { put(ChatMessageMetadataKeys.CACHED_TOKENS, it.toString()) }
+            put(ChatMessageMetadataKeys.DURATION_MS, (System.currentTimeMillis() - startedAt).toString())
+            firstTokenAt?.let { put(ChatMessageMetadataKeys.TTFT_MS, (it - startedAt).toString()) }
+        }
+        return copy(metadata = metadata + stats)
+    }
+
     // —— 把局部增量命令合并进当前消息的 fragment 列表（绝不整段重建）——
     private fun applyCommand(msg: ChatMessage, cmd: DeltaCommand): ChatMessage {
         val frags = msg.fragments.toMutableList()
@@ -340,13 +378,18 @@ class ChatRepository(
             is DeltaCommand.AddImage -> {
                 frags.add(MessageFragment.Image(Ids.newFragmentId(), cmd.url, cmd.prompt))
             }
+            is DeltaCommand.SetMetadata -> {
+                meta = meta + (cmd.key to cmd.value)
+            }
             is DeltaCommand.Complete -> {
                 status = MessageStatus.COMPLETE
                 collapseThinking(frags)
                 meta = meta - "pending"
-                cmd.usage?.totalTokens?.let { meta = meta + ("tokens" to it.toString()) }
+                cmd.usage?.totalTokens?.let { meta = meta + (ChatMessageMetadataKeys.TOTAL_TOKENS to it.toString()) }
                 // 记录服务端上报的推理 token 数，供运行时自校正判定「隐藏思考但确实推理了」。
-                cmd.usage?.reasoningTokens?.let { meta = meta + ("reasoningTokens" to it.toString()) }
+                cmd.usage?.reasoningTokens?.let {
+                    meta = meta + (ChatMessageMetadataKeys.REASONING_TOKENS to it.toString())
+                }
             }
             is DeltaCommand.Fail -> {
                 status = MessageStatus.ERROR

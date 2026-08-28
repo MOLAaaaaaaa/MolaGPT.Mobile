@@ -1,5 +1,8 @@
 package com.molagpt.app.feature.chat
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,6 +21,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,11 +29,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.core.render.MolaMotion
+import com.molagpt.app.core.render.SkeletonLines
 import com.molagpt.app.feature.file.AttachmentStore
 import com.molagpt.app.feature.file.AttachmentStrip
 
@@ -84,7 +91,11 @@ fun MessageBubble(message: ChatMessage, modifier: Modifier = Modifier) {
     }
 }
 
-/** 助手消息头部/连接态文字（模型名 / 「正在连接…」）。 */
+/**
+ * 助手消息头部行。常态显示模型名；`pending` 元数据非空时改显示它——目前只有两类会写：
+ * 断流重试进度（「正在恢复连接 · 第 N 次重试」）和工具执行中的命令标签。
+ * 等首 token 不写 pending，那段由 [AssistantStreamingPlaceholder] 的骨架表达。
+ */
 @Composable
 fun AssistantPendingText(text: String, modifier: Modifier = Modifier) {
     Text(
@@ -95,10 +106,30 @@ fun AssistantPendingText(text: String, modifier: Modifier = Modifier) {
     )
 }
 
-/** 等待首 token 的脉冲点。 */
+/**
+ * 等待首 token 的正文占位骨架。
+ *
+ * 用骨架而不是脉冲点：助手正文是无气泡纯文本，骨架把正文将要落的位置先占出来，
+ * 首 token 到达时是「骨架让位给文字」而不是「一行小点凭空换成一段话」。
+ *
+ * 淡入刻意走匀速而不是 M3 的减速曲线：首 token 常常两三百毫秒就到，减速曲线开头冲得太快，
+ * 骨架会完整闪一下再消失，反而比脉冲点更吵；匀速淡入让快响应只留下一抹淡影。
+ */
 @Composable
 fun AssistantStreamingPlaceholder(modifier: Modifier = Modifier) {
-    com.molagpt.app.core.render.PulsingDots(modifier = modifier.padding(vertical = 4.dp))
+    var appeared by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { appeared = true }
+    val alpha by animateFloatAsState(
+        targetValue = if (appeared) 1f else 0f,
+        animationSpec = tween(MolaMotion.Long, easing = LinearEasing),
+        label = "skeletonFade",
+    )
+    SkeletonLines(
+        // 高度从一开始就占住（只淡透明度不淡尺寸），所以淡入过程不会推动下方内容。
+        modifier = modifier
+            .padding(top = 2.dp, bottom = 6.dp)
+            .graphicsLayer { this.alpha = alpha },
+    )
 }
 
 /** 消息下方操作栏。重新生成仅助手最后一条；编辑仅用户消息。 */

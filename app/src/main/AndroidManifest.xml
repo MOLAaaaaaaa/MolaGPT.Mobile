@@ -1,11 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!--
+      附件选择刻意不声明任何权限：
+      - 图片走系统 Photo Picker（PickVisualMedia），零权限，用户选什么给什么，
+        Android 14 的「部分/全部访问」由选择器自己承担，App 不用碰
+        READ_MEDIA_IMAGES / READ_MEDIA_VISUAL_USER_SELECTED；
+        （而且 Play 的 Photo and Video Permissions 政策下，targetSdk 33+ 的
+        非相册类 App 申请那两个权限需要单独声明审核，本来也过不了）
+      - 文件走 SAF，本身就是授权入口；
+      - 拍照委托系统相机 app，声明 CAMERA 反而会被强制要求运行时授权。
+    -->
 
     <application
         android:name=".MolaApp"
@@ -41,6 +53,37 @@
             android:name=".AgentMonitorForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 拍照中转文件的出口，authority 与 CameraCapture.AUTHORITY_SUFFIX 对应。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!--
+          Photo Picker 的向下移植：Android 13+ 系统自带，11–12 走 Google 系统更新的模块化组件，
+          再往下（4.4–10、以及 Go 版 11/12）需要 Play 服务按这条声明自动装模块。
+          没有 Play 服务的设备（国内 ROM 居多）这条是空转，androidx 会自动退回
+          ACTION_OPEN_DOCUMENT，不影响功能。
+          enabled=false 且从不启动，类不存在也不会有实例化风险，故 ignore MissingClass。
+        -->
+        <service
+            android:name="com.google.android.gms.metadata.ModuleDependencies"
+            android:enabled="false"
+            android:exported="false"
+            tools:ignore="MissingClass">
+            <intent-filter>
+                <action android:name="com.google.android.gms.metadata.MODULE_DEPENDENCIES" />
+            </intent-filter>
+            <meta-data
+                android:name="photopicker_activity:0:required"
+                android:value="" />
+        </service>
     </application>
 
 </manifest>

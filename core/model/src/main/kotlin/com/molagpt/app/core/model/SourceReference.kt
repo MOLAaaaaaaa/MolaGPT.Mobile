@@ -20,4 +20,6 @@ data class Usage(
     val totalTokens: Int? = null,
     /** 内部思考 token 数（usage.completion_tokens_details.reasoning_tokens）；用于运行时自校正。 */
     val reasoningTokens: Int? = null,
+    /** prompt 中命中缓存的 token 数（各家键名不同，见各 provider 的解析）；含在 [promptTokens] 内。 */
+    val cachedTokens: Int? = null,
 )

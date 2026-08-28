@@ -452,6 +452,14 @@ class ChatViewModel(
     }
 
     /**
+     * 多选一次带回来的一批附件。逐个交给 [attachFile]——每个各自起协程、各自成条、各自成败，
+     * 一个失败不影响其余。附件条按加入顺序排列。
+     */
+    fun attachFiles(uris: List<Uri>) {
+        uris.forEach(::attachFile)
+    }
+
+    /**
      * 选取附件后即时处理：MolaGPT 走服务端上传；BYOK **立即把文件复制进本地托管目录**，
      * 之后一切读取都基于这份副本。
      *

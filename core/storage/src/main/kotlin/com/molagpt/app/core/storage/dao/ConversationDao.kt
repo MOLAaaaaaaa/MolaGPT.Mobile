@@ -24,6 +24,49 @@ interface ConversationDao {
     )
     fun pagingSource(): PagingSource<Int, ConversationEntity>
 
+    /**
+     * 搜索侧边栏会话。标题始终可搜；正文只查已经落到本地的 rawText。
+     * placeholder=1 的 MolaGPT 云端占位只有元数据，因此明确跳过正文子查询。
+     * 消息子查询按已有的 messages(sessionId) 索引收窄，不把消息加载到 Kotlin 层。
+     *
+     * 用 `instr(lower(x), lower(:query))` 而非 LIKE：两者在 SQLite 下都只对 ASCII 大小写不敏感，
+     * 对字面子串完全等价，但 instr 没有通配符语义，用户输入的 % _ \ 天然按普通字符处理，无需转义。
+     * 同一个表达式还能直接给出命中位置，供 matchedSnippet 截窗口。
+     *
+     * matchedSnippet 取**最近一条**命中消息、命中点前 24 字起的 96 字窗口。
+     * 截取必须留在 SQL 侧：回传整条 rawText 会重演 MIGRATION_9_10 记录的 CursorWindow 撑爆事故。
+     */
+    @Query(
+        """
+        SELECT c.*, (
+            SELECT substr(m.rawText, MAX(1, instr(lower(m.rawText), lower(:query)) - 24), 96)
+            FROM messages AS m
+            WHERE m.sessionId = c.sessionId
+              AND m.rawText IS NOT NULL
+              AND instr(lower(m.rawText), lower(:query)) > 0
+            ORDER BY m.createdAt DESC
+            LIMIT 1
+        ) AS matchedSnippet
+        FROM conversations AS c
+        WHERE c.deletedAt IS NULL
+          AND c.visibleInList = 1
+          AND (
+              instr(lower(c.title), lower(:query)) > 0
+              OR (
+                  c.placeholder = 0
+                  AND EXISTS (
+                      SELECT 1 FROM messages AS m
+                      WHERE m.sessionId = c.sessionId
+                        AND m.rawText IS NOT NULL
+                        AND instr(lower(m.rawText), lower(:query)) > 0
+                  )
+              )
+          )
+        ORDER BY c.pinned DESC, c.updatedAt DESC
+        """,
+    )
+    fun searchPagingSource(query: String): PagingSource<Int, ConversationSearchRow>
+
     @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")
     suspend fun getById(sessionId: String): ConversationEntity?
 

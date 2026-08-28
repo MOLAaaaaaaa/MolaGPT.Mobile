@@ -4,12 +4,15 @@ import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.ByokMcpServer
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
+import com.molagpt.app.core.model.ChatMessageMetadataKeys
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.CustomBodyParam
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ImageGenerationConfig
+import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.StreamEvent
 import com.molagpt.app.core.model.ThinkingConfig
 import com.molagpt.app.core.model.ThinkingKinds
@@ -17,6 +20,7 @@ import com.molagpt.app.core.model.ThinkingParamKind
 import com.molagpt.app.core.model.TitleRequest
 import com.molagpt.app.core.model.ToolStatus
 import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.core.model.Usage
 import com.molagpt.app.core.model.WebSearchOptions
 import com.molagpt.app.core.model.WebSearchProvider
 import com.molagpt.app.core.network.sse.sseFlow
@@ -245,26 +249,43 @@ class ByokChatService(
         val baseMessages = buildMessages(provider, request)
         if (request.enabledTools.hasByokTools) {
             var messages = baseMessages
-            var rounds = 0
-            while (rounds < MAX_TOOL_ROUNDS) {
-                val toolRound = runToolRound(provider, request, messages) { emit(it) } ?: break
-                rounds += 1
+            var usage: Usage? = null
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val toolRound = runToolRound(provider, request, messages) { emit(it) }
+                if (toolRound == null) {
+                    emit(StreamEvent.Failed("OpenAI Compatible 工具响应格式无效"))
+                    return@flow
+                }
                 messages = toolRound.messages
+                usage = usage.accumulate(toolRound.usage)
+                if (toolRound.completed) {
+                    emit(
+                        StreamEvent.WireHistory(
+                            OpenAiWireHistory.encode(
+                                OpenAiWireHistory.CHAT_COMPLETIONS,
+                                provider.id,
+                                request.modelId,
+                                messages.drop(baseMessages.size),
+                            ),
+                        ),
+                    )
+                    emit(StreamEvent.Finish("stop", usage))
+                    return@flow
+                }
             }
-            streamOpenAiCompatible(provider, request, messages, includeTools = false).collect { emit(it) }
-            return@flow
         }
         streamOpenAiCompatible(provider, request, baseMessages, includeTools = false)
             .collect { emit(it) }
     }.flowOn(dispatchers.io)
 
     private fun streamAnthropic(provider: ByokProvider, request: ChatRequest): Flow<StreamEvent> = flow {
-        val toolRound = if (request.enabledTools.hasByokTools) {
-            runAnthropicToolRound(provider, request) { emit(it) }
-        } else {
-            null
+        val messages = buildAnthropicMessages(provider, request)
+        if (request.enabledTools.hasByokTools) {
+            runAnthropicToolLoop(provider, request, messages) { emit(it) }
+            return@flow
         }
-        val body = buildAnthropicBody(provider, request, extraUserText = toolRound?.summary)
+        val body = buildAnthropicBody(provider, request, messages)
         val req = Request.Builder()
             .url(provider.endpoint(provider.chatPath))
             .header("Accept", "text/event-stream")
@@ -299,12 +320,12 @@ class ByokChatService(
     }.flowOn(dispatchers.io)
 
     private fun streamGemini(provider: ByokProvider, request: ChatRequest): Flow<StreamEvent> = flow {
-        val toolRound = if (request.enabledTools.hasByokTools) {
-            runGeminiToolRound(provider, request) { emit(it) }
-        } else {
-            null
+        val contents = buildGeminiContents(provider, request)
+        if (request.enabledTools.hasByokTools) {
+            runGeminiToolLoop(provider, request, contents) { emit(it) }
+            return@flow
         }
-        val body = buildGeminiBody(provider, request, extraUserText = toolRound?.summary)
+        val body = buildGeminiBody(provider, request, contents)
         val req = Request.Builder()
             .url(geminiEndpoint(provider, request.modelId, stream = true))
             .header("Accept", "text/event-stream")
@@ -398,22 +419,40 @@ class ByokChatService(
         val baseMessages = buildMessages(provider, request)
         if (request.enabledTools.hasByokTools) {
             var input = baseMessages
-            var rounds = 0
-            while (rounds < MAX_TOOL_ROUNDS) {
-                val toolRound = runResponseToolRound(provider, request, input) { emit(it) } ?: break
-                rounds += 1
+            var usage: Usage? = null
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val toolRound = runResponseToolRound(provider, request, input) { emit(it) }
+                if (toolRound == null) {
+                    emit(StreamEvent.Failed("Responses API 工具响应格式无效"))
+                    return@flow
+                }
                 input = toolRound.messages
+                usage = usage.accumulate(toolRound.usage)
+                if (toolRound.completed) {
+                    emit(
+                        StreamEvent.WireHistory(
+                            OpenAiWireHistory.encode(
+                                OpenAiWireHistory.RESPONSES,
+                                provider.id,
+                                request.modelId,
+                                input.drop(baseMessages.size),
+                            ),
+                        ),
+                    )
+                    emit(StreamEvent.Finish("stop", usage))
+                    return@flow
+                }
             }
-            streamResponseStream(provider, request, input).collect { emit(it) }
-            return@flow
         }
-        streamResponseStream(provider, request, baseMessages).collect { emit(it) }
+        streamResponseStream(provider, request, baseMessages, emptyList()).collect { emit(it) }
     }.flowOn(dispatchers.io)
 
     private fun streamResponseStream(
         provider: ByokProvider,
         request: ChatRequest,
         messages: List<JsonObject>,
+        precedingTurnItems: List<JsonObject>,
     ): Flow<StreamEvent> = flow {
         val body = buildOpenAiResponseBody(provider, request, messages, stream = true, includeTools = false)
         val req = Request.Builder()
@@ -436,20 +475,54 @@ class ByokChatService(
                     emit(StreamEvent.Failed("BYOK 响应为空"))
                     return@flow
                 }
-                var finished = false
+                val outputItems = mutableListOf<JsonObject>()
+                val answer = StringBuilder()
+                var finish: StreamEvent.Finish? = null
+                var failed = false
+
+                suspend fun handle(events: List<StreamEvent>) {
+                    events.forEach { event ->
+                        when (event) {
+                            is StreamEvent.Delta -> {
+                                event.text?.let(answer::append)
+                                emit(event)
+                            }
+                            is StreamEvent.Finish -> finish = event
+                            is StreamEvent.Failed -> {
+                                failed = true
+                                emit(event)
+                            }
+                            else -> emit(event)
+                        }
+                    }
+                }
+
                 sseFlow { source.readUtf8Line() }.collect { payload ->
                     currentCoroutineContext().ensureActive()
                     if (payload.isDone) {
-                        parser.finishTail("stop").forEach { emit(it) }
-                        finished = true
+                        handle(parser.finishTail("stop"))
                         return@collect
                     }
-                    parser.parse(payload).forEach { event ->
-                        emit(event)
-                        if (event is StreamEvent.Finish) finished = true
-                    }
+                    captureResponsesOutputItems(http.json, payload.data, outputItems)
+                    handle(parser.parse(payload))
                 }
-                if (!finished) parser.finishTail(null).forEach { emit(it) }
+                if (finish == null) handle(parser.finishTail(null))
+                if (failed) return@flow
+
+                if (outputItems.none(::isResponsesMessageItem) && answer.isNotEmpty()) {
+                    outputItems += syntheticResponsesMessage(answer.toString())
+                }
+                emit(
+                    StreamEvent.WireHistory(
+                        OpenAiWireHistory.encode(
+                            OpenAiWireHistory.RESPONSES,
+                            provider.id,
+                            request.modelId,
+                            precedingTurnItems + outputItems,
+                        ),
+                    ),
+                )
+                emit(finish ?: StreamEvent.Finish("stop"))
             }
         } finally {
             runCatching { if (!call.isCanceled()) call.cancel() }
@@ -523,8 +596,8 @@ class ByokChatService(
                 ?.mapNotNull { it as? JsonObject }
                 ?: return null
             val parsedOutput = parseResponseOutputItems(output)
-            if (parsedOutput.none { it is ParsedResponseOutputItem.FunctionCall }) return null
             val functionOutputs = ArrayList<ResponseFunctionOutput>()
+            val hasFunctionCalls = parsedOutput.any { it is ParsedResponseOutputItem.FunctionCall }
 
             // output[] 本身就是有序协议：reasoning / message / function_call 必须逐项消费。
             // 特别是工具前导句（message）必须紧挨它后面的工具卡，不能先收集所有文本再执行所有调用。
@@ -556,7 +629,11 @@ class ByokChatService(
             // 官方手动上下文模式要求先原样回放整个 response.output（含 reasoning 的加密内容），
             // 再附加与 call_id 对应的 function_call_output；不能把这些 item 转成空 user message。
             val newInput = buildResponseReplayInput(messages, output, functionOutputs)
-            return ToolRoundResult(messages = newInput, summary = null)
+            return ToolRoundResult(
+                messages = newInput,
+                completed = !hasFunctionCalls,
+                usage = parseOpenAiResponseUsage(root),
+            )
         }
     }
 
@@ -576,6 +653,7 @@ class ByokChatService(
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) return null
             val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
+            val roundUsage = parseOpenAiUsage(root)
             val message = (root["choices"] as? JsonArray)
                 ?.firstOrNull()
                 ?.jsonObject
@@ -584,8 +662,7 @@ class ByokChatService(
                 ?: return null
             val calls = (message["tool_calls"] as? JsonArray)
                 ?.mapNotNull { parseToolCall(it) }
-                ?.takeIf { it.isNotEmpty() }
-                ?: return null
+                .orEmpty()
 
             // 先把工具调用前的助手前导文本/推理发给 UI（如「让我测试一下工具」），
             // 与 Desktop 一致——非流式工具轮也要展示 content/reasoning，而不是直接蹦出工具卡片。
@@ -596,94 +673,229 @@ class ByokChatService(
             if (!preamble.isNullOrBlank()) emitEvent(StreamEvent.Delta(text = preamble))
             val messages = baseMessages.toMutableList()
             messages.add(message)
+            if (calls.isEmpty()) return ToolRoundResult(messages, completed = true, usage = roundUsage)
             for (call in calls) {
                 val result = executeAndEmitTool(provider, request, call, emitEvent)
                 messages.add(toolResultMessage(call.id, result.output))
             }
-            return ToolRoundResult(messages)
+            return ToolRoundResult(messages, completed = false, usage = roundUsage)
         }
     }
 
-    private suspend fun runAnthropicToolRound(
+    /**
+     * Claude 原生 Messages 工具循环。
+     * 每次都把服务端返回的整个 assistant content（含 thinking/signature/redacted_thinking/tool_use）
+     * 原样放回历史，再追加一个包含本轮全部 tool_result 的 user message。
+     */
+    private suspend fun runAnthropicToolLoop(
         provider: ByokProvider,
         request: ChatRequest,
+        initialMessages: List<JsonObject>,
         emitEvent: suspend (StreamEvent) -> Unit,
-    ): ToolRoundResult? {
-        val body = buildAnthropicBody(provider, request, stream = false, includeTools = true)
-        val req = Request.Builder()
-            .url(provider.endpoint(provider.chatPath))
-            .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
-            .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
-            .build()
-        http.okHttp.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) return null
-            val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
+    ) {
+        val messages = initialMessages.toMutableList()
+        val turnItems = ArrayList<JsonObject>()
+        // 多轮累计：每轮都是独立计费的请求，只报最后一轮会大幅低估实际消耗。
+        var usage: Usage? = null
+
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val body = buildAnthropicBody(provider, request, messages, stream = false, includeTools = true)
+            val networkRequest = Request.Builder()
+                .url(provider.endpoint(provider.chatPath))
+                .header("anthropic-version", "2023-06-01")
+                .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
+                .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
+                .build()
+            val responseText = try {
+                http.okHttp.newCall(networkRequest).execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        emitEvent(StreamEvent.Failed("BYOK 请求失败：HTTP ${response.code} ${text.take(160)}"))
+                        return
+                    }
+                    text
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                emitEvent(StreamEvent.Failed("Anthropic 请求失败：${error.message ?: error::class.simpleName}"))
+                return
+            }
+            val root = runCatching { http.json.parseToJsonElement(responseText).jsonObject }.getOrNull()
+            if (root == null) {
+                emitEvent(StreamEvent.Failed("Anthropic 响应格式无效"))
+                return
+            }
+            root["error"]?.let { error ->
+                val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull
+                emitEvent(StreamEvent.Failed(message ?: "Anthropic 请求失败"))
+                return
+            }
             val contentBlocks = root["content"] as? JsonArray
-            val calls = contentBlocks
-                ?.mapNotNull { parseAnthropicToolCall(it) }
-                ?.takeIf { it.isNotEmpty() }
-                ?: return null
-            // 工具调用前的文本/思考块（type=text / type=thinking）先发给 UI。
-            val preamble = contentBlocks
-                .filter { (it as? JsonObject)?.get("type")?.jsonPrimitive?.contentOrNull == "text" }
-                .mapNotNull { (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull }
-                .joinToString("").takeIf { it.isNotBlank() }
-            val reasoning = contentBlocks
-                .filter { (it as? JsonObject)?.get("type")?.jsonPrimitive?.contentOrNull == "thinking" }
-                .mapNotNull { (it as? JsonObject)?.get("thinking")?.jsonPrimitive?.contentOrNull }
-                .joinToString("").takeIf { it.isNotBlank() }
-            return executeToolCalls(provider, request, calls, preamble, reasoning, emitEvent)
+            if (contentBlocks == null) {
+                emitEvent(StreamEvent.Failed("Anthropic 响应缺少 content"))
+                return
+            }
+            usage = usage.accumulate(anthropicUsage(root))
+            val assistantMessage = buildJsonObject {
+                put("role", "assistant")
+                put("content", contentBlocks)
+            }
+            messages += assistantMessage
+            turnItems += assistantMessage
+
+            val calls = ArrayList<ToolCall>()
+            contentBlocks.forEach { element ->
+                val block = element as? JsonObject ?: return@forEach
+                when (block["type"]?.jsonPrimitive?.contentOrNull) {
+                    "thinking" -> block["thinking"]?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { emitEvent(StreamEvent.Delta(thinking = it)) }
+                    "text" -> block["text"]?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { emitEvent(StreamEvent.Delta(text = it)) }
+                    "tool_use" -> parseAnthropicToolCall(block)?.let(calls::add)
+                }
+            }
+
+            if (calls.isEmpty()) {
+                emitEvent(
+                    StreamEvent.WireHistory(
+                        json = NativeWireHistory.encode(
+                            NativeWireHistory.ANTHROPIC_MESSAGES,
+                            provider.id,
+                            request.modelId,
+                            turnItems,
+                        ),
+                        metadataKey = ChatMessageMetadataKeys.ANTHROPIC_WIRE_HISTORY,
+                    ),
+                )
+                val reason = root["stop_reason"]?.jsonPrimitive?.contentOrNull ?: "stop"
+                emitEvent(StreamEvent.Finish(reason, usage))
+                return
+            }
+
+            val results = calls.map { call ->
+                val execution = executeAndEmitTool(provider, request, call, emitEvent)
+                NativeToolResult(
+                    callId = call.id,
+                    name = call.name,
+                    output = execution.output,
+                    isError = execution.status == ToolStatus.FAILED,
+                )
+            }
+            val resultMessage = buildAnthropicToolResultMessage(results)
+            messages += resultMessage
+            turnItems += resultMessage
         }
     }
 
-    private suspend fun runGeminiToolRound(
+    /**
+     * Gemini GenerateContent 原生工具循环。
+     * 模型返回的 content/parts（含 thoughtSignature）原样回放；并行调用的响应集中在同一个 user content。
+     */
+    private suspend fun runGeminiToolLoop(
         provider: ByokProvider,
         request: ChatRequest,
+        initialContents: List<JsonObject>,
         emitEvent: suspend (StreamEvent) -> Unit,
-    ): ToolRoundResult? {
-        val body = buildGeminiBody(provider, request, includeTools = true)
-        val req = Request.Builder()
-            .url(geminiEndpoint(provider, request.modelId, stream = false))
-            .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
-            .build()
-        http.okHttp.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) return null
-            val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
-            val calls = (root["candidates"] as? JsonArray)
-                ?.firstOrNull()
-                ?.jsonObject
-                ?.get("content")
-                ?.jsonObject
-                ?.get("parts") as? JsonArray
-                ?: return null
-            val parsed = calls.mapNotNull { parseGeminiToolCall(it) }.takeIf { it.isNotEmpty() } ?: return null
-            // functionCall 之前的 text part 作为前导文本发给 UI。
-            val preamble = calls
-                .mapNotNull { (it as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull }
-                .joinToString("").takeIf { it.isNotBlank() }
-            return executeToolCalls(provider, request, parsed, preamble, emitEvent = emitEvent)
-        }
-    }
+    ) {
+        val contents = initialContents.toMutableList()
+        val turnItems = ArrayList<JsonObject>()
+        // 多轮累计：每轮都是独立计费的请求，只报最后一轮会大幅低估实际消耗。
+        var usage: Usage? = null
 
-    private suspend fun executeToolCalls(
-        provider: ByokProvider,
-        request: ChatRequest,
-        calls: List<ToolCall>,
-        preamble: String? = null,
-        reasoning: String? = null,
-        emitEvent: suspend (StreamEvent) -> Unit,
-    ): ToolRoundResult {
-        // 工具卡片前先发助手前导思考/文本（与 Desktop 一致）。
-        if (!reasoning.isNullOrBlank()) emitEvent(StreamEvent.Delta(thinking = reasoning))
-        if (!preamble.isNullOrBlank()) emitEvent(StreamEvent.Delta(text = preamble))
-        val results = ArrayList<ToolCallResult>()
-        calls.forEach { call ->
-            val result = executeAndEmitTool(provider, request, call, emitEvent)
-            results.add(ToolCallResult(call, result.output))
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val body = buildGeminiBody(provider, request, contents, includeTools = true)
+            val networkRequest = Request.Builder()
+                .url(geminiEndpoint(provider, request.modelId, stream = false))
+                .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
+                .build()
+            val responseText = try {
+                http.okHttp.newCall(networkRequest).execute().use { response ->
+                    val text = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        emitEvent(StreamEvent.Failed("BYOK 请求失败：HTTP ${response.code} ${text.take(160)}"))
+                        return
+                    }
+                    text
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                emitEvent(StreamEvent.Failed("Gemini 请求失败：${error.message ?: error::class.simpleName}"))
+                return
+            }
+            val root = runCatching { http.json.parseToJsonElement(responseText).jsonObject }.getOrNull()
+            if (root == null) {
+                emitEvent(StreamEvent.Failed("Gemini 响应格式无效"))
+                return
+            }
+            root["error"]?.let { error ->
+                val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull
+                emitEvent(StreamEvent.Failed(message ?: "Gemini 请求失败"))
+                return
+            }
+            val candidate = (root["candidates"] as? JsonArray)?.firstOrNull() as? JsonObject
+            val rawContent = candidate?.get("content") as? JsonObject
+            if (candidate == null || rawContent == null) {
+                val blockReason = (root["promptFeedback"] as? JsonObject)
+                    ?.get("blockReason")?.jsonPrimitive?.contentOrNull
+                emitEvent(StreamEvent.Failed(blockReason?.let { "Gemini 请求被拦截：$it" } ?: "Gemini 响应缺少 content"))
+                return
+            }
+            val modelContent = ensureGeminiModelRole(rawContent)
+            contents += modelContent
+            turnItems += modelContent
+            usage = usage.accumulate(geminiUsage(root))
+
+            val calls = ArrayList<ToolCall>()
+            val parts = modelContent["parts"] as? JsonArray ?: JsonArray(emptyList())
+            parts.forEach { element ->
+                val part = element as? JsonObject ?: return@forEach
+                val text = part["text"]?.jsonPrimitive?.contentOrNull
+                if (!text.isNullOrEmpty()) {
+                    if (part["thought"]?.jsonPrimitive?.booleanOrNull == true) {
+                        emitEvent(StreamEvent.Delta(thinking = text))
+                    } else {
+                        emitEvent(StreamEvent.Delta(text = text))
+                    }
+                }
+                parseGeminiToolCall(part)?.let(calls::add)
+            }
+
+            if (calls.isEmpty()) {
+                emitEvent(
+                    StreamEvent.WireHistory(
+                        json = NativeWireHistory.encode(
+                            NativeWireHistory.GEMINI_GENERATE_CONTENT,
+                            provider.id,
+                            request.modelId,
+                            turnItems,
+                        ),
+                        metadataKey = ChatMessageMetadataKeys.GEMINI_WIRE_HISTORY,
+                    ),
+                )
+                val reason = candidate["finishReason"]?.jsonPrimitive?.contentOrNull ?: "stop"
+                emitEvent(StreamEvent.Finish(reason, usage))
+                return
+            }
+
+            val results = calls.map { call ->
+                val execution = executeAndEmitTool(provider, request, call, emitEvent)
+                NativeToolResult(
+                    callId = call.responseCallId,
+                    name = call.name,
+                    output = execution.output,
+                    isError = execution.status == ToolStatus.FAILED,
+                )
+            }
+            val responseContent = buildGeminiFunctionResponseContent(results)
+            contents += responseContent
+            turnItems += responseContent
         }
-        return ToolRoundResult(messages = emptyList(), summary = summarizeToolResults(results))
     }
 
     private fun buildOpenAiBody(
@@ -696,6 +908,11 @@ class ByokChatService(
         put("model", request.modelId)
         put("temperature", request.temperature)
         put("stream", stream)
+        // OpenAI 兼容端点流式默认不返回 usage，必须显式要；不要它就没有 token 统计可展示。
+        // usage 会单独放在 finish_reason 之后的 choices:[] chunk 里（StreamParser 有对应处理）。
+        if (stream && supportsStreamUsage(provider.baseUrl)) {
+            putJsonObject("stream_options") { put("include_usage", true) }
+        }
         putJsonArray("messages") {
             messages.forEach { add(it) }
         }
@@ -703,6 +920,13 @@ class ByokChatService(
         addOpenAiThinking(provider, request.modelId, request.useThinking, request.reasoningEffort)
         applyModelCustomBody(provider, request.modelId)
     }
+
+    /**
+     * 该 host 是否接受 `stream_options`。Mistral 收到这个字段会直接 400，
+     * 所以按 host 排除而不是全量下发——聚合网关（OpenRouter 等）都是支持的。
+     */
+    private fun supportsStreamUsage(baseUrl: String): Boolean =
+        !baseUrl.contains("api.mistral.ai", ignoreCase = true)
 
     /**
      * 有效推理 kind：模型显式配置（含 NONE=关闭）优先；否则按 OpenRouter→host→模型 ID 兜底。
@@ -810,19 +1034,108 @@ class ByokChatService(
             else -> JsonPrimitive(param.value)
         }
 
+    private fun buildAnthropicMessages(provider: ByokProvider, request: ChatRequest): List<JsonObject> {
+        val replaceImages = replaceImagesWithText(provider, request)
+        val imageOrdinal = AtomicInteger(0)
+        return buildList {
+            request.messages.filter { it.role != Role.SYSTEM }.forEach { message ->
+                if (message.role == Role.ASSISTANT) {
+                    val preserved = NativeWireHistory.decode(
+                        http.json,
+                        message.metadata[ChatMessageMetadataKeys.ANTHROPIC_WIRE_HISTORY],
+                        NativeWireHistory.ANTHROPIC_MESSAGES,
+                        provider.id,
+                        request.modelId,
+                    )
+                    if (preserved != null) {
+                        addAll(preserved)
+                        return@forEach
+                    }
+                }
+                add(
+                    buildJsonObject {
+                        put("role", if (message.role == Role.ASSISTANT) "assistant" else "user")
+                        put("content", ByokMessageContentBuilder.anthropicContent(message, replaceImages, imageOrdinal))
+                    },
+                )
+            }
+        }
+    }
+
+    private fun buildGeminiContents(provider: ByokProvider, request: ChatRequest): List<JsonObject> {
+        val replaceImages = replaceImagesWithText(provider, request)
+        val imageOrdinal = AtomicInteger(0)
+        return buildList {
+            request.messages.filter { it.role != Role.SYSTEM }.forEach { message ->
+                if (message.role == Role.ASSISTANT) {
+                    val preserved = NativeWireHistory.decode(
+                        http.json,
+                        message.metadata[ChatMessageMetadataKeys.GEMINI_WIRE_HISTORY],
+                        NativeWireHistory.GEMINI_GENERATE_CONTENT,
+                        provider.id,
+                        request.modelId,
+                    )
+                    if (preserved != null) {
+                        addAll(preserved)
+                        return@forEach
+                    }
+                }
+                add(
+                    buildJsonObject {
+                        put("role", if (message.role == Role.ASSISTANT) "model" else "user")
+                        put("parts", ByokMessageContentBuilder.geminiParts(message, replaceImages, imageOrdinal))
+                    },
+                )
+            }
+        }
+    }
+
     private fun buildMessages(provider: ByokProvider, request: ChatRequest): List<JsonObject> {
         val replaceImages = replaceImagesWithText(provider, request)
         val imageOrdinal = AtomicInteger(0)
-        return request.messages.map { message ->
-            val wire = OpenAiMessageContentBuilder.build(
-                message,
-                includeFileParts = true,
-                replaceImagesWithText = replaceImages,
-                imageOrdinal = imageOrdinal,
-            )
-            buildJsonObject {
-                put("role", wire.role)
-                put("content", wire.content)
+        val replayDeepSeekReasoning =
+            provider.type == ByokProviderType.OPENAI_COMPAT &&
+                effectiveThinkingKind(provider, request.modelId) == ThinkingParamKind.DEEPSEEK_THINKING
+        val expectedWireApi = if (provider.type == ByokProviderType.OPENAI_RESPONSE) {
+            OpenAiWireHistory.RESPONSES
+        } else {
+            OpenAiWireHistory.CHAT_COMPLETIONS
+        }
+        return buildList {
+            request.messages.forEach { message ->
+                if (message.role == Role.ASSISTANT) {
+                    val preserved = OpenAiWireHistory.decode(
+                        http.json,
+                        message.metadata[ChatMessageMetadataKeys.OPENAI_WIRE_HISTORY],
+                        expectedWireApi,
+                        provider.id,
+                        request.modelId,
+                    )
+                    if (preserved != null) {
+                        addAll(preserved)
+                        return@forEach
+                    }
+                }
+
+                val wire = OpenAiMessageContentBuilder.build(
+                    message,
+                    includeFileParts = true,
+                    replaceImagesWithText = replaceImages,
+                    imageOrdinal = imageOrdinal,
+                )
+                add(
+                    buildJsonObject {
+                        put("role", wire.role)
+                        put("content", wire.content)
+                        if (replayDeepSeekReasoning && message.role == Role.ASSISTANT) {
+                            message.fragments
+                                .filterIsInstance<MessageFragment.Thinking>()
+                                .joinToString(separator = "", transform = MessageFragment.Thinking::text)
+                                .takeIf { it.isNotBlank() }
+                                ?.let { put("reasoning_content", it) }
+                        }
+                    },
+                )
             }
         }
     }
@@ -976,7 +1289,8 @@ class ByokChatService(
         val functionCall = (element as? JsonObject)?.get("functionCall")?.jsonObject ?: return null
         val name = functionCall["name"]?.jsonPrimitive?.contentOrNull ?: return null
         val args = functionCall["args"]?.let { http.json.encodeToString(JsonElement.serializer(), it) } ?: "{}"
-        return ToolCall(Ids.newFragmentId(), name, args)
+        val protocolId = functionCall["id"]?.jsonPrimitive?.contentOrNull
+        return ToolCall(protocolId ?: Ids.newFragmentId(), name, args, responseCallId = protocolId)
     }
 
     private suspend fun executeAndEmitTool(
@@ -995,7 +1309,7 @@ class ByokChatService(
             execution.copy(output = processImageToolResult(call, execution.output, emitEvent))
         },
         resultPreview = { result ->
-            if (shouldShowToolPreview(call.name)) result.output.take(1200) else null
+            if (shouldShowToolPreview(call.name)) toolPreviewOf(call, result) else null
         },
         emitEvent = emitEvent,
     )
@@ -1541,10 +1855,27 @@ class ByokChatService(
         return runCatching {
             http.okHttp.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return "Fetch failed: HTTP ${resp.code}"
-                stripHtml(resp.body?.string().orEmpty()).take(12000)
+                val html = resp.body?.string().orEmpty()
+                // 抬头两行是给「这一页是什么」定位用的：模型本来只能从一堆去标签正文里猜自己读了啥，
+                // 工具卡的预览也靠它（见 toolPreviewOf）——正文一律不进卡片。
+                buildString {
+                    extractHtmlTitle(html)?.let { append("标题：").append(it).append('\n') }
+                    append("链接：").append(url).append("\n\n")
+                    append(stripHtml(html).take(12000))
+                }
             }
         }.getOrElse { "Fetch failed: ${it.message}" }
     }
+
+    /** 从原始 HTML 取 <title>；必须在 stripHtml 之前抽，去完标签就找不回来了。 */
+    private fun extractHtmlTitle(html: String): String? =
+        Regex("(?is)<title[^>]*>(.*?)</title>").find(html)
+            ?.groupValues?.getOrNull(1)
+            ?.let { htmlDecode(it) }
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.take(200)
 
     private fun toolResultMessage(toolCallId: String, result: String): JsonObject = buildJsonObject {
         put("role", "tool")
@@ -1625,50 +1956,39 @@ class ByokChatService(
         return toolName !in setOf("view_image", "vision_proxy")
     }
 
-    private fun summarizeToolResults(results: List<ToolCallResult>): String =
-        buildString {
-            append("工具结果：")
-            results.forEachIndexed { index, item ->
-                append("\n\n")
-                append(index + 1)
-                append(". ")
-                append(labelForTool(item.call.name))
-                append("\n")
-                append(item.result.take(4000))
-            }
+    /**
+     * 工具卡里显示什么。默认给结果前 1200 字，两类例外——它们的完整结果都是**给模型读的**，
+     * 铺进卡片既没有可读性，又能把这一项撑到比视口还高（高度暴涨会连带把列表的自动跟随搅乱）：
+     *
+     * - 联网搜索：只报搜了什么关键词。搜到哪些页由模型消化后写进正文，卡片不重复一遍。
+     * - 阅读网页：只报抬头两行（读到的标题 + 链接），正文一概不进卡片。
+     *
+     * 失败时一律显示错误输出——这时候「搜了什么」没有意义，「为什么没成」才有。
+     */
+    private fun toolPreviewOf(call: ToolCall, result: ToolExecutionResult): String? {
+        if (!shouldShowToolPreview(call.name)) return null
+        if (result.status == ToolStatus.FAILED) return result.output.take(400)
+        return when (call.name) {
+            "search_web", "web_search" -> call.arg("query")?.takeIf { it.isNotBlank() }?.take(200)
+            "fetch_url" ->
+                result.output.lineSequence().takeWhile { it.isNotBlank() }.joinToString("\n").take(400)
+            else -> result.output.take(1200)
         }
+    }
 
     private fun buildAnthropicBody(
         provider: ByokProvider,
         request: ChatRequest,
+        messages: List<JsonObject>,
         stream: Boolean = true,
         includeTools: Boolean = false,
-        extraUserText: String? = null,
     ): JsonObject = buildJsonObject {
         put("model", request.modelId)
         put("max_tokens", 4096)
         put("temperature", request.temperature)
         put("stream", stream)
-        val replaceImages = replaceImagesWithText(provider, request)
-        val imageOrdinal = AtomicInteger(0)
         putJsonArray("messages") {
-            request.messages.filter { it.role != com.molagpt.app.core.model.Role.SYSTEM }.forEach { message ->
-                addJsonObject {
-                    put("role", if (message.role == com.molagpt.app.core.model.Role.ASSISTANT) "assistant" else "user")
-                    put("content", ByokMessageContentBuilder.anthropicContent(message, replaceImages, imageOrdinal))
-                }
-            }
-            extraUserText?.takeIf { it.isNotBlank() }?.let { text ->
-                addJsonObject {
-                    put("role", "user")
-                    putJsonArray("content") {
-                        addJsonObject {
-                            put("type", "text")
-                            put("text", text)
-                        }
-                    }
-                }
-            }
+            messages.forEach { add(it) }
         }
         val systemText = request.messages
             .filter { it.role == com.molagpt.app.core.model.Role.SYSTEM }
@@ -1705,9 +2025,13 @@ class ByokChatService(
         return when (root["type"]?.jsonPrimitive?.contentOrNull) {
             "content_block_delta" -> {
                 val delta = root["delta"]?.jsonObject
+                val thinking = delta?.get("thinking")?.jsonPrimitive?.contentOrNull
                 val text = delta?.get("text")?.jsonPrimitive?.contentOrNull
-                    ?: delta?.get("thinking")?.jsonPrimitive?.contentOrNull
-                if (text.isNullOrEmpty()) null else StreamEvent.Delta(text = text)
+                when {
+                    !thinking.isNullOrEmpty() -> StreamEvent.Delta(thinking = thinking)
+                    !text.isNullOrEmpty() -> StreamEvent.Delta(text = text)
+                    else -> null
+                }
             }
             "message_stop" -> StreamEvent.Finish("stop")
             "error" -> StreamEvent.Failed(root["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull ?: "Anthropic 请求失败")
@@ -1715,29 +2039,27 @@ class ByokChatService(
         }
     }
 
+    private fun anthropicUsage(root: JsonObject): Usage? {
+        val usage = root["usage"] as? JsonObject ?: return null
+        val prompt = usage["input_tokens"]?.jsonPrimitive?.intOrNull
+        val completion = usage["output_tokens"]?.jsonPrimitive?.intOrNull
+        if (prompt == null && completion == null) return null
+        return Usage(
+            promptTokens = prompt,
+            completionTokens = completion,
+            totalTokens = if (prompt != null && completion != null) prompt + completion else null,
+            cachedTokens = usage["cache_read_input_tokens"]?.jsonPrimitive?.intOrNull,
+        )
+    }
+
     private fun buildGeminiBody(
         provider: ByokProvider,
         request: ChatRequest,
+        contents: List<JsonObject>,
         includeTools: Boolean = false,
-        extraUserText: String? = null,
     ): JsonObject = buildJsonObject {
-        val replaceImages = replaceImagesWithText(provider, request)
-        val imageOrdinal = AtomicInteger(0)
         putJsonArray("contents") {
-            request.messages.filter { it.role != com.molagpt.app.core.model.Role.SYSTEM }.forEach { message ->
-                addJsonObject {
-                    put("role", if (message.role == com.molagpt.app.core.model.Role.ASSISTANT) "model" else "user")
-                    put("parts", ByokMessageContentBuilder.geminiParts(message, replaceImages, imageOrdinal))
-                }
-            }
-            extraUserText?.takeIf { it.isNotBlank() }?.let { text ->
-                addJsonObject {
-                    put("role", "user")
-                    putJsonArray("parts") {
-                        addJsonObject { put("text", text) }
-                    }
-                }
-            }
+            contents.forEach { add(it) }
         }
         val systemText = request.messages
             .filter { it.role == com.molagpt.app.core.model.Role.SYSTEM }
@@ -1773,17 +2095,39 @@ class ByokChatService(
         }
         val candidates = root["candidates"] as? JsonArray ?: return emptyList()
         return candidates.flatMap { candidateElement ->
-            val candidate = candidateElement.jsonObject
-            val parts = candidate["content"]?.jsonObject?.get("parts") as? JsonArray
+            val candidate = candidateElement as? JsonObject ?: return@flatMap emptyList()
+            val content = candidate["content"] as? JsonObject
+            val parts = content?.get("parts") as? JsonArray
             val events = parts?.mapNotNull { part ->
-                part.jsonObject["text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }?.let {
-                    StreamEvent.Delta(text = it)
+                val obj = part as? JsonObject ?: return@mapNotNull null
+                obj["text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }?.let { text ->
+                    if (obj["thought"]?.jsonPrimitive?.booleanOrNull == true) {
+                        StreamEvent.Delta(thinking = text)
+                    } else {
+                        StreamEvent.Delta(text = text)
+                    }
                 }
             }.orEmpty().toMutableList<StreamEvent>()
             val finish = candidate["finishReason"]?.jsonPrimitive?.contentOrNull
             if (!finish.isNullOrBlank()) events += StreamEvent.Finish(finish)
             events
         }
+    }
+
+    private fun geminiUsage(root: JsonObject): Usage? {
+        val usage = root["usageMetadata"] as? JsonObject ?: return null
+        val prompt = usage["promptTokenCount"]?.jsonPrimitive?.intOrNull
+        val completion = usage["candidatesTokenCount"]?.jsonPrimitive?.intOrNull
+        val total = usage["totalTokenCount"]?.jsonPrimitive?.intOrNull
+        val reasoning = usage["thoughtsTokenCount"]?.jsonPrimitive?.intOrNull
+        if (prompt == null && completion == null && total == null && reasoning == null) return null
+        return Usage(
+            promptTokens = prompt,
+            completionTokens = completion,
+            totalTokens = total,
+            reasoningTokens = reasoning,
+            cachedTokens = usage["cachedContentTokenCount"]?.jsonPrimitive?.intOrNull,
+        )
     }
 
     private fun stripHtml(input: String): String =
@@ -1829,7 +2173,6 @@ class ByokChatService(
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
-        const val MAX_TOOL_ROUNDS = 3
         const val TITLE_TEMPERATURE = 0.3
         const val ANTHROPIC_TITLE_MAX_TOKENS = 2048
     }
@@ -1840,10 +2183,11 @@ class ByokChatService(
         val arguments: String,
         val responseCallId: String? = null,
     )
-    private data class ToolCallResult(val call: ToolCall, val result: String)
     private data class ToolRoundResult(
         val messages: List<JsonObject>,
-        val summary: String? = null,
+        val completed: Boolean = false,
+        /** 本轮的 token 用量。工具轮是非流式请求，usage 直接在响应体里。 */
+        val usage: Usage? = null,
     )
     private data class ToolSpec(
         val name: String,
@@ -1852,6 +2196,56 @@ class ByokChatService(
         val required: List<String>,
     )
     private data class DataUrl(val mimeType: String, val base64: String)
+}
+
+/** 一次原生工具执行后，回传 Claude/Gemini 所需的最小协议信息。 */
+internal data class NativeToolResult(
+    val callId: String?,
+    val name: String,
+    val output: String,
+    val isError: Boolean,
+)
+
+/** Anthropic 要求同一轮并行工具的所有 tool_result 放进紧随其后的同一个 user message。 */
+internal fun buildAnthropicToolResultMessage(results: List<NativeToolResult>): JsonObject = buildJsonObject {
+    put("role", "user")
+    putJsonArray("content") {
+        results.forEach { result ->
+            addJsonObject {
+                put("type", "tool_result")
+                put("tool_use_id", requireNotNull(result.callId))
+                put("content", result.output)
+                if (result.isError) put("is_error", true)
+            }
+        }
+    }
+}
+
+/** Gemini 3 要求 functionResponse.id 与 functionCall.id 对应；并行响应必须集中在一个 user content。 */
+internal fun buildGeminiFunctionResponseContent(results: List<NativeToolResult>): JsonObject = buildJsonObject {
+    put("role", "user")
+    putJsonArray("parts") {
+        results.forEach { result ->
+            addJsonObject {
+                putJsonObject("functionResponse") {
+                    result.callId?.let { put("id", it) }
+                    put("name", result.name)
+                    putJsonObject("response") {
+                        put(if (result.isError) "error" else "result", result.output)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** GenerateContent 响应通常自带 role=model；缺失时只补 role，不重建或改写任何 part/signature。 */
+internal fun ensureGeminiModelRole(content: JsonObject): JsonObject {
+    if (content["role"] != null) return content
+    return buildJsonObject {
+        put("role", "model")
+        content.forEach { (key, value) -> put(key, value) }
+    }
 }
 
 /** BYOK 工具的结构化执行结果；状态不再依赖 UI 猜测一段自由文本。 */
@@ -2056,6 +2450,41 @@ internal fun buildResponseReplayInput(
                 put("output", result.output)
             },
         )
+    }
+}
+
+private fun captureResponsesOutputItems(
+    json: Json,
+    data: String,
+    outputItems: MutableList<JsonObject>,
+) {
+    val root = runCatching { json.parseToJsonElement(data) as? JsonObject }.getOrNull() ?: return
+    when (root["type"]?.jsonPrimitive?.contentOrNull) {
+        "response.output_item.done" -> {
+            (root["item"] as? JsonObject)?.let(outputItems::add)
+        }
+        "response.completed", "response.incomplete" -> {
+            val authoritative = ((root["response"] as? JsonObject)?.get("output") as? JsonArray)
+                ?.mapNotNull { it as? JsonObject }
+                ?: return
+            if (authoritative.isEmpty() && outputItems.isNotEmpty()) return
+            outputItems.clear()
+            outputItems.addAll(authoritative)
+        }
+    }
+}
+
+private fun isResponsesMessageItem(item: JsonObject): Boolean =
+    item["type"]?.jsonPrimitive?.contentOrNull == "message"
+
+private fun syntheticResponsesMessage(text: String): JsonObject = buildJsonObject {
+    put("type", "message")
+    put("role", "assistant")
+    putJsonArray("content") {
+        addJsonObject {
+            put("type", "output_text")
+            put("text", text)
+        }
     }
 }
 

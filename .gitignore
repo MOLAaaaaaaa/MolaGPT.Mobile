@@ -30,3 +30,4 @@ release-signing.properties
 _tools/*
 deepseek_jadx/*
 deepseek_jadx.7z
+编译.ps1

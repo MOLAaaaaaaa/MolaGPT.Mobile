@@ -21,9 +21,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -148,6 +150,34 @@ fun Modifier.shimmer(): Modifier = composed {
                 end = Offset(shift + w, size.height),
             ),
         )
+    }
+}
+
+/**
+ * 段落骨架：几条宽度递减的裸微光条，没有卡片/边框/底色，直接浮在背景上。
+ *
+ * 形状是照着「一段自然收尾的文字」做的——[widthFractions] 逐行收窄，最后一行明显短，
+ * 所以它只适合用在正文本身也是无容器纯文本排版的地方（助手消息就是）。
+ * 需要带容器的加载态请直接用 [shimmer] 自己搭。
+ */
+@Composable
+fun SkeletonLines(
+    modifier: Modifier = Modifier,
+    widthFractions: List<Float> = listOf(0.88f, 0.64f, 0.40f),
+    lineHeight: Dp = 12.dp,
+    spacing: Dp = 9.dp,
+) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(spacing)) {
+        widthFractions.forEach { fraction ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(fraction)
+                    .height(lineHeight)
+                    // clip 必须在 shimmer 之前：shimmer 是 drawBehind 平铺渐变，靠外层裁剪出圆角。
+                    .clip(RoundedCornerShape(lineHeight / 2))
+                    .shimmer(),
+            )
+        }
     }
 }
 

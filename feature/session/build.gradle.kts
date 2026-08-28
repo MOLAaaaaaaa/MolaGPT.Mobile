@@ -28,6 +28,7 @@ dependencies {
     api(project(":core:model"))
     implementation(project(":core:common"))
     api(project(":core:storage"))
+    implementation(project(":core:render"))
 
     implementation(libs.bundles.compose)
     api(libs.androidx.paging.runtime)

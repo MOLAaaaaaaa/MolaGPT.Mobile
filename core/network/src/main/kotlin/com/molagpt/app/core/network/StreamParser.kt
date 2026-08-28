@@ -30,6 +30,16 @@ class StreamParser(
     private val webArtifacts = WebToolArtifactSplitter()
     private val responseMessagePhases = HashMap<String, String>()
 
+    /**
+     * 最近一次见到的 usage。
+     *
+     * 开了 `stream_options.include_usage` 之后，OpenAI 把 usage 放在 **finish_reason 之后**
+     * 那个 `choices: []` 的独立 chunk 里——所以在 finish_reason 那一刻去读永远是空的。
+     * 这里把任意 chunk 上的 usage 记下来，由 [DONE] 触发的收尾 Finish 带出去
+     * （见 ByokChatService 的 SSE 循环：payload.isDone 时无条件再调一次 finishTail）。
+     */
+    private var lastUsage: Usage? = null
+
     fun parse(payload: SsePayload): List<StreamEvent> {
         if (payload.isDone) return finishTail("stop")
         val raw = payload.data
@@ -51,6 +61,7 @@ class StreamParser(
 
         val eventType = root["type"]?.prim()?.contentOrNull ?: payload.event
         rememberResponseMessagePhase(root, eventType)
+        parseUsage(root)?.let { lastUsage = it }
         val choice = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
         val delta = choice?.get("delta") as? JsonObject
 
@@ -99,7 +110,7 @@ class StreamParser(
         if (tail.visible.isNotEmpty() || tail.thinking.isNotEmpty()) {
             out.add(StreamEvent.Delta(text = tail.visible.ifEmpty { null }, thinking = tail.thinking.ifEmpty { null }))
         }
-        out.add(StreamEvent.Finish(reason = reason, usage = usage))
+        out.add(StreamEvent.Finish(reason = reason, usage = usage ?: lastUsage))
         return out
     }
 
@@ -131,17 +142,7 @@ class StreamParser(
         }
     }
 
-    private fun parseUsage(root: JsonObject): Usage? {
-        val u = root["usage"] as? JsonObject ?: return null
-        val details = u["completion_tokens_details"] as? JsonObject
-        return Usage(
-            promptTokens = u["prompt_tokens"]?.prim()?.intOrNull,
-            completionTokens = u["completion_tokens"]?.prim()?.intOrNull,
-            totalTokens = u["total_tokens"]?.prim()?.intOrNull,
-            reasoningTokens = details?.get("reasoning_tokens")?.prim()?.intOrNull
-                ?: u["reasoning_tokens"]?.prim()?.intOrNull,
-        )
-    }
+    private fun parseUsage(root: JsonObject): Usage? = parseOpenAiUsage(root)
 
     private fun responseTextDelta(root: JsonObject, eventType: String?): String? {
         val deltaText = root["delta"]?.prim()?.contentOrNull
@@ -210,4 +211,58 @@ class StreamParser(
     }
 
     private fun JsonElement?.prim(): JsonPrimitive? = this as? JsonPrimitive
+}
+
+/**
+ * 解析 OpenAI 形状的 `usage`（chat/completions 系）。
+ *
+ * 提到顶层是因为非流式的工具轮也要用：BYOK 开了工具之后走的是「非流式多轮 + 最后补一个 Finish」，
+ * 那条路径拿不到 SSE，只能从响应体里读同一个字段（见 ByokChatService.runToolRound）。
+ */
+internal fun parseOpenAiUsage(root: JsonObject): Usage? {
+    val u = root["usage"] as? JsonObject ?: return null
+    fun int(o: JsonObject?, key: String) = (o?.get(key) as? JsonPrimitive)?.intOrNull
+    val details = u["completion_tokens_details"] as? JsonObject
+    val promptDetails = u["prompt_tokens_details"] as? JsonObject
+    return Usage(
+        promptTokens = int(u, "prompt_tokens"),
+        completionTokens = int(u, "completion_tokens"),
+        totalTokens = int(u, "total_tokens"),
+        reasoningTokens = int(details, "reasoning_tokens") ?: int(u, "reasoning_tokens"),
+        // OpenAI 官方在 prompt_tokens_details.cached_tokens；DeepSeek 等平铺成 prompt_cache_hit_tokens。
+        cachedTokens = int(promptDetails, "cached_tokens") ?: int(u, "prompt_cache_hit_tokens"),
+    )
+}
+
+/**
+ * 解析 Responses API 形状的 `usage`（字段名与 chat/completions 不同：input_/output_tokens）。
+ */
+internal fun parseOpenAiResponseUsage(root: JsonObject): Usage? {
+    val u = root["usage"] as? JsonObject ?: return null
+    fun int(o: JsonObject?, key: String) = (o?.get(key) as? JsonPrimitive)?.intOrNull
+    val prompt = int(u, "input_tokens")
+    val completion = int(u, "output_tokens")
+    if (prompt == null && completion == null) return null
+    return Usage(
+        promptTokens = prompt,
+        completionTokens = completion,
+        totalTokens = int(u, "total_tokens")
+            ?: if (prompt != null && completion != null) prompt + completion else null,
+        reasoningTokens = int(u["output_tokens_details"] as? JsonObject, "reasoning_tokens"),
+        cachedTokens = int(u["input_tokens_details"] as? JsonObject, "cached_tokens"),
+    )
+}
+
+/** 多轮累加：BYOK 工具循环每一轮都是独立计费的请求，用户付的是各轮之和而不是最后一轮。 */
+internal fun Usage?.accumulate(next: Usage?): Usage? {
+    if (this == null) return next
+    if (next == null) return this
+    fun add(a: Int?, b: Int?) = if (a == null && b == null) null else (a ?: 0) + (b ?: 0)
+    return Usage(
+        promptTokens = add(promptTokens, next.promptTokens),
+        completionTokens = add(completionTokens, next.completionTokens),
+        totalTokens = add(totalTokens, next.totalTokens),
+        reasoningTokens = add(reasoningTokens, next.reasoningTokens),
+        cachedTokens = add(cachedTokens, next.cachedTokens),
+    )
 }

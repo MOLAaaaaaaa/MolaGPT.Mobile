@@ -93,7 +93,9 @@ fun ToolCallView(
         AnimatedVisibility(visible = !collapsed && preview != null) {
             StreamingMarkdownView(
                 markdown = preview!!.trim(),
-                textScale = 0.85f,
+                // 比思考块（0.78）还小一档：工具结果是给模型读的原始产物，人只需要扫一眼确认拿到了东西。
+                // 字号压下来同时也压住了 mcp_call / execute_python_code 这类没有专门裁剪的长输出的高度。
+                textScale = 0.72f,
                 modifier = Modifier.padding(top = 8.dp),
             )
         }

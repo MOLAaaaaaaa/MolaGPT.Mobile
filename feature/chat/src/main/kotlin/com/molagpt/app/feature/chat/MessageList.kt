@@ -1,6 +1,14 @@
 package com.molagpt.app.feature.chat
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -8,29 +16,42 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import com.molagpt.app.core.render.MolaMotion
+import kotlinx.coroutines.launch
 import com.molagpt.app.core.markdown.MdBlock
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.MessageFragment
+import com.molagpt.app.core.model.MessageStats
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.Role
@@ -59,6 +80,7 @@ fun MessageList(
     onNavEditSnapshot: (String, Int) -> Unit = { _, _ -> },
 ) {
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     var autoFollow by remember { mutableStateOf(true) }
     StreamRenderPacingEffect(messages.any(ChatMessage::isStreaming))
@@ -102,13 +124,38 @@ fun MessageList(
         }
     }
 
-    // 跟随判定：滚动时持续按「是否贴底」更新跟随意图。仅在用户手势滚动(isScrollInProgress)时更新——
-    // 程序滚动(instant scroll)与流式内容增长都不会置该标志,故不会误改意图:
-    // 用户上滑→立即停跟随,滑回底部→立即恢复。
+    // 贴底判定的容差。原来写死 48 **像素**——在 3x 屏上只有 16dp，手指停在离底一点点的地方
+    // 就判成「没贴底」，跟随再也不恢复。改成按密度换算的 dp，手感才和屏幕无关。
+    val bottomThresholdPx = with(LocalDensity.current) { 32.dp.roundToPx() }
+
+    // 跟随判定必须绑在**用户手势**上。别拿 isScrollInProgress 当手势的代理——它由
+    // ScrollableState.scroll{} 的互斥锁驱动，程序滚动同样会置位（scrollToBottom 自己、统计卡展开时的
+    // bringIntoView 都算）。一旦某次程序滚动跨了帧，snapshotFlow 就会在中途采到「正在滚 + 还没贴底」，
+    // 把跟随意图误关掉；而且滚完也不会恢复——更新被 if(scrolling) 挡住，滚动结束那一刻不做任何处理。
+    // 表现就是内容越高越容易「跟丢」，视角卡住不动（工具卡一次涨几百 dp 时最容易复现）。
+    //
+    // DragInteraction 只有真实拖拽才产生，程序滚动不发，用它当闸门就没有误判。
+    // 闸门保持到滚动**完全停下**为止，这样抬手后的惯性滑行也算用户主导——一甩到底同样能恢复跟随。
+    var userScrolling by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress to listState.isAtBottom() }
+        listState.interactionSource.interactions.collect { interaction ->
+            when (interaction) {
+                is DragInteraction.Start -> userScrolling = true
+                // 抬手/取消时如果已经不在滚（没有惯性可跟），立刻关闸。
+                // 兜底而已：正常情况由下面「滚动停下」那一路关闸，那条才覆盖得到惯性滑行。
+                // 少了这句，一次没产生任何滚动的拖拽会把闸门永久卡在开启状态。
+                is DragInteraction.Stop, is DragInteraction.Cancel ->
+                    if (!listState.isScrollInProgress) userScrolling = false
+                else -> Unit
+            }
+        }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.isAtBottom(bottomThresholdPx) }
             .collect { (scrolling, atBottom) ->
-                if (scrolling) autoFollow = atBottom
+                if (!userScrolling) return@collect
+                autoFollow = atBottom
+                if (!scrolling) userScrolling = false
             }
     }
 
@@ -126,14 +173,26 @@ fun MessageList(
         }
     }
 
+    // 「回到最新」按钮的出现条件：末项底边还在视口下方超过三分之一屏，或者末项压根没进视口。
+    // 用比例而不是固定 dp——同样的绝对距离在小屏上是"远得看不见"，在平板上只是"差一点"。
+    val showJumpToBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            if (info.visibleItemsInfo.isEmpty()) return@derivedStateOf false
+            val viewport = (info.viewportEndOffset - info.viewportStartOffset).coerceAtLeast(1)
+            listState.distanceToBottomPx() > viewport / 3
+        }
+    }
+
     CompositionLocalProvider(
         LocalMarkdownImageRenderer provides { url, imgModifier ->
             RemoteImage(url, imgModifier)
         },
     ) {
+        Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
-            modifier = modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.Top,
         ) {
@@ -174,6 +233,7 @@ fun MessageList(
                         }
                     }
                     is MessageListRow.StreamingPlaceholder -> AssistantStreamingPlaceholder(rowModifier)
+                    is MessageListRow.Stats -> MessageStatsRow(row.stats, rowModifier)
                     is MessageListRow.Actions -> Box(
                         modifier = rowModifier,
                         contentAlignment = if (row.alignEnd) Alignment.CenterEnd else Alignment.CenterStart,
@@ -211,6 +271,47 @@ fun MessageList(
                 }
             }
         }
+        JumpToBottomButton(
+            visible = showJumpToBottom,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+            onClick = {
+                // 点一下 = 明确表达「我要看最新的」，所以顺手把跟随打开：
+                // 之后的流式增长会继续贴底，不用再点第二次。
+                autoFollow = true
+                scope.launch { listState.scrollToBottom(animated = true) }
+            },
+        )
+        }
+    }
+}
+
+/** 视线离最新内容太远时浮出的「回到最新」圆钮。 */
+@Composable
+private fun JumpToBottomButton(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = modifier,
+        enter = fadeIn(MolaMotion.standard()) + scaleIn(MolaMotion.emphasized(), initialScale = 0.8f),
+        exit = fadeOut(MolaMotion.standard()) + scaleOut(MolaMotion.standard(), targetScale = 0.8f),
+    ) {
+        Surface(
+            onClick = onClick,
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
+            shadowElevation = 4.dp,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.KeyboardArrowDown,
+                contentDescription = "回到最新消息",
+                modifier = Modifier.padding(6.dp).size(22.dp),
+            )
+        }
     }
 }
 
@@ -221,15 +322,28 @@ private fun androidx.compose.foundation.lazy.LazyListState.isAtBottom(thresholdP
     return last.offset + last.size <= info.viewportEndOffset + thresholdPx
 }
 
-private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToBottom() {
+/**
+ * 视线离「最新内容」有多远（px）。末项还没进视口就返回 [Int.MAX_VALUE]——
+ * 下面整整还有一项没看到，谈不上「差一点点」。
+ */
+private fun androidx.compose.foundation.lazy.LazyListState.distanceToBottomPx(): Int {
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return 0
+    if (last.index < info.totalItemsCount - 1) return Int.MAX_VALUE
+    return (last.offset + last.size - info.viewportEndOffset).coerceAtLeast(0)
+}
+
+private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToBottom(animated: Boolean = false) {
     val lastIndex = (layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
     // 先跳到末项（确保它被测量），再把末项底边顶到视口底边——
     // 处理「末项比视口高时只显示顶部」与 contentPadding，避免流式增长时最新一行被顶到视口下方。
-    scrollToItem(lastIndex)
+    if (animated) animateScrollToItem(lastIndex) else scrollToItem(lastIndex)
     val info = layoutInfo
     val last = info.visibleItemsInfo.lastOrNull { it.index == lastIndex } ?: return
     val overshoot = last.offset + last.size - info.viewportEndOffset
-    if (overshoot > 0) scrollBy(overshoot.toFloat())
+    if (overshoot > 0) {
+        if (animated) animateScrollBy(overshoot.toFloat()) else scrollBy(overshoot.toFloat())
+    }
 }
 
 private data class MessageRenderRequest(
@@ -299,6 +413,16 @@ private sealed interface MessageListRow {
     ) : MessageListRow {
         override val key = "$messageId:streaming"
         override val contentType = "streaming"
+    }
+
+    /** 单次请求的 token / 速度统计（仅 BYOK、且用户没关掉显示时才生成此行）。 */
+    data class Stats(
+        val messageId: String,
+        val stats: MessageStats,
+        override val topPaddingDp: Int,
+    ) : MessageListRow {
+        override val key = "$messageId:stats"
+        override val contentType = "stats"
     }
 
     /** 消息下方操作栏（复制 / 编辑 / 重新生成）。 */
@@ -478,6 +602,15 @@ private fun List<ChatMessage>.toMessageRows(
             }
             val copyText = message.rawText
                 ?: message.fragments.filterIsInstance<MessageFragment.Text>().joinToString("\n") { it.markdown }
+            // 统计行排在操作栏之上：先「这次花了多少」，再「拿它做什么」。
+            // durationMs 只有 ChatRepository 的 BYOK 分支会写，所以拿它当「这条属于 BYOK」的判据——
+            // 光看 tokens 不行：那个键 MolaGPT 链路也会写，而官方链路按次计费，摆 token 数会误导。
+            val stats = MessageStats.from(message.metadata)?.takeIf { it.durationMs != null }
+            if (stats != null) {
+                addRow(startsMessage = false) { top ->
+                    MessageListRow.Stats(message.messageId, stats, top)
+                }
+            }
             if (copyText.isNotBlank()) {
                 addRow(startsMessage = false) { top ->
                     MessageListRow.Actions(

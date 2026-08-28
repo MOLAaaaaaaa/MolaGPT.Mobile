@@ -129,6 +129,29 @@ object AttachmentMime {
         "bmp" to "image/bmp",
     )
 
+    /**
+     * BYOK 文档选择器（SAF）的 MIME 过滤白名单。收不了的格式在选择器里就置灰，
+     * 不要等用户翻半天选完再弹「不支持」。
+     *
+     * **只给 BYOK 用**：MolaGPT 账户的附件走服务端 batch_upload 进沙箱，什么格式都收，
+     * 那条路必须继续放行 `&#42;/&#42;`，否则会砍掉代码执行的文件输入。
+     *
+     * 含 `application/octet-stream` 是有意的：DocumentsUI 按扩展名查 MimeTypeMap 定类型，
+     * .md/.kt/.py/.log 这些查不到，一律报 octet-stream。不放行它们就整个从选择器里消失，
+     * 而 [resolve] 恰好能按扩展名把它们兜回文本类。代价是未知二进制也能选中，交给
+     * [unsupportedReason] 在选完后拦下——比「能解析的文件反而选不了」划算得多。
+     *
+     * 保留 `image/&#42;` 是给相册里没有的图片留条路（下载目录、其他 App 的导出文件）。
+     */
+    val BYOK_PICKER_MIME_TYPES: List<String> = buildList {
+        add("application/pdf")
+        add(DOCX)
+        add("image/*")
+        add("text/*")
+        addAll(STRUCTURED_TEXT)
+        add("application/octet-stream")
+    }
+
     /** 去掉参数与大小写差异：`Text/Plain; charset=UTF-8` → `text/plain`。 */
     fun normalize(mimeType: String?): String =
         mimeType.orEmpty().substringBefore(';').trim().lowercase(Locale.ROOT)

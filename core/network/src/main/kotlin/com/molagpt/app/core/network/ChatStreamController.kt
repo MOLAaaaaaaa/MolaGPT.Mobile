@@ -20,6 +20,9 @@ class ChatStreamController {
         is StreamEvent.Sources -> listOf(DeltaCommand.SetSources(event.refs))
         is StreamEvent.Pending -> listOf(DeltaCommand.SetPending(event.label, event.detail))
         is StreamEvent.Image -> listOf(DeltaCommand.AddImage(event.url, event.prompt))
+        is StreamEvent.WireHistory -> listOf(
+            DeltaCommand.SetMetadata(event.metadataKey, event.json),
+        )
         is StreamEvent.Tool -> listOf(
             DeltaCommand.UpsertTool(
                 MessageFragment.ToolCall(

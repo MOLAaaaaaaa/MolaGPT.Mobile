@@ -20,19 +20,24 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -50,10 +55,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
@@ -61,21 +68,23 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.molagpt.app.core.model.Conversation
-import com.molagpt.app.core.model.ProviderKind
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.LoadState
-import androidx.paging.PagingData
 import androidx.paging.compose.LazyPagingItems
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.compose.itemContentType
 import androidx.paging.compose.itemKey
-import kotlinx.coroutines.flow.Flow
+import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.model.ProviderKind
+import com.molagpt.app.core.render.ImeDismissBackHandler
 import kotlinx.coroutines.launch
 
 @Composable
 fun SessionDrawer(
-    sessions: Flow<PagingData<SessionListItem>>,
+    sessions: SessionItemsSource,
     currentSessionId: String?,
+    /** 抽屉是否可见。抽屉常驻 composition，返回键兜底必须按它收口，否则会抢走聊天页的返回。 */
+    drawerOpen: Boolean,
     onNewChat: () -> Unit,
     onSelect: (String) -> Unit,
     onDelete: (sessionId: String, nextSessionId: String?) -> Unit,
@@ -84,8 +93,16 @@ fun SessionDrawer(
     onRequestAllIds: suspend () -> List<String>,
     modifier: Modifier = Modifier,
 ) {
-    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    val items = sessions.collectAsLazyPagingItems()
+    // 抽屉自带搜索框，键盘弹起时窗口不会被系统缩放（edge-to-edge 下 decorFitsSystemWindows=false），
+    // 底部让位得自己算 ime∪navigationBars：只取 navigationBars 的话，列表尾部会永远压在键盘下面滚不出来。
+    // 走 contentPadding 而非 windowInsetsPadding，是为了保留键盘收起时内容滚过导航栏的观感。
+    val listBottom = WindowInsets.ime.union(WindowInsets.navigationBars)
+        .asPaddingValues()
+        .calculateBottomPadding()
+    val searchQuery by sessions.searchQuery.collectAsStateWithLifecycle()
+    val appliedQuery by sessions.appliedQuery.collectAsStateWithLifecycle()
+    val searching = searchQuery.trim().isNotEmpty()
+    val items = sessions.pagingData.collectAsLazyPagingItems()
 
     var selecting by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf(emptySet<String>()) }
@@ -101,6 +118,7 @@ fun SessionDrawer(
     }
 
     LaunchedEffect(selecting) {
+        if (selecting) sessions.setSearchQuery("")
         allIds = if (selecting) onRequestAllIds() else null
     }
 
@@ -110,6 +128,10 @@ fun SessionDrawer(
 
     // 多选态下返回键先退出多选；抽屉的关闭手势由调用方的 PredictiveBackHandler 处理。
     BackHandler(enabled = selecting) { exitSelection() }
+
+    // 搜索框弹起键盘时，返回先收键盘而不是关抽屉（三星不走预测式返回，见 ImeDismissBackHandler 文档）。
+    // 必须排在上面那个 BackHandler 之后：dispatcher 是 LIFO，后注册的先收到。
+    ImeDismissBackHandler(enabled = drawerOpen)
 
     Column(
         modifier = modifier
@@ -128,7 +150,16 @@ fun SessionDrawer(
                 onDelete = { confirmingBatch = true },
             )
         } else {
-            NewChatButton(onClick = onNewChat)
+            ConversationSearchField(
+                query = searchQuery,
+                onQueryChange = sessions::setSearchQuery,
+            )
+            NewChatButton(
+                onClick = {
+                    sessions.setSearchQuery("")
+                    onNewChat()
+                },
+            )
         }
 
         Box(
@@ -137,12 +168,18 @@ fun SessionDrawer(
                 .weight(1f),
         ) {
             val listState = rememberLazyListState()
-            val refreshing = items.loadState.refresh is LoadState.Loading
+            val refreshState = items.loadState.refresh
+            val refreshing = refreshState is LoadState.Loading
+            val searchFailed = refreshState is LoadState.Error
+
+            LaunchedEffect(searchQuery.trim()) {
+                listState.scrollToItem(0)
+            }
 
             LazyColumn(
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(1.dp),
-                contentPadding = PaddingValues(top = 4.dp, bottom = navBottom + 12.dp),
+                contentPadding = PaddingValues(top = 4.dp, bottom = listBottom + 12.dp),
                 modifier = Modifier
                     .fillMaxSize()
                     .semantics { contentDescription = "会话列表内容" },
@@ -156,14 +193,19 @@ fun SessionDrawer(
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
-                                text = "暂无对话",
+                                text = when {
+                                    searchFailed && searching -> "搜索失败，请缩短关键词后重试"
+                                    searchFailed -> "加载对话失败"
+                                    searching -> "未找到相关对话"
+                                    else -> "暂无对话"
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
                 } else {
-                    if (!selecting) {
+                    if (!selecting && !searching) {
                         item(key = "select-entry", contentType = "select-entry") {
                             ManageRow(onClick = { selecting = true })
                         }
@@ -182,6 +224,8 @@ fun SessionDrawer(
                                     conversation = item.conversation,
                                     selected = sessionId == currentSessionId,
                                     time = item.time,
+                                    query = appliedQuery,
+                                    snippet = item.snippet,
                                     selectionMode = selecting,
                                     checked = sessionId in selectedIds,
                                     onClick = {
@@ -196,7 +240,7 @@ fun SessionDrawer(
                                         }
                                     },
                                     onLongClick = {
-                                        if (!selecting) {
+                                        if (!selecting && !searching) {
                                             selecting = true
                                             selectedIds = setOf(sessionId)
                                         }
@@ -327,6 +371,79 @@ private fun DrawerHeader() {
 }
 
 @Composable
+private fun ConversationSearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(14.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 2.dp, bottom = 4.dp)
+            .height(42.dp)
+            .clip(shape)
+            .border(
+                width = 1.dp,
+                color = if (focused) colors.primary else colors.outline.copy(alpha = 0.55f),
+                shape = shape,
+            )
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Search,
+            contentDescription = null,
+            tint = colors.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        BasicTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.onSurface),
+            cursorBrush = SolidColor(colors.primary),
+            modifier = Modifier
+                .weight(1f)
+                .onFocusChanged { focused = it.isFocused }
+                .semantics { contentDescription = "搜索标题或本地对话内容" },
+            decorationBox = { innerTextField ->
+                Box(contentAlignment = Alignment.CenterStart) {
+                    if (query.isEmpty()) {
+                        Text(
+                            text = "搜索标题或本地对话内容",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = colors.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    innerTextField()
+                }
+            },
+        )
+        if (query.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = { onQueryChange("") }),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = "清除搜索",
+                    tint = colors.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun NewChatButton(onClick: () -> Unit) {
     Row(
         modifier = Modifier
@@ -445,6 +562,10 @@ private fun SessionRow(
     conversation: Conversation,
     selected: Boolean,
     time: String,
+    /** 已生效的搜索词，用于高亮；非搜索态为空串，此时渲染与无高亮完全一致。 */
+    query: String,
+    /** 正文命中片段；非空时标题下多渲染一行。 */
+    snippet: String?,
     selectionMode: Boolean,
     checked: Boolean,
     onClick: () -> Unit,
@@ -499,7 +620,7 @@ private fun SessionRow(
                     Spacer(Modifier.width(4.dp))
                 }
                 Text(
-                    text = conversation.title,
+                    text = rememberHighlighted(conversation.title, query),
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (selected) accent else MaterialTheme.colorScheme.onSurface,
                     fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
@@ -516,6 +637,16 @@ private fun SessionRow(
                     text = time,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (snippet != null) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = rememberHighlighted(snippet, query),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }

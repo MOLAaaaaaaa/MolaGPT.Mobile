@@ -29,6 +29,12 @@ sealed interface StreamEvent {
     /** 图片产物。 */
     data class Image(val url: String, val prompt: String? = null) : StreamEvent
 
+    /** 当前可见助手回复背后的协议级历史，供下一轮原样回放。 */
+    data class WireHistory(
+        val json: String,
+        val metadataKey: String = ChatMessageMetadataKeys.OPENAI_WIRE_HISTORY,
+    ) : StreamEvent
+
     /** 正常结束。 */
     data class Finish(val reason: String? = null, val usage: Usage? = null) : StreamEvent
 

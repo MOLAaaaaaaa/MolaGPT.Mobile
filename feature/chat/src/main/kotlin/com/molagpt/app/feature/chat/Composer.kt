@@ -33,8 +33,13 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ripple
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +63,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.PopupProperties
 import com.molagpt.app.core.model.EnabledTools
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Persona
@@ -73,11 +79,12 @@ import com.molagpt.app.core.render.PersonaIcons
  * 工具行（可横向滚动）：
  *  - MolaGPT 的「联网搜索」同时启用搜索与网页读取；BYOK 仍分为「联网搜索」「网页拉取」，
  *    且需所选模型支持工具调用；
- *  - 「推理」胶囊：仅当所选模型 [ProviderModel.supportsThinking] 时显示。有档位时主体=开/关
- *    （默认档、不弹层），▾ 打开 [ReasoningSheet]；无档位 kind（Kimi）退化为纯开关；
+ *  - 「推理」胶囊：所选模型支持推理开关或思考强度时显示。有档位且可关闭时主体=开/关，
+ *    常开模型点击主体打开 [ReasoningSheet]；无档位 kind（Kimi）退化为纯开关；
  *  - BYOK 专属「MCP / 视觉 / 图像」：MCP 按服务器配置门控；视觉作为外挂视觉工具，
  *    只要模型支持工具调用即可启用；图像由独立的图像用途 provider 提供，当前聊天模型只要支持工具调用即可调用。
- * 底部加号 = 选图上传（代码执行仅 MolaGPT 账户，开关在设置页）。
+ * 底部加号 = 附件菜单（拍照 / 图片 / 文件，见 [AttachmentMenu]）；代码执行仅 MolaGPT 账户，
+ * 开关在设置页。
  */
 @Composable
 fun Composer(
@@ -98,7 +105,9 @@ fun Composer(
     onToggleThinking: (Boolean) -> Unit,
     onSetReasoningEffort: (String) -> Unit,
     onOpenPersonaPicker: () -> Unit,
-    onPickImage: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onPickImages: () -> Unit,
+    onPickFiles: () -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
@@ -111,6 +120,7 @@ fun Composer(
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     var showReasoningSheet by remember { mutableStateOf(false) }
+    var attachMenuOpen by remember { mutableStateOf(false) }
     val isEditing = editingMessage != null
     LaunchedEffect(editingMessage?.revision) {
         val edit = editingMessage ?: return@LaunchedEffect
@@ -123,7 +133,7 @@ fun Composer(
     val canSend = enabled && (text.isNotBlank() || hasReadyAttachment)
     val colorScheme = MaterialTheme.colorScheme
     val toolsEnabled = enabled && !isStreaming
-    val showThinking = selectedModel?.supportsThinking == true
+    val showThinking = selectedModel?.let { it.supportsThinking || it.supportsReasoningEffort } == true
     // 推理档位来源：模型 ThinkingConfig（可含 max/ultra 等自定义档，resolveEffortLevels 空则回落方言默认）；
     // 无 ThinkingConfig 的遗留模型按 supportsReasoningEffort 走标准 reasoning_effort 三档。
     val tc = selectedModel?.thinkingConfig
@@ -133,6 +143,7 @@ fun Composer(
             kind = com.molagpt.app.core.model.ThinkingParamKind.OPENAI_REASONING_EFFORT,
             effortLevels = listOf("low", "medium", "high"),
             defaultEffort = "medium",
+            alwaysOn = !selectedModel.supportsThinking,
         )
         else -> null
     }
@@ -304,13 +315,22 @@ fun Composer(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                RoundIconButton(
-                    icon = Icons.Filled.Add,
-                    contentDescription = "添加附件",
-                    selected = false,
-                    enabled = toolsEnabled,
-                    onClick = onPickImage,
-                )
+                Box {
+                    RoundIconButton(
+                        icon = Icons.Filled.Add,
+                        contentDescription = "添加附件",
+                        selected = attachMenuOpen,
+                        enabled = toolsEnabled,
+                        onClick = { attachMenuOpen = true },
+                    )
+                    AttachmentMenu(
+                        expanded = attachMenuOpen,
+                        onDismiss = { attachMenuOpen = false },
+                        onTakePhoto = onTakePhoto,
+                        onPickImages = onPickImages,
+                        onPickFiles = onPickFiles,
+                    )
+                }
                 Spacer(modifier = Modifier.weight(1f))
                 Crossfade(
                     targetState = isStreaming,
@@ -360,6 +380,80 @@ fun Composer(
             onOpenModelSettings = onOpenModelReasoningSettings?.takeIf { isByok },
         )
     }
+}
+
+/**
+ * 加号的附件菜单。
+ *
+ * 之前加号是直接 `OpenDocument("&#42;/&#42;")`，落到系统文档界面的「最近」页——用户想发张照片，
+ * 看到的是一屏文件列表，相册还得自己从抽屉里翻。三条路径拆开各走各的系统入口：
+ * 拍照给相机、图片给 Photo Picker、文件给 SAF。
+ *
+ * 用 [DropdownMenu] 而不是 ModalBottomSheet：三个条目撑不起一张 sheet，而且加号在输入区底部，
+ * 菜单贴着按钮弹出比从屏幕下缘升起更贴近「点哪出哪」。位置由 Material3 自己算，
+ * 下方空间不够时会自动向上翻。
+ *
+ * [PopupProperties.focusable] 必须为 false：默认可聚焦弹层会抢走输入框焦点，输入法立刻收起，
+ * 整块 Composer 跟着 imePadding 掉下去，菜单才出现——键盘开着点加号时会整栏瞬移。
+ * 顶栏模型菜单同样这么处理。
+ */
+@Composable
+private fun AttachmentMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onTakePhoto: () -> Unit,
+    onPickImages: () -> Unit,
+    onPickFiles: () -> Unit,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = false),
+    ) {
+        AttachmentMenuItem(
+            icon = Icons.Filled.PhotoCamera,
+            label = "拍照",
+            onClick = {
+                onDismiss()
+                onTakePhoto()
+            },
+        )
+        AttachmentMenuItem(
+            icon = Icons.Filled.Image,
+            label = "图片",
+            onClick = {
+                onDismiss()
+                onPickImages()
+            },
+        )
+        AttachmentMenuItem(
+            icon = Icons.Filled.Folder,
+            label = "文件",
+            onClick = {
+                onDismiss()
+                onPickFiles()
+            },
+        )
+    }
+}
+
+@Composable
+private fun AttachmentMenuItem(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = { Text(label) },
+        leadingIcon = {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        onClick = onClick,
+    )
 }
 
 /** 待发送图片条：上传中转圈、失败标红，右侧叉可移除。 */

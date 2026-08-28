@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 拍照附件的中转目录，与 CameraCapture.DIR 一致。只暴露这一个子目录，
+         不要放开整个 cache-path——那会把 OkHttp/Coil 的磁盘缓存一起交出去。 -->
+    <cache-path
+        name="camera"
+        path="camera/" />
+</paths>
