@@ -21,4 +21,18 @@ data class Conversation(
     val systemPrompt: String? = null,
     /** 角色提示词与会话级提示词的合并模式：override(默认) / append。 */
     val systemPromptMode: String? = null,
+    /**
+     * 本会话是否使用 BYOK 本地记忆；null = 跟随全局开关。
+     * 用三态而非布尔：用户改全局开关时，没有显式表过态的旧会话应当跟着变。
+     */
+    val byokMemoryEnabled: Boolean? = null,
+    /** 本会话是否允许模型检索历史对话；null = 跟随全局开关。 */
+    val byokConversationRecallEnabled: Boolean? = null,
+    /**
+     * 记忆整理水位线：`createdAt` 大于它的消息才是「还没整理过的」。0 = 从未整理。
+     *
+     * 用一条水位线而不是逐条摄入记录，是因为整理本来就是按窗口做的：
+     * 「这一段处理到哪儿了」是会话的属性，不是每条消息各自的状态。
+     */
+    val byokMemoryWatermarkAt: Long = 0L,
 )

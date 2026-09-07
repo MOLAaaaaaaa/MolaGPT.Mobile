@@ -128,6 +128,22 @@ class SessionRepository(
             conversationDao.updatePersona(sessionId, personaId, System.currentTimeMillis())
         }
 
+    /** 会话级记忆覆盖（仅 BYOK 会话调用）。传 null 撤销覆盖、重新跟随全局开关。 */
+    suspend fun updateByokMemoryEnabled(sessionId: String, enabled: Boolean?) =
+        withContext(dispatchers.io) { conversationDao.updateByokMemoryEnabled(sessionId, enabled) }
+
+    suspend fun updateByokConversationRecallEnabled(sessionId: String, enabled: Boolean?) =
+        withContext(dispatchers.io) { conversationDao.updateByokConversationRecallEnabled(sessionId, enabled) }
+
+    suspend fun advanceByokMemoryWatermark(sessionId: String, at: Long) =
+        withContext(dispatchers.io) { conversationDao.advanceByokMemoryWatermark(sessionId, at) }
+
+    suspend fun resetAllByokMemoryWatermarks(at: Long) =
+        withContext(dispatchers.io) { conversationDao.resetAllByokMemoryWatermarks(at) }
+
+    suspend fun sessionsPendingMemory(limit: Int): List<String> =
+        withContext(dispatchers.io) { conversationDao.sessionsPendingMemory(limit) }
+
     suspend fun setPinned(sessionId: String, pinned: Boolean) =
         withContext(dispatchers.io) { conversationDao.setPinned(sessionId, pinned) }
 

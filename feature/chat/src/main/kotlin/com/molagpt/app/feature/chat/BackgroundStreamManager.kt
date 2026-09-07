@@ -53,6 +53,12 @@ class BackgroundStreamManager(
      * 用户答案一出来就退出会话时，绑 viewModelScope 的标题请求会被取消。
      */
     private val titleGenerator: suspend (sessionId: String) -> Unit = {},
+    /**
+     * BYOK 回答正常完成后的记忆整理。挂在这里的理由与 [titleGenerator] 相同：
+     * 需要 application scope 才能在用户退出会话后继续跑完。
+     * 这里只是「回合结束」信号——是否真的发请求由整理器按窗口阈值决定。
+     */
+    private val memoryConsolidator: suspend (sessionId: String) -> Unit = {},
 ) {
     /** 一次生成正常完成（COMPLETE）的事件，供完成通知消费。 */
     data class Completion(
@@ -249,6 +255,11 @@ class BackgroundStreamManager(
             _completions.tryEmit(Completion(sessionId, conversationId, modelDisplayName))
             // 标题失败不该影响正常收尾，也不该冒泡到 UI——内部已自行回退占位标题。
             if (current.generateTitle) scope.launch { runCatching { titleGenerator(sessionId) } }
+            // 只对 BYOK 触发：MolaGPT 会话的记忆由服务端 Tracks 维护。
+            // 停止与失败的回答走不到这里，因此「被打断的回答不学习」是天然成立的。
+            if (current.providerKind == ProviderKind.BYOK) {
+                scope.launch { runCatching { memoryConsolidator(sessionId) } }
+            }
         }
     }
 

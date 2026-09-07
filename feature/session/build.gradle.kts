@@ -28,7 +28,7 @@ dependencies {
     api(project(":core:model"))
     implementation(project(":core:common"))
     api(project(":core:storage"))
-    implementation(project(":core:render"))
+    implementation(project(":core:render")) // ImeDismissBackHandler
 
     implementation(libs.bundles.compose)
     api(libs.androidx.paging.runtime)

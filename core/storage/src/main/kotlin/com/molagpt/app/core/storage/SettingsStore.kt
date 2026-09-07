@@ -72,6 +72,42 @@ data class AppSettings(
     val cloudSyncEnabled: Boolean = false,
     /** MolaGPT Tracks（个性化记忆）开关。 */
     val tracksEnabled: Boolean = false,
+    /**
+     * BYOK 本地记忆总开关。默认关闭——开启后记忆会随对话发给用户自己配置的 API 服务，
+     * 这一步必须由用户主动做出。下面三项子功能都从属于它。
+     */
+    val byokMemoryMasterEnabled: Boolean = false,
+    /**
+     * 记忆注入：对话时把已记住的信息带进 system 提示。
+     *
+     * 三项子功能默认都开：隐私上的那道门是总开关，用户主动打开总开关之后，
+     * 再让他逐个去找哪个子项没开才生效，只会让功能看起来是坏的。
+     */
+    val byokMemoryEnabled: Boolean = true,
+    /** 主动回忆：允许 BYOK 模型检索本机历史对话。 */
+    val byokConversationRecallEnabled: Boolean = true,
+    /** 自动学习：按窗口整理新记忆。未选择整理模型时不运行，因此开着也不会凭空产生用量。 */
+    val byokMemoryAutoLearn: Boolean = true,
+    /**
+     * 整理范围。false = 省 token（每个会话首次整理只读最后若干条）；
+     * true = 完整（不截首窗，分批把所有没整理过的内容读完）。
+     */
+    val byokMemoryFullScan: Boolean = false,
+    /** 记忆整理模型 "<providerId>::<modelId>"；null = 未选择，自动学习不运行（不回退到会话模型）。 */
+    val byokMemoryModelKey: String? = null,
+    /** 记忆块的 token 预算上限。超出的条目留在库里但本轮不注入。 */
+    val byokMemoryBudgetTokens: Int = 2000,
+    /**
+     * 允许把密钥、证件、支付号码这类内容写进记忆。默认关闭。
+     *
+     * 记忆一旦写入就会随后续每一轮对话发给 API 服务，凭据混进去等于反复外发；
+     * 但确有用户要记住账号一类的信息，所以给开关而不是一刀切。
+     */
+    val byokMemoryAllowSensitive: Boolean = false,
+    /** 「清除全部记忆」的时间点（ms）。早于它的消息不再被自动整理重新扫描。 */
+    val byokMemoryResetAt: Long = 0L,
+    /** 上次记忆整理的时间点（ms，0=从未）。时间阈值据此判断，也用于记忆页展示。 */
+    val byokMemoryLastConsolidatedAt: Long = 0L,
     /** 上次云同步时间戳（ms，0=从未）。 */
     val lastSyncAt: Long = 0L,
     /** 后台对话完成通知开关（个人中心）。 */
@@ -121,6 +157,16 @@ class SettingsStore(private val context: Context) {
             imageGenReasoningEffort = p[Keys.IMAGE_GEN_REASONING_EFFORT] ?: "medium",
             autoTitleEnabled = p[Keys.AUTO_TITLE_ENABLED] ?: true,
             titleModelKey = p[Keys.TITLE_MODEL_KEY],
+            byokMemoryMasterEnabled = p[Keys.BYOK_MEMORY_MASTER] ?: false,
+            byokMemoryEnabled = p[Keys.BYOK_MEMORY_ENABLED] ?: true,
+            byokConversationRecallEnabled = p[Keys.BYOK_MEMORY_RECALL] ?: true,
+            byokMemoryAutoLearn = p[Keys.BYOK_MEMORY_AUTO_LEARN] ?: true,
+            byokMemoryFullScan = p[Keys.BYOK_MEMORY_FULL_SCAN] ?: false,
+            byokMemoryModelKey = p[Keys.BYOK_MEMORY_MODEL_KEY],
+            byokMemoryBudgetTokens = (p[Keys.BYOK_MEMORY_BUDGET] ?: 2000L).toInt(),
+            byokMemoryAllowSensitive = p[Keys.BYOK_MEMORY_ALLOW_SENSITIVE] ?: false,
+            byokMemoryResetAt = p[Keys.BYOK_MEMORY_RESET_AT] ?: 0L,
+            byokMemoryLastConsolidatedAt = p[Keys.BYOK_MEMORY_LAST_CONSOLIDATED_AT] ?: 0L,
             cloudSyncEnabled = p[Keys.CLOUD_SYNC] ?: false,
             tracksEnabled = p[Keys.TRACKS] ?: false,
             lastSyncAt = p[Keys.LAST_SYNC_AT] ?: 0L,
@@ -187,6 +233,27 @@ class SettingsStore(private val context: Context) {
         it[Keys.AUTO_TITLE_ENABLED] = enabled
         if (modelKey.isNullOrBlank()) it.remove(Keys.TITLE_MODEL_KEY) else it[Keys.TITLE_MODEL_KEY] = modelKey
     }
+    suspend fun setByokMemoryMasterEnabled(v: Boolean) = edit { it[Keys.BYOK_MEMORY_MASTER] = v }
+    suspend fun setByokMemoryEnabled(v: Boolean) = edit { it[Keys.BYOK_MEMORY_ENABLED] = v }
+    suspend fun setByokMemoryFullScan(v: Boolean) = edit { it[Keys.BYOK_MEMORY_FULL_SCAN] = v }
+    suspend fun setByokConversationRecallEnabled(v: Boolean) = edit { it[Keys.BYOK_MEMORY_RECALL] = v }
+    suspend fun setByokMemoryAutoLearn(v: Boolean) = edit { it[Keys.BYOK_MEMORY_AUTO_LEARN] = v }
+    suspend fun setByokMemoryModelKey(modelKey: String?) = edit {
+        if (modelKey.isNullOrBlank()) it.remove(Keys.BYOK_MEMORY_MODEL_KEY) else it[Keys.BYOK_MEMORY_MODEL_KEY] = modelKey
+    }
+
+    /** 预算上限。范围由 UI 的档位约束，这里再 clamp 一次防止异常值让记忆块吃掉整个上下文。 */
+    suspend fun setByokMemoryBudgetTokens(v: Int) = edit {
+        it[Keys.BYOK_MEMORY_BUDGET] = v.coerceIn(200, 16_000).toLong()
+    }
+
+    /** 「清除全部记忆」时调用：记下新的学习起点，早于它的消息不再被重新处理。 */
+    suspend fun setByokMemoryAllowSensitive(v: Boolean) = edit { it[Keys.BYOK_MEMORY_ALLOW_SENSITIVE] = v }
+
+    suspend fun setByokMemoryResetAt(v: Long) = edit { it[Keys.BYOK_MEMORY_RESET_AT] = v }
+
+    suspend fun setByokMemoryLastConsolidatedAt(v: Long) = edit { it[Keys.BYOK_MEMORY_LAST_CONSOLIDATED_AT] = v }
+
     suspend fun setCloudSyncEnabled(v: Boolean) = edit { it[Keys.CLOUD_SYNC] = v }
     suspend fun setTracksEnabled(v: Boolean) = edit { it[Keys.TRACKS] = v }
     suspend fun setLastSyncAt(v: Long) = edit { it[Keys.LAST_SYNC_AT] = v }
@@ -212,6 +279,23 @@ class SettingsStore(private val context: Context) {
     /** 服务端已下架的消息 id 顺带清理，防止已读集无限增长；重新上架即重新展示。 */
     suspend fun retainSeenOpsMessageIds(valid: Set<String>) = edit {
         it[Keys.SEEN_OPS_MESSAGE_IDS] = (it[Keys.SEEN_OPS_MESSAGE_IDS] ?: emptySet()) intersect valid
+    }
+
+    /** 已展示过的本地 Promo 卡 id（每个 id 只弹一次）；内置卡数量极少，加 50 上限防膨胀。 */
+    suspend fun seenPromoIds(): Set<String> =
+        context.settingsDataStore.data.map { it[Keys.SEEN_PROMO_IDS] ?: emptySet() }.first()
+
+    suspend fun addSeenPromoId(id: String) = edit {
+        it[Keys.SEEN_PROMO_IDS] = ((it[Keys.SEEN_PROMO_IDS] ?: emptySet()) + id).toList().takeLast(50).toSet()
+    }
+
+    /** 已点过"知道了"的命令失败 key（每个只弹一次）；不进 [AppSettings] 流，避免无关订阅方重组。 */
+    suspend fun seenAgentCommandFailureKeys(): Set<String> =
+        context.settingsDataStore.data.map { it[Keys.SEEN_AGENT_COMMAND_FAILURES] ?: emptySet() }.first()
+
+    suspend fun addSeenAgentCommandFailureKey(key: String) = edit {
+        it[Keys.SEEN_AGENT_COMMAND_FAILURES] =
+            ((it[Keys.SEEN_AGENT_COMMAND_FAILURES] ?: emptySet()) + key).toList().takeLast(100).toSet()
     }
 
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
@@ -252,11 +336,23 @@ class SettingsStore(private val context: Context) {
         val IMAGE_GEN_REASONING_EFFORT = stringPreferencesKey("image_gen_reasoning_effort")
         val AUTO_TITLE_ENABLED = booleanPreferencesKey("auto_title_enabled")
         val TITLE_MODEL_KEY = stringPreferencesKey("title_model_key")
+        val BYOK_MEMORY_MASTER = booleanPreferencesKey("byok_memory_master_enabled")
+        val BYOK_MEMORY_ENABLED = booleanPreferencesKey("byok_memory_enabled")
+        val BYOK_MEMORY_FULL_SCAN = booleanPreferencesKey("byok_memory_full_scan")
+        val BYOK_MEMORY_RECALL = booleanPreferencesKey("byok_conversation_recall_enabled")
+        val BYOK_MEMORY_AUTO_LEARN = booleanPreferencesKey("byok_memory_auto_learn")
+        val BYOK_MEMORY_MODEL_KEY = stringPreferencesKey("byok_memory_model_key")
+        val BYOK_MEMORY_BUDGET = longPreferencesKey("byok_memory_budget_tokens")
+        val BYOK_MEMORY_ALLOW_SENSITIVE = booleanPreferencesKey("byok_memory_allow_sensitive")
+        val BYOK_MEMORY_LAST_CONSOLIDATED_AT = longPreferencesKey("byok_memory_last_consolidated_at")
+        val BYOK_MEMORY_RESET_AT = longPreferencesKey("byok_memory_reset_at")
         val CLOUD_SYNC = booleanPreferencesKey("cloud_sync_enabled")
         val TRACKS = booleanPreferencesKey("tracks_enabled")
         val LAST_SYNC_AT = longPreferencesKey("last_sync_at")
         val SYNC_CURSOR = stringPreferencesKey("sync_cursor_iso")
         val COMPLETION_NOTIFY = booleanPreferencesKey("completion_notify")
         val SEEN_OPS_MESSAGE_IDS = stringSetPreferencesKey("seen_ops_message_ids")
+        val SEEN_PROMO_IDS = stringSetPreferencesKey("seen_promo_ids")
+        val SEEN_AGENT_COMMAND_FAILURES = stringSetPreferencesKey("seen_agent_command_failure_keys")
     }
 }

@@ -99,6 +99,15 @@ fun Composer(
     pendingAttachments: List<FileInfo>,
     activePersona: Persona?,
     showPersonaChip: Boolean,
+    /**
+     * 记忆开关只在本会话还没有任何消息时出现。
+     *
+     * 记忆是否参与必须在**开口之前**决定：话已经说出去、模型已经读过记忆之后再关，
+     * 关掉的只是下一轮。首轮之后开关消失，避免给出一个改不动过去的假选择。
+     */
+    showMemoryChip: Boolean,
+    memoryEnabled: Boolean,
+    onSetMemory: (Boolean) -> Unit,
     onSetWebAccess: (Boolean) -> Unit,
     onSetNetwork: (Boolean) -> Unit,
     onSetSteel: (Boolean) -> Unit,
@@ -221,6 +230,14 @@ fun Composer(
                         persona = activePersona,
                         enabled = toolsEnabled,
                         onClick = onOpenPersonaPicker,
+                    )
+                }
+                if (isByok && showMemoryChip) {
+                    ToolChip(
+                        label = "记忆",
+                        checked = memoryEnabled,
+                        enabled = toolsEnabled,
+                        onCheckedChange = onSetMemory,
                     )
                 }
                 if (isByok) {

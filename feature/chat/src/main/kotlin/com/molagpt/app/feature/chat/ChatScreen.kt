@@ -111,6 +111,7 @@ fun ChatScreen(
     onOpenDrawer: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
+    onOpenByokMemory: () -> Unit,
     onAuthExpired: () -> Unit,
     onNewChatWithModel: (modelId: String, providerId: String?, kind: ProviderKind, personaId: String?) -> Unit,
     onNewChat: () -> Unit,
@@ -124,8 +125,13 @@ fun ChatScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val activePersona by viewModel.activePersona.collectAsStateWithLifecycle()
     val personas by viewModel.personas.collectAsStateWithLifecycle()
+    val memoryEnabled by viewModel.memoryEnabled.collectAsStateWithLifecycle()
+    val memoryAvailable by viewModel.memoryAvailable.collectAsStateWithLifecycle()
+    val memoryProjection by viewModel.memoryProjection.collectAsStateWithLifecycle()
+    val memoryHint by viewModel.memoryHint.collectAsStateWithLifecycle()
     var modelMenuOpen by remember { mutableStateOf(false) }
     var personaSheetOpen by remember { mutableStateOf(false) }
+    var memoryPanelOpen by remember { mutableStateOf(false) }
     var pendingCrossModel by remember { mutableStateOf<ProviderModel?>(null) }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -228,6 +234,15 @@ fun ChatScreen(
             onSelect = { viewModel.selectPersona(it.id) },
             onManage = onOpenPersonaManagement,
             onDismiss = { personaSheetOpen = false },
+        )
+    }
+
+    if (memoryPanelOpen) {
+        MemoryPanel(
+            projection = memoryProjection,
+            memoryEnabled = memoryEnabled,
+            onOpenMemorySettings = { memoryPanelOpen = false; onOpenByokMemory() },
+            onDismiss = { memoryPanelOpen = false },
         )
     }
 
@@ -490,6 +505,32 @@ fun ChatScreen(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
+                memoryHint?.let { hint ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            listOfNotNull(
+                                hint.written.takeIf { it > 0 }?.let { "已更新 $it 条记忆" },
+                                hint.pending.takeIf { it > 0 }?.let { "$it 条待确认" },
+                            ).joinToString(" · "),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = {
+                            viewModel.dismissMemoryHint()
+                            viewModel.refreshMemoryProjection()
+                            memoryPanelOpen = true
+                        }) { Text("查看") }
+                        TextButton(onClick = viewModel::dismissMemoryHint) {
+                            Text("知道了", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
                 state.reasoningMissHint?.let { hint ->
                     ReasoningMissCard(
                         lowConfidence = hint.lowConfidence,
@@ -515,6 +556,10 @@ fun ChatScreen(
                     pendingAttachments = state.pendingAttachments,
                     activePersona = activePersona,
                     showPersonaChip = isActiveConversation,
+                    // 首轮之前才给记忆开关：之后再关也改不了已经发出去的那一轮。
+                    showMemoryChip = memoryAvailable && state.messages.isEmpty() && !state.isLoadingHistory,
+                    memoryEnabled = memoryEnabled,
+                    onSetMemory = viewModel::setMemoryEnabled,
                     onSetWebAccess = viewModel::setWebAccessTools,
                     onSetNetwork = viewModel::setNetworkTool,
                     onSetSteel = viewModel::setSteelTool,

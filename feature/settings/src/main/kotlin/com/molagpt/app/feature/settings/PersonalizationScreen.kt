@@ -34,7 +34,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
@@ -46,7 +45,6 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -77,62 +75,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.molagpt.app.core.model.ConfidenceTier
 import com.molagpt.app.core.model.ConversationStyle
 import com.molagpt.app.core.model.InsightCategory
 import com.molagpt.app.core.model.MemoryCandidate
 import com.molagpt.app.core.model.MemoryEntry
-import com.molagpt.app.core.model.MemoryProjection
 import com.molagpt.app.core.model.MemoryRating
 import com.molagpt.app.core.model.MemorySection
-import com.molagpt.app.core.model.MemoryStatus
 import com.molagpt.app.core.render.ImeDismissBackHandler
-import com.molagpt.app.core.render.shimmer
 
-/* —— 语义色（置信度 / 状态 / 分类）。固定语义色保持中等饱和度，兼顾亮色与暗色可读性。 —— */
-private val CObrand = Color(0xFFBE727F)
-private val CblueT = Color(0xFF3D8FD1)
-private val Cgray = Color(0xFF95A5A6)
-private val Cgreen = Color(0xFF2E9E5B)
-private val Ccyan = Color(0xFF1FA6BC)
-private val Corange = Color(0xFFE0902B)
-private val Cred = Color(0xFFE5615F)
-private val Cpurple = Color(0xFF9B6BC4)
-private val CblueWork = Color(0xFF3D8FD1)
-private val CtealG = Color(0xFF1BAE94)
-private val CgreenH = Color(0xFF35B36A)
-
-// 记忆条目会持续增长；默认只展示少量高权重项，保证后续模块无需长距离滚动也能到达。
-private const val COLLAPSED_ENTRY_COUNT = 6
+// 语义色、分节小标题、TagChip、预算行等共享零件见 MemoryComponents.kt（与本地记忆页共用）。
 
 /** 服务端 add/update 的文本长度上限。 */
 private const val MEMORY_TEXT_MAX = 300
-
-private fun confidenceColor(t: ConfidenceTier): Color = when (t) {
-    ConfidenceTier.CORE -> CObrand
-    ConfidenceTier.KNOWN -> CblueT
-    ConfidenceTier.VAGUE -> Cgray
-}
-
-private fun statusColor(s: MemoryStatus): Color = when (s) {
-    MemoryStatus.ACTIVE, MemoryStatus.GROWING -> Cgreen
-    MemoryStatus.STABLE -> Ccyan
-    MemoryStatus.FADING -> Corange
-    MemoryStatus.WEAK -> Cgray
-    MemoryStatus.QUESTIONED -> Cred
-}
-
-private fun categoryColor(c: InsightCategory): Color = when (c) {
-    InsightCategory.BIOGRAPHICAL_IDENTITY -> Cpurple
-    InsightCategory.CORE_PERSONAL_VALUE -> Color(0xFF6C7A89)
-    InsightCategory.LONG_TERM_INTEREST -> CtealG
-    InsightCategory.HABIT_PATTERN -> CgreenH
-    InsightCategory.WORK_STYLE -> CblueWork
-    InsightCategory.PROJECT_FOCUS -> Corange
-    InsightCategory.SITUATIONAL_CONTEXT -> Color(0xFF4AA3E0)
-    InsightCategory.EPHEMERAL -> Cgray
-    InsightCategory.EXPLICIT_INSTRUCTION -> Cred
-}
 
 private fun ratingColor(r: MemoryRating): Color = when (r) {
     MemoryRating.AGREE -> Cgreen
@@ -236,12 +190,18 @@ fun PersonalizationScreen(
                 loading -> LoadingEntries()
                 entries.isEmpty() -> EmptyEntries()
                 else -> {
-                    ProjectionRow(projection)
+                    MemoryProjectionRow(
+                        injected = projection.entries,
+                        skipped = projection.skipped,
+                        tokens = projection.tokens,
+                        budget = projection.budget,
+                        overflowHint = "${projection.skipped} 条因超出预算未注入 · 删除或降低低价值记忆可让其生效",
+                    )
                     // 折叠时按分节顺序取前 N 条，展开后全量分组展示。
                     val visibleSections = if (entriesExpanded) {
                         sections
                     } else {
-                        var budget = COLLAPSED_ENTRY_COUNT
+                        var budget = COLLAPSED_MEMORY_ENTRY_COUNT
                         sections.mapNotNull { (section, list) ->
                             if (budget <= 0) return@mapNotNull null
                             val take = list.take(budget)
@@ -264,7 +224,7 @@ fun PersonalizationScreen(
                             )
                         }
                     }
-                    if (entries.size > COLLAPSED_ENTRY_COUNT) {
+                    if (entries.size > COLLAPSED_MEMORY_ENTRY_COUNT) {
                         TextButton(
                             onClick = { entriesExpanded = !entriesExpanded },
                             modifier = Modifier.fillMaxWidth(),
@@ -385,88 +345,6 @@ private fun MasterToggleCard(
     }
 }
 
-@Composable
-private fun SectionHeader(title: String, trailing: @Composable (() -> Unit)? = null) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            title,
-            style = androidx.compose.material3.MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
-        )
-        Spacer(Modifier.weight(1f))
-        trailing?.invoke()
-    }
-}
-
-/** 分节小标题：记忆按服务端固定的 5 个分节归类，MEMORY.md 也按此顺序渲染。 */
-@Composable
-private fun SectionDivider(label: String, count: Int) {
-    val cs = androidx.compose.material3.MaterialTheme.colorScheme
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(modifier = Modifier.size(4.dp).clip(RoundedCornerShape(50)).background(cs.primary))
-        Spacer(Modifier.width(7.dp))
-        Text(
-            label,
-            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
-            color = cs.primary,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-            "$count",
-            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-            color = cs.onSurfaceVariant,
-        )
-    }
-}
-
-/**
- * MEMORY.md 投影占用。服务端按 token 预算裁剪：超预算的条目**不会进入** system prompt，
- * 所以 `skipped > 0` 必须显式告知——否则用户以为列表里的每条都在生效。
- */
-@Composable
-private fun ProjectionRow(projection: MemoryProjection) {
-    if (projection.budget <= 0) return
-    val cs = androidx.compose.material3.MaterialTheme.colorScheme
-    val over = projection.skipped > 0
-    Column(modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "已注入 ${projection.entries} 条",
-                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
-                color = cs.onSurface,
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                "${projection.tokens} / ${projection.budget} tokens",
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                color = if (over) Corange else cs.onSurfaceVariant,
-            )
-        }
-        LinearProgressIndicator(
-            progress = { projection.usage },
-            modifier = Modifier.fillMaxWidth().padding(top = 6.dp).clip(RoundedCornerShape(50)),
-            color = if (over) Corange else cs.primary,
-            trackColor = cs.surfaceVariant,
-        )
-        if (over) {
-            Text(
-                "${projection.skipped} 条因超出预算未注入 · 删除或降低低价值记忆可让其生效",
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                color = Corange,
-                modifier = Modifier.padding(top = 5.dp),
-            )
-        }
-    }
-}
-
 /**
  * 待确认候选卡。
  *
@@ -480,49 +358,13 @@ private fun CandidateCard(
     onAccept: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val cs = androidx.compose.material3.MaterialTheme.colorScheme
-    // 底色与边框二选一：primary 底色已经把候选与下方的记忆条目卡区分开，无需再描边。
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 5.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(cs.primary.copy(alpha = 0.07f))
-            .padding(16.dp),
-    ) {
-        Text(candidate.text, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, color = cs.onSurface)
-
-        candidate.quote?.let { quote ->
-            Row(modifier = Modifier.fillMaxWidth().padding(top = 9.dp)) {
-                Box(
-                    modifier = Modifier
-                        .width(2.dp)
-                        .height(if (quote.length > 40) 34.dp else 17.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(cs.outline.copy(alpha = 0.5f)),
-                )
-                Text(
-                    "「$quote」",
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    color = cs.onSurfaceVariant,
-                    fontStyle = FontStyle.Italic,
-                    modifier = Modifier.padding(start = 8.dp).weight(1f),
-                )
-            }
-        }
-
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "${candidate.section.label} · ${relativeDays(candidate.observedTs, now)}",
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                color = cs.onSurfaceVariant,
-            )
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onDismiss) { Text("忽略", color = cs.onSurfaceVariant) }
-            Spacer(Modifier.width(4.dp))
-            Button(onClick = onAccept) { Text("记住") }
-        }
-    }
+    MemoryCandidateCard(
+        text = candidate.text,
+        quote = candidate.quote,
+        meta = "${candidate.section.label} · ${relativeDays(candidate.observedTs, now)}",
+        onAccept = onAccept,
+        onDismiss = onDismiss,
+    )
 }
 
 @Composable
@@ -538,38 +380,14 @@ private fun MemoryEntryCard(
     val confColor = confidenceColor(tier)
     val status = entry.status(now)
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 5.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(cs.surfaceVariant.copy(alpha = 0.4f))
-            .drawBehind { drawRect(color = confColor, size = Size(4.dp.toPx(), size.height)) },
+    MemoryEntryCardFrame(
+        accent = confColor,
+        tierLabel = tier.label,
+        confidencePercent = (entry.confidence * 100).toInt(),
+        text = entry.text,
+        onEdit = onEdit,
+        onDelete = onDelete,
     ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(start = 18.dp, top = 14.dp, end = 12.dp, bottom = 12.dp)) {
-            // 头部：置信度 + 操作
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(9.dp).clip(RoundedCornerShape(50)).background(confColor))
-                Spacer(Modifier.width(8.dp))
-                Text(tier.label, style = androidx.compose.material3.MaterialTheme.typography.labelLarge, color = confColor, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.width(6.dp))
-                Text("${(entry.confidence * 100).toInt()}%", style = androidx.compose.material3.MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant)
-                Spacer(Modifier.weight(1f))
-                IconButton(onClick = onEdit, modifier = Modifier.size(34.dp)) {
-                    Icon(Icons.Filled.Settings, contentDescription = "编辑", tint = cs.onSurfaceVariant, modifier = Modifier.size(18.dp))
-                }
-                IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
-                    Icon(Icons.Filled.Close, contentDescription = "删除", tint = cs.onSurfaceVariant, modifier = Modifier.size(18.dp))
-                }
-            }
-
-            Text(
-                entry.text,
-                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-                color = cs.onSurface,
-                modifier = Modifier.padding(top = 8.dp, bottom = 10.dp),
-            )
-
             // 标签：分类 + 状态 + 长期 / 手动 / 已过期
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 InsightCategory.fromWire(entry.category)?.let { cat ->
@@ -588,23 +406,6 @@ private fun MemoryEntryCard(
             RatingRow(selected = entry.userRating, onRate = onRate, modifier = Modifier.padding(top = 12.dp))
 
             SourceRow(entry, now, modifier = Modifier.padding(top = 10.dp))
-        }
-    }
-}
-
-@Composable
-private fun TagChip(text: String, color: Color, filled: Boolean) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(9.dp))
-            .background(color.copy(alpha = if (filled) 0.14f else 0.10f))
-            .padding(horizontal = 9.dp, vertical = 4.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.size(6.dp).clip(RoundedCornerShape(50)).background(color))
-            Spacer(Modifier.width(5.dp))
-            Text(text, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, color = color, fontWeight = FontWeight.SemiBold)
-        }
     }
 }
 
@@ -667,22 +468,7 @@ private fun SourceRow(entry: MemoryEntry, now: Long, modifier: Modifier = Modifi
 
 @Composable
 private fun AddMemoryButton(enabled: Boolean, onClick: () -> Unit) {
-    val cs = androidx.compose.material3.MaterialTheme.colorScheme
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 10.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .border(1.dp, cs.outline.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 12.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.Filled.Add, contentDescription = null, tint = cs.primary, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
-        Text("添加记忆", style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, color = cs.primary)
-    }
+    MemoryAddButton(enabled = enabled, onClick = onClick)
 }
 
 @Composable
@@ -757,89 +543,19 @@ private fun StyleSection(
  */
 @Composable
 private fun DangerZone(onClearAll: () -> Unit) {
-    val cs = androidx.compose.material3.MaterialTheme.colorScheme
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 18.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .border(1.dp, cs.error.copy(alpha = 0.3f), RoundedCornerShape(20.dp))
-            .background(cs.error.copy(alpha = 0.05f))
-            .padding(16.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Warning, contentDescription = null, tint = cs.error, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("数据清除", style = androidx.compose.material3.MaterialTheme.typography.titleSmall, color = cs.error, fontWeight = FontWeight.SemiBold)
-        }
-        Text(
-            "以下操作将永久删除服务器上的数据，删除后无法恢复，请谨慎操作。",
-            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-            color = cs.onSurfaceVariant,
-            modifier = Modifier.padding(top = 8.dp, bottom = 6.dp),
-        )
-        DangerButton("清除全部记忆", "上方所有记忆条目与主题档案", onClearAll)
-    }
-}
-
-@Composable
-private fun DangerButton(title: String, subtitle: String, onClick: () -> Unit) {
-    val cs = androidx.compose.material3.MaterialTheme.colorScheme
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 8.dp)
-            .clip(RoundedCornerShape(13.dp))
-            .clickable(onClick = onClick)
-            .padding(vertical = 10.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.Filled.Delete, contentDescription = null, tint = cs.error, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium, color = cs.onSurface)
-            Text(subtitle, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
-        }
-    }
+    MemoryDangerZone(
+        description = "以下操作将永久删除服务器上的数据，删除后无法恢复，请谨慎操作。",
+        actionSubtitle = "上方所有记忆条目与主题档案",
+        onClearAll = onClearAll,
+    )
 }
 
 @Composable
 private fun EmptyEntries() {
-    val cs = androidx.compose.material3.MaterialTheme.colorScheme
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 36.dp, horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Box(
-            modifier = Modifier.size(60.dp).clip(RoundedCornerShape(18.dp)).background(cs.primary.copy(alpha = 0.12f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text("Aa", color = cs.primary, fontWeight = FontWeight.Bold, style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-        }
-        Text("还没有形成记忆", style = androidx.compose.material3.MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 14.dp))
-        Text(
-            "多与 MolaGPT 对话，它会在夜间自动整理，逐渐了解你的特点与偏好；也可以直接添加你想让它记住的事。",
-            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-            color = cs.onSurfaceVariant,
-            modifier = Modifier.padding(top = 6.dp),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-        )
-    }
-}
-
-@Composable
-private fun LoadingEntries() {
-    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        repeat(3) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(96.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .shimmer(),
-            )
-        }
-    }
+    EmptyMemoryState(
+        title = "还没有形成记忆",
+        description = "多与 MolaGPT 对话，它会在夜间自动整理，逐渐了解你的特点与偏好；也可以直接添加你想让它记住的事。",
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1023,18 +739,5 @@ private fun RefreshButton(spinning: Boolean, onClick: () -> Unit) {
         )
         Spacer(Modifier.width(6.dp))
         Text(if (spinning) "刷新中…" else "刷新")
-    }
-}
-
-/** 粗粒度相对天数（unix 秒）。 */
-private fun relativeDays(ts: Long, nowSeconds: Long): String {
-    if (ts <= 0) return "未知"
-    val days = ((nowSeconds - ts) / 86_400L).toInt()
-    return when {
-        days <= 0 -> "今天"
-        days == 1 -> "昨天"
-        days < 7 -> "${days}天前"
-        days < 30 -> "${days / 7}周前"
-        else -> "${days / 30}个月前"
     }
 }

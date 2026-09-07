@@ -350,6 +350,7 @@ class AgentControlService(
     private fun JsonObject.toRelayEvent(): RelayEvent {
         val k = kind("kind", "Kind")
         return when (k) {
+            "historyReset" -> RelayEvent.HistoryReset
             "userPrompt" -> RelayEvent.UserPrompt(text = string("text", "Text").orEmpty())
             "answerSnapshot" -> RelayEvent.AnswerSnapshot(
                 text = string("text", "Text").orEmpty(),
@@ -366,6 +367,7 @@ class AgentControlService(
                     inputTokens = usage?.int("inputTokens", "input_tokens", "InputTokens"),
                     outputTokens = usage?.int("outputTokens", "output_tokens", "OutputTokens"),
                     totalTokens = usage?.int("totalTokens", "total_tokens", "TotalTokens"),
+                    reason = string("reason"),
                 )
             }
             "toolProgress", "ToolProgress" -> {

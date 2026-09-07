@@ -43,4 +43,10 @@ data class ConversationEntity(
     val systemPrompt: String? = null,
     /** 角色与会话级提示词的合并模式 override/append（预留）。 */
     val systemPromptMode: String? = null,
+    /** 本会话是否使用 BYOK 本地记忆；null = 跟随全局开关。 */
+    val byokMemoryEnabled: Boolean? = null,
+    /** 本会话是否允许模型检索历史对话；null = 跟随全局开关。 */
+    val byokConversationRecallEnabled: Boolean? = null,
+    /** 记忆整理水位线：createdAt 大于它的消息才是待整理的。0 = 从未整理。 */
+    val byokMemoryWatermarkAt: Long = 0L,
 )

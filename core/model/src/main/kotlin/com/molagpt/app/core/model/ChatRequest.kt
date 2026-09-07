@@ -45,4 +45,8 @@ data class EnabledTools(
     val vision: Boolean = false,
     /** BYOK 图像生成工具。 */
     val imageGeneration: Boolean = false,
+    /** BYOK 本地长期记忆读写工具（save_memory / forget_memory）。仅本地裁剪，不进 MolaGPT 线格式。 */
+    val memory: Boolean = false,
+    /** BYOK 历史对话回忆工具（recall_conversations）。仅本地裁剪，不进 MolaGPT 线格式。 */
+    val conversationRecall: Boolean = false,
 )

@@ -21,6 +21,7 @@ import com.molagpt.app.core.network.AgentControlService
 import com.molagpt.app.core.network.AuthApi
 import com.molagpt.app.core.network.ByokChatService
 import com.molagpt.app.core.network.ByokImageApi
+import com.molagpt.app.core.network.ByokMemoryAnalyzer
 import com.molagpt.app.core.network.ByokModelApi
 import com.molagpt.app.core.network.ChatService
 import com.molagpt.app.core.network.MolaGptChatService
@@ -36,8 +37,12 @@ import com.molagpt.app.core.network.UserDataApi
 import com.molagpt.app.core.network.toAccountStatus
 import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.storage.AppSettings
+import com.molagpt.app.core.storage.ByokLocalToolExecutor
+import com.molagpt.app.core.storage.ByokMemoryConsolidator
+import com.molagpt.app.core.storage.ByokMemoryRepository
 import com.molagpt.app.core.storage.ByokProviderRepository
 import com.molagpt.app.core.storage.ChatRepository
+import com.molagpt.app.core.storage.ConversationRecallRepository
 import com.molagpt.app.core.storage.ConversationTitler
 import com.molagpt.app.core.storage.CredentialStore
 import com.molagpt.app.core.storage.MolaDatabase
@@ -52,7 +57,9 @@ import com.molagpt.app.feature.chat.BackgroundStreamManager
 import com.molagpt.app.feature.file.AttachmentStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -198,6 +205,30 @@ class AppContainer(
         dispatchers = dispatchers,
     )
 
+    /**
+     * BYOK 本地记忆。仅本机 Room + DataStore，不依赖登录，与账户 Tracks 互不同步。
+     * 声明在 [byokChatService] 之前：本地工具执行器要作为构造参数喂给它。
+     */
+    val byokMemoryRepository = ByokMemoryRepository(
+        dao = database.byokMemoryDao(),
+        settingsStore = settingsStore,
+        dispatchers = dispatchers,
+        // 清空记忆时把各会话的整理水位线也推到当前，否则旧消息会被重新扫一遍、刚清掉的又回来。
+        onCleared = { at -> sessionRepository.resetAllByokMemoryWatermarks(at) },
+    )
+
+    private val conversationRecallRepository = ConversationRecallRepository(
+        messageDao = database.messageDao(),
+        dispatchers = dispatchers,
+    )
+
+    private val byokLocalToolExecutor = ByokLocalToolExecutor(
+        memoryRepository = byokMemoryRepository,
+        recallRepository = conversationRecallRepository,
+        messageDao = database.messageDao(),
+        settingsStore = settingsStore,
+    )
+
     private val byokChatService = ByokChatService(
         http = http,
         providerResolver = { id -> byokProviderRepository.get(id) },
@@ -261,6 +292,7 @@ class AppContainer(
                 android.net.Uri.fromFile(file).toString()
             }.getOrNull()
         },
+        localToolHandler = byokLocalToolExecutor,
         dispatchers = dispatchers,
     )
 
@@ -330,11 +362,35 @@ class AppContainer(
         dispatchers = dispatchers,
     )
 
+    /** BYOK 记忆整理。按窗口跑：攒够回合数、超过间隔、或用户手动触发。 */
+    val byokMemoryConsolidator = ByokMemoryConsolidator(
+        chatRepository = chatRepository,
+        sessionRepository = sessionRepository,
+        memoryRepository = byokMemoryRepository,
+        analyzer = ByokMemoryAnalyzer(
+            completeText = { providerId, modelId, prompt, maxTokens ->
+                byokChatService.completeText(providerId, modelId, prompt, maxTokens)
+            },
+        ),
+        settingsStore = settingsStore,
+        dispatchers = dispatchers,
+        onConsolidated = { sessionId, result -> memoryConsolidated.tryEmit(sessionId to result) },
+    )
+
+    /** 手动整理离开设置页后继续运行。 */
+    suspend fun consolidateByokMemoryNow(): ByokMemoryConsolidator.Result =
+        applicationScope.async { byokMemoryConsolidator.consolidateNow() }.await()
+
+    /** 整理完成的轻量提示。会话仍打开时由聊天页消费，不向消息历史插伪造内容。 */
+    val memoryConsolidated =
+        MutableSharedFlow<Pair<String, ByokMemoryConsolidator.Result>>(extraBufferCapacity = 8)
+
     val backgroundStreamManager = BackgroundStreamManager(
         chatRepository = chatRepository,
         scope = applicationScope,
         apiUrlResolver = { providerId, modelId -> modelRegistry.apiUrlFor(providerId, modelId) },
         titleGenerator = { sessionId -> conversationTitler.generate(sessionId) },
+        memoryConsolidator = { sessionId -> byokMemoryConsolidator.onTurnFinished(sessionId) },
     )
 
     /** App 是否在前台（MainActivity onStart/onStop 维护），用于完成通知抑制。 */
@@ -377,7 +433,15 @@ class AppContainer(
     )
 
     fun setAppForeground(value: Boolean) {
+        val wasBackground = !appForeground.value
         appForeground.value = value
+        // 回到前台时看一眼记忆整理该不该跑。这是「距上次超过间隔」那条阈值的检查点，
+        // 覆盖「聊两句就放下手机」——那种会话永远攒不够回合数，只靠回合阈值会永远学不到。
+        // Android 的 Doze / WorkManager 约束下做不到可靠的后台定时，何况用的是用户自己的 key，
+        // 被系统随机唤醒时发请求也不合适；最长延迟到下次打开应用是可以接受的代价。
+        if (value && wasBackground) {
+            applicationScope.launch { runCatching { byokMemoryConsolidator.onAppForegrounded() } }
+        }
     }
 
     fun setForegroundSession(sessionId: String?) {

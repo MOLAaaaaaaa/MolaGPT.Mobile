@@ -38,6 +38,7 @@ data class AgentCommandFailure(
     val commandId: String,
     val sessionTitle: String,
     val message: String,
+    val dismissKey: String = commandId,
 )
 
 /** 新建会话时请求的工作目录在桌面端不存在，被回退到了 Quick Chat 目录——
@@ -53,6 +54,22 @@ private const val PendingOptionTtlMs = 12_000L
 /** 桌面每 10s 发一次 machine snapshot；超过这个窗口不再显示“已连接桌面端”。 */
 private const val MachineSnapshotTimeoutMs = 45_000L
 private const val HubRefreshIntervalMs = 15_000L
+/** 命令失败弹窗只追近期失败：relay 会把 lastCommandError 保留到下一次成功命令，
+ *  不加时间窗，十几天前的旧失败每次进页都会再弹一次。 */
+internal const val CommandFailureMaxAgeMs = 10 * 60_000L
+
+/** 这条失败是否值得弹窗：有错误、够新、所属机器在线（机器表为空时只看时间，避免老服务端误杀）。 */
+internal fun shouldSurfaceCommandFailure(
+    meta: RelaySessionMeta,
+    machines: List<RelayMachine>,
+    nowMs: Long = System.currentTimeMillis(),
+): Boolean {
+    if (meta.lastCommandError.isNullOrBlank()) return false
+    if (meta.lastCommandAtMs <= 0 || nowMs - meta.lastCommandAtMs > CommandFailureMaxAgeMs) return false
+    val owner = meta.machineId?.takeIf { it.isNotBlank() } ?: return true
+    if (machines.isEmpty()) return true
+    return machines.any { it.id == owner && it.isOnline(nowMs, MachineSnapshotTimeoutMs) }
+}
 
 private data class PendingOptions(
     val modelSet: Boolean = false,
@@ -79,6 +96,8 @@ private data class PendingOptions(
 class AgentControlViewModel(
     private val service: AgentControlService,
     private val onTurnSubmitted: (RelaySessionMeta) -> Unit = {},
+    private val loadDismissedFailures: suspend () -> Set<String> = { emptySet() },
+    private val saveDismissedFailure: suspend (String) -> Unit = {},
 ) : ViewModel() {
 
     private val _sessions = MutableStateFlow<List<RelaySessionMeta>>(emptyList())
@@ -129,7 +148,10 @@ class AgentControlViewModel(
 
     init {
         Logger.d("AgentControlVM", "ViewModel created, calling refresh()")
-        refresh()
+        viewModelScope.launch {
+            surfacedCommandFailures += runCatching { loadDismissedFailures() }.getOrDefault(emptySet())
+            refresh()
+        }
     }
 
     /** 手动触发重连。 */
@@ -641,26 +663,28 @@ class AgentControlViewModel(
 
     private fun surfaceCommandFailure(sessions: List<RelaySessionMeta>) {
         if (_commandFailure.value != null) return
-        val failed = sessions.firstOrNull { !it.lastCommandError.isNullOrBlank() } ?: return
-        val key = buildString {
-            append(failed.conversationId)
-            append(':')
-            append(failed.lastCommandId.orEmpty())
-            append(':')
-            append(failed.lastCommandAtMs)
-            append(':')
-            append(failed.lastCommandError)
-        }
+        val now = System.currentTimeMillis()
+        val failed = sessions.firstOrNull { shouldSurfaceCommandFailure(it, _machines.value, now) } ?: return
+        val key = commandFailureKey(failed)
         if (!surfacedCommandFailures.add(key)) return
         _commandFailure.value = AgentCommandFailure(
             commandId = failed.lastCommandId ?: "unknown",
             sessionTitle = failed.title.ifBlank { "远程会话" },
             message = failed.lastCommandError.orEmpty(),
+            dismissKey = key,
         )
     }
 
+    private fun commandFailureKey(meta: RelaySessionMeta): String =
+        meta.lastCommandId?.takeIf { it.isNotBlank() }
+            ?: "${meta.conversationId}:${meta.lastCommandAtMs}:${meta.lastCommandError}"
+
     fun dismissCommandFailure() {
+        val failure = _commandFailure.value ?: return
         _commandFailure.value = null
+        viewModelScope.launch {
+            runCatching { saveDismissedFailure(failure.dismissKey) }
+        }
     }
 
     /** 桌面回传真实 meta 后核对：请求的目录是否被静默回退成了别的目录。 */
@@ -815,6 +839,7 @@ internal fun derivePhaseFromEvents(batch: List<RelayEnvelope>): AgentPhase? {
             is RelayEvent.ThinkingSnapshot -> phase = AgentPhase.Running
             is RelayEvent.PermissionPrompt -> phase = AgentPhase.Waiting
             RelayEvent.Unknown -> Unit
+            RelayEvent.HistoryReset -> phase = AgentPhase.Idle
         }
     }
     return phase

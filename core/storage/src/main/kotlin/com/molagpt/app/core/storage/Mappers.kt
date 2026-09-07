@@ -3,17 +3,27 @@ package com.molagpt.app.core.storage
 import com.molagpt.app.core.model.Attachment
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ByokImageFormat
+import com.molagpt.app.core.model.ByokMemoryCandidate
+import com.molagpt.app.core.model.ByokMemoryEntry
+import com.molagpt.app.core.model.ByokMemoryEvidence
+import com.molagpt.app.core.model.ByokMemoryOrigin
+import com.molagpt.app.core.model.ByokProfileKey
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.model.Conversation
 import com.molagpt.app.core.model.CustomHeader
 import com.molagpt.app.core.model.FileInfo
+import com.molagpt.app.core.model.InsightCategory
+import com.molagpt.app.core.model.MemorySection
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.Role
+import com.molagpt.app.core.storage.entity.ByokMemoryCandidateEntity
+import com.molagpt.app.core.storage.entity.ByokMemoryEntryEntity
+import com.molagpt.app.core.storage.entity.ByokMemoryEvidenceEntity
 import com.molagpt.app.core.storage.entity.ByokProviderEntity
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
@@ -100,6 +110,9 @@ internal fun ConversationEntity.toDomain(): Conversation = Conversation(
     personaId = personaId,
     systemPrompt = systemPrompt,
     systemPromptMode = systemPromptMode,
+    byokMemoryEnabled = byokMemoryEnabled,
+    byokConversationRecallEnabled = byokConversationRecallEnabled,
+    byokMemoryWatermarkAt = byokMemoryWatermarkAt,
 )
 
 internal fun Conversation.toEntity(): ConversationEntity = ConversationEntity(
@@ -122,6 +135,95 @@ internal fun Conversation.toEntity(): ConversationEntity = ConversationEntity(
     personaId = personaId,
     systemPrompt = systemPrompt,
     systemPromptMode = systemPromptMode,
+    byokMemoryEnabled = byokMemoryEnabled,
+    byokConversationRecallEnabled = byokConversationRecallEnabled,
+    byokMemoryWatermarkAt = byokMemoryWatermarkAt,
+)
+
+// ── BYOK 本地记忆 ───────────────────────────────────────────────────────────
+//
+// wire 值全部走各枚举的 fromWire：未知值回退默认档而不是抛异常，
+// 这样降级安装（新版写入的分类被旧版读到）只会显示得不精确，不会打不开记忆页。
+
+internal fun ByokMemoryEntryEntity.toDomain(
+    evidence: List<ByokMemoryEvidenceEntity> = emptyList(),
+): ByokMemoryEntry = ByokMemoryEntry(
+    id = id,
+    scope = scope,
+    text = text,
+    normalizedKey = normalizedKey,
+    section = MemorySection.fromWire(section),
+    category = InsightCategory.fromWire(category),
+    profileKey = ByokProfileKey.fromWire(profileKey),
+    confidence = confidence,
+    halfLifeDays = halfLifeDays,
+    expiresAt = expiresAt,
+    permanent = permanent,
+    origin = ByokMemoryOrigin.fromWire(origin),
+    recurrence = recurrence,
+    firstObservedAt = firstObservedAt,
+    lastReinforcedAt = lastReinforcedAt,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+    evidence = evidence.map { it.toDomain() },
+)
+
+internal fun ByokMemoryEntry.toEntity(): ByokMemoryEntryEntity = ByokMemoryEntryEntity(
+    id = id,
+    scope = scope,
+    text = text,
+    normalizedKey = normalizedKey,
+    section = section.wire,
+    category = category?.wire,
+    profileKey = profileKey?.wire,
+    confidence = confidence,
+    halfLifeDays = halfLifeDays,
+    expiresAt = expiresAt,
+    permanent = permanent,
+    origin = origin.wire,
+    recurrence = recurrence,
+    firstObservedAt = firstObservedAt,
+    lastReinforcedAt = lastReinforcedAt,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+)
+
+internal fun ByokMemoryEvidenceEntity.toDomain(): ByokMemoryEvidence = ByokMemoryEvidence(
+    entryId = entryId,
+    sessionId = sessionId,
+    messageId = messageId,
+    quote = quote,
+    observedAt = observedAt,
+)
+
+internal fun ByokMemoryCandidateEntity.toDomain(): ByokMemoryCandidate = ByokMemoryCandidate(
+    id = id,
+    scope = scope,
+    text = text,
+    normalizedKey = normalizedKey,
+    section = MemorySection.fromWire(section),
+    category = InsightCategory.fromWire(category),
+    profileKey = ByokProfileKey.fromWire(profileKey),
+    confidence = confidence,
+    sourceSessionId = sourceSessionId,
+    sourceMessageId = sourceMessageId,
+    quote = quote,
+    createdAt = createdAt,
+)
+
+internal fun ByokMemoryCandidate.toEntity(): ByokMemoryCandidateEntity = ByokMemoryCandidateEntity(
+    id = id,
+    scope = scope,
+    text = text,
+    normalizedKey = normalizedKey,
+    section = section.wire,
+    category = category?.wire,
+    profileKey = profileKey?.wire,
+    confidence = confidence,
+    sourceSessionId = sourceSessionId,
+    sourceMessageId = sourceMessageId,
+    quote = quote,
+    createdAt = createdAt,
 )
 
 internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvider {

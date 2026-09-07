@@ -73,6 +73,7 @@ fun SettingsScreen(
     onOpenByokProviders: () -> Unit,
     onOpenByokTools: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
+    onOpenByokMemory: () -> Unit,
     buildLabel: String,
     modifier: Modifier = Modifier,
 ) {
@@ -117,8 +118,10 @@ fun SettingsScreen(
             ModelServiceCard(
                 providerCount = byokProviders.size,
                 modelCount = byokProviders.sumOf { it.models.size },
+                memoryEnabled = s.byokMemoryMasterEnabled,
                 onOpenByokProviders = onOpenByokProviders,
                 onOpenPersonaManagement = onOpenPersonaManagement,
+                onOpenByokMemory = onOpenByokMemory,
             )
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -230,16 +233,19 @@ private fun MolaAccountEntryCard(
 
 /**
  * 「自定义模型」域卡片：把 BYOK 模型的「来源」与「行为」收进同一张卡，用分隔线分面。
- * - 上行 `自定义 API 模型`：模型从哪来（provider / 模型清单）。
- * - 下行 `角色管理`：这些模型怎么说话（系统提示 / 角色，仅 BYOK 生效）。
+ * - `自定义 API 模型`：模型从哪来（provider / 模型清单）。
+ * - `角色管理`：这些模型怎么说话（系统提示 / 角色，仅 BYOK 生效）。
+ * - `本地记忆`：这些模型记得什么（本机长期记忆，仅 BYOK 生效）。
  * 结构对齐 `MolaAccountScreen` 里 TracksCard（开关/入口两行同卡）的既有范式。
  */
 @Composable
 private fun ModelServiceCard(
     providerCount: Int,
     modelCount: Int,
+    memoryEnabled: Boolean,
     onOpenByokProviders: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
+    onOpenByokMemory: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
@@ -285,6 +291,35 @@ private fun ModelServiceCard(
                     Text("角色管理", style = MaterialTheme.typography.bodyLarge)
                     Text(
                         "管理自定义模型使用的系统提示词",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                ForwardChevron()
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 58.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+            )
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenByokMemory)
+                    .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TracksRowIcon(kind = TracksIconKind.Sparkles)
+                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                    Text("本地记忆", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        if (memoryEnabled) {
+                            "已开启 · 由已配置的模型服务使用"
+                        } else {
+                            "让自定义模型记住重要信息"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 2.dp),

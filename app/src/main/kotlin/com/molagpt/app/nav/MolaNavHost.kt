@@ -57,6 +57,8 @@ import com.molagpt.app.feature.settings.MolaAccountScreen
 import com.molagpt.app.feature.settings.PersonaEditScreen
 import com.molagpt.app.feature.settings.PersonaManagementScreen
 import com.molagpt.app.feature.settings.PersonaViewScreen
+import com.molagpt.app.feature.settings.ByokMemoryScreen
+import com.molagpt.app.feature.settings.ByokMemoryViewModel
 import com.molagpt.app.feature.settings.PersonalizationScreen
 import com.molagpt.app.feature.settings.PersonalizationViewModel
 import com.molagpt.app.feature.settings.SettingsScreen
@@ -78,6 +80,7 @@ private object Routes {
     const val BYOK_PROVIDERS = "byok_providers"
     const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
     const val BYOK_TOOLS = "byok_tools"
+    const val BYOK_MEMORY = "byok_memory"
     const val MCP_SERVER_DETAIL = "mcp_server_detail"
     const val PERSONA_MANAGEMENT = "persona_management"
     const val PERSONA_VIEW = "persona_view"
@@ -198,6 +201,11 @@ fun MolaNavHost(
                         navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
                     }
                 },
+                onOpenByokMemory = {
+                    if (navController.currentDestination?.route != Routes.BYOK_MEMORY) {
+                        navController.navigate(Routes.BYOK_MEMORY) { launchSingleTop = true }
+                    }
+                },
                 onAuthExpired = {
                     // 游客模式无「登录过期」概念；短 token 失败已由聊天错误条提示，不强制跳登录。
                 },
@@ -251,6 +259,11 @@ fun MolaNavHost(
                 onOpenPersonaManagement = {
                     if (navController.currentDestination?.route != Routes.PERSONA_MANAGEMENT) {
                         navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
+                    }
+                },
+                onOpenByokMemory = {
+                    if (navController.currentDestination?.route != Routes.BYOK_MEMORY) {
+                        navController.navigate(Routes.BYOK_MEMORY) { launchSingleTop = true }
                     }
                 },
                 buildLabel = "MolaGPT v${com.molagpt.app.BuildConfig.VERSION_NAME} · 构建 ${com.molagpt.app.BuildConfig.BUILD_TIME}",
@@ -434,6 +447,28 @@ fun MolaNavHost(
             )
         }
 
+        // BYOK 本地记忆页。与 PERSONALIZATION 是两条独立链路：那边是账户 Tracks（服务端），
+        // 这边只读写本机 Room，不依赖登录。
+        composable(Routes.BYOK_MEMORY) {
+            val vm: ByokMemoryViewModel = viewModel(factory = ViewModelFactories.byokMemory(container))
+            ByokMemoryScreen(
+                viewModel = vm,
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.BYOK_MEMORY) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
+                onOpenByokProviders = {
+                    if (navController.currentDestination?.route != Routes.BYOK_PROVIDERS) {
+                        navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
         composable(Routes.PERSONALIZATION) {
             val vm: PersonalizationViewModel = viewModel(factory = ViewModelFactories.personalization(container))
             PersonalizationScreen(
@@ -528,10 +563,15 @@ fun MolaNavHost(
         }
     }
 
-    // 进入前台时检查更新与运营消息（叠在 NavHost 之上）。
+    // 进入前台时检查更新、运营消息与本地 Promo（叠在 NavHost 之上）。
     StartupNoticesHost(
         versionName = com.molagpt.app.BuildConfig.VERSION_NAME,
         settingsStore = container.settingsStore,
+        onOpenByokMemory = {
+            if (navController.currentDestination?.route != Routes.BYOK_MEMORY) {
+                navController.navigate(Routes.BYOK_MEMORY) { launchSingleTop = true }
+            }
+        },
     )
     }
 }
@@ -545,6 +585,7 @@ private fun ChatHost(
     onOpenAgentControl: () -> Unit,
     onOpenImageWorkbench: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
+    onOpenByokMemory: () -> Unit,
     onAuthExpired: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -612,7 +653,11 @@ private fun ChatHost(
                 val chatVm: com.molagpt.app.feature.chat.ChatViewModel =
                     viewModel(
                         key = "chat-$selectedSessionId",
-                        factory = ViewModelFactories.chat(container, selectedSessionId, settings),
+                        factory = ViewModelFactories.chat(
+                            container = container,
+                            sessionId = selectedSessionId,
+                            settings = settings,
+                        ),
                     )
                 ChatScreen(
                     viewModel = chatVm,
@@ -623,6 +668,7 @@ private fun ChatHost(
                     onOpenSettings = onOpenSettings,
                     onOpenByokModelSettings = onOpenByokModelSettings,
                     onOpenPersonaManagement = onOpenPersonaManagement,
+                    onOpenByokMemory = onOpenByokMemory,
                     onAuthExpired = onAuthExpired,
                     onOpenAgentControl = onOpenAgentControl,
                     onOpenImageWorkbench = onOpenImageWorkbench,

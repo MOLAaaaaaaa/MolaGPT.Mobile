@@ -15,6 +15,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal enum class AgentAlertKind { Permission, Completed, Failed }
 
+internal fun hasPendingApproval(meta: RelaySessionMeta, nowMs: Long): Boolean =
+    meta.phaseEnum == AgentPhase.Waiting && meta.needsAttention &&
+        meta.updatedAtMs > 0 && nowMs - meta.updatedAtMs < 60_000L
+
 internal data class AgentAlert(
     val kind: AgentAlertKind,
     val sessionId: String,
@@ -112,7 +116,7 @@ internal class AgentNotificationTracker {
                 )
                 // A currently unresolved approval remains actionable after an app
                 // restart.  Completion history, by contrast, is only baselined.
-                if (meta.needsAttention) alerts += permissionAlert(meta)
+                if (hasPendingApproval(meta, nowMs)) alerts += permissionAlert(meta)
                 continue
             }
 
@@ -122,7 +126,7 @@ internal class AgentNotificationTracker {
             if (meta.seq > state.lastSeq) {
                 fetches += AgentEventCursor(meta, state.lastSeq)
             } else {
-                alerts += applyMetaFallback(state, meta, phase)
+                alerts += applyMetaFallback(state, meta, phase, nowMs)
             }
         }
 
@@ -174,13 +178,31 @@ internal class AgentNotificationTracker {
             .sortedBy { it.seq }
             .toList()
 
+        // A replacement contains old turns too. Only its tail can describe a
+        // newly completed watched turn; replayed user prompts must not arm alerts.
+        if (fresh.any { it.event == RelayEvent.HistoryReset }) {
+            val tail = fresh.lastOrNull()?.event
+            val terminal = tail is RelayEvent.TurnDone || tail is RelayEvent.TurnFailed
+            if (state.terminalAlertArmed && terminal) {
+                if (tail is RelayEvent.TurnFailed) alerts += terminalAlert(AgentAlertKind.Failed, meta, tail.message)
+                if (tail is RelayEvent.TurnDone && tail.reason == null) alerts += terminalAlert(AgentAlertKind.Completed, meta)
+            }
+            state.active = !terminal && fresh.size > 1
+            state.terminalAlertArmed = state.active
+            state.lastSeq = fresh.maxOf { it.seq }
+            if (terminal) state.terminalSeq = state.lastSeq
+            state.phase = meta.phaseEnum
+            state.needsAttention = hasPendingApproval(meta, nowMs)
+            return alerts
+        }
+
         for (env in fresh) {
             when (val event = env.event) {
                 is RelayEvent.PermissionPrompt -> {
                     state.active = true
                     state.terminalAlertArmed = true
                     sawPermission = true
-                    alerts += AgentAlert(
+                    if (hasPendingApproval(meta, nowMs)) alerts += AgentAlert(
                         kind = AgentAlertKind.Permission,
                         sessionId = meta.conversationId,
                         backendId = meta.backendId,
@@ -196,7 +218,7 @@ internal class AgentNotificationTracker {
                     sawTerminal = true
                     if (state.terminalAlertArmed) {
                         state.terminalAlertArmed = false
-                        alerts += terminalAlert(AgentAlertKind.Completed, meta)
+                        if (event.reason == null) alerts += terminalAlert(AgentAlertKind.Completed, meta)
                     }
                 }
                 is RelayEvent.TurnFailed -> {
@@ -220,7 +242,7 @@ internal class AgentNotificationTracker {
                     state.active = true
                     state.manualWatchUntilMs = 0L
                 }
-                RelayEvent.Unknown -> Unit
+                RelayEvent.Unknown, RelayEvent.HistoryReset -> Unit
             }
             if (env.seq > state.lastSeq) state.lastSeq = env.seq
         }
@@ -230,7 +252,7 @@ internal class AgentNotificationTracker {
         if (meta.seq > state.lastSeq) state.lastSeq = meta.seq
         if (!sawTerminal) {
             val phase = meta.phaseEnum
-            if (!sawPermission && meta.needsAttention && !state.needsAttention) {
+            if (!sawPermission && hasPendingApproval(meta, nowMs) && !state.needsAttention) {
                 alerts += permissionAlert(meta)
             }
             alerts += applyTerminalFallback(state, meta, phase)
@@ -254,9 +276,10 @@ internal class AgentNotificationTracker {
         state: SessionState,
         meta: RelaySessionMeta,
         phase: AgentPhase,
+        nowMs: Long,
     ): List<AgentAlert> {
         val alerts = mutableListOf<AgentAlert>()
-        if (meta.needsAttention && !state.needsAttention) alerts += permissionAlert(meta)
+        if (hasPendingApproval(meta, nowMs) && !state.needsAttention) alerts += permissionAlert(meta)
         alerts += applyTerminalFallback(state, meta, phase)
         applyBusyState(state, meta, phase, wasActive = state.active)
         state.phase = phase
@@ -373,6 +396,8 @@ internal class AgentNotificationMonitor(
 
             runCatching {
                 val snapshot = service.listSessions()
+                snapshot.sessions.filterNot { hasPendingApproval(it, System.currentTimeMillis()) }
+                    .forEach { controller.clearPermission(it.conversationId) }
                 val update = tracker.observe(snapshot.sessions)
                 update.alerts.forEach(controller::post)
                 for (cursor in update.fetches) {

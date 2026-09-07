@@ -6,11 +6,16 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.molagpt.app.core.storage.dao.ByokMemoryDao
 import com.molagpt.app.core.storage.dao.ConversationDao
 import com.molagpt.app.core.storage.dao.ByokProviderDao
 import com.molagpt.app.core.storage.dao.MessageDao
 import com.molagpt.app.core.storage.dao.PersonaDao
 import com.molagpt.app.core.storage.dao.StreamTaskDao
+import com.molagpt.app.core.storage.entity.ByokMemoryCandidateEntity
+import com.molagpt.app.core.storage.entity.ByokMemoryEntryEntity
+import com.molagpt.app.core.storage.entity.ByokMemoryEvidenceEntity
+import com.molagpt.app.core.storage.entity.ByokMemorySuppressionEntity
 import com.molagpt.app.core.storage.entity.ByokProviderEntity
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
@@ -18,8 +23,18 @@ import com.molagpt.app.core.storage.entity.PersonaEntity
 import com.molagpt.app.core.storage.entity.StreamTaskEntity
 
 @Database(
-    entities = [ConversationEntity::class, MessageEntity::class, StreamTaskEntity::class, ByokProviderEntity::class, PersonaEntity::class],
-    version = 11,
+    entities = [
+        ConversationEntity::class,
+        MessageEntity::class,
+        StreamTaskEntity::class,
+        ByokProviderEntity::class,
+        PersonaEntity::class,
+        ByokMemoryEntryEntity::class,
+        ByokMemoryEvidenceEntity::class,
+        ByokMemoryCandidateEntity::class,
+        ByokMemorySuppressionEntity::class,
+    ],
+    version = 14,
     exportSchema = false,
 )
 abstract class MolaDatabase : RoomDatabase() {
@@ -28,11 +43,12 @@ abstract class MolaDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun streamTaskDao(): StreamTaskDao
     abstract fun personaDao(): PersonaDao
+    abstract fun byokMemoryDao(): ByokMemoryDao
 
     companion object {
         fun build(context: Context): MolaDatabase =
             Room.databaseBuilder(context.applicationContext, MolaDatabase::class.java, "mola.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
                 .build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -196,6 +212,173 @@ abstract class MolaDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // BYOK 自定义请求头（参数覆写）。默认 '[]' 使旧行保持无附加头。
                 db.execSQL("ALTER TABLE byok_providers ADD COLUMN customHeadersJson TEXT NOT NULL DEFAULT '[]'")
+            }
+        }
+
+        /**
+         * BYOK 本地记忆。五张新表 + 会话级两个覆盖开关。
+         *
+         * 新表一律不写 SQL DEFAULT：它们是空表，没有旧行要回填，而 Room 的 TableInfo 校验
+         * 会把 migration 里多出来的 DEFAULT 判为 schema 不一致、开库即崩。
+         * 会话两列是可空 INTEGER：null 表示跟随全局开关，显式 0/1 才是本会话覆盖。
+         */
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS byok_memory_entries (
+                        id TEXT NOT NULL,
+                        scope TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        normalizedKey TEXT NOT NULL,
+                        section TEXT NOT NULL,
+                        category TEXT,
+                        profileKey TEXT,
+                        confidence REAL NOT NULL,
+                        halfLifeDays REAL,
+                        expiresAt INTEGER,
+                        permanent INTEGER NOT NULL,
+                        origin TEXT NOT NULL,
+                        recurrence INTEGER NOT NULL,
+                        firstObservedAt INTEGER NOT NULL,
+                        lastReinforcedAt INTEGER NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_byok_memory_entries_scope_normalizedKey " +
+                        "ON byok_memory_entries (scope, normalizedKey)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_byok_memory_entries_scope_section " +
+                        "ON byok_memory_entries (scope, section)",
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS byok_memory_evidence (
+                        id TEXT NOT NULL,
+                        entryId TEXT NOT NULL,
+                        sessionId TEXT NOT NULL,
+                        messageId TEXT NOT NULL,
+                        quote TEXT NOT NULL,
+                        observedAt INTEGER NOT NULL,
+                        PRIMARY KEY(id),
+                        FOREIGN KEY(entryId) REFERENCES byok_memory_entries(id)
+                            ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_byok_memory_evidence_entryId ON byok_memory_evidence (entryId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_byok_memory_evidence_messageId ON byok_memory_evidence (messageId)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS byok_memory_candidates (
+                        id TEXT NOT NULL,
+                        scope TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        normalizedKey TEXT NOT NULL,
+                        section TEXT NOT NULL,
+                        category TEXT,
+                        profileKey TEXT,
+                        confidence REAL NOT NULL,
+                        sourceSessionId TEXT NOT NULL,
+                        sourceMessageId TEXT NOT NULL,
+                        quote TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_byok_memory_candidates_scope_normalizedKey " +
+                        "ON byok_memory_candidates (scope, normalizedKey)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_byok_memory_candidates_createdAt " +
+                        "ON byok_memory_candidates (createdAt)",
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS byok_memory_suppressions (
+                        scope TEXT NOT NULL,
+                        normalizedKey TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        PRIMARY KEY(scope, normalizedKey)
+                    )
+                    """.trimIndent(),
+                )
+
+                db.execSQL("ALTER TABLE conversations ADD COLUMN byokMemoryEnabled INTEGER")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN byokConversationRecallEnabled INTEGER")
+            }
+        }
+
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 记忆整理水位线：createdAt 大于它的消息才是「还没整理过的」。
+                // 0 = 从未整理，此时首窗会被截到最后若干条，避免在老会话上第一次整理就把整段历史发出去。
+                db.execSQL("ALTER TABLE conversations ADD COLUMN byokMemoryWatermarkAt INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 早期实现允许同一个画像字段出现多条。保留用户维护、置信度更高且更新更近的一条。
+                db.execSQL(
+                    """
+                    DELETE FROM byok_memory_entries
+                    WHERE byok_memory_entries.profileKey IS NOT NULL
+                      AND EXISTS (
+                          SELECT 1
+                          FROM byok_memory_entries AS better
+                          WHERE better.scope = byok_memory_entries.scope
+                            AND better.profileKey = byok_memory_entries.profileKey
+                            AND (
+                                CASE better.origin
+                                    WHEN 'manual' THEN 4
+                                    WHEN 'confirmed' THEN 3
+                                    WHEN 'tool' THEN 2
+                                    ELSE 1
+                                END > CASE byok_memory_entries.origin
+                                    WHEN 'manual' THEN 4
+                                    WHEN 'confirmed' THEN 3
+                                    WHEN 'tool' THEN 2
+                                    ELSE 1
+                                END
+                                OR (
+                                    CASE better.origin
+                                        WHEN 'manual' THEN 4
+                                        WHEN 'confirmed' THEN 3
+                                        WHEN 'tool' THEN 2
+                                        ELSE 1
+                                    END = CASE byok_memory_entries.origin
+                                        WHEN 'manual' THEN 4
+                                        WHEN 'confirmed' THEN 3
+                                        WHEN 'tool' THEN 2
+                                        ELSE 1
+                                    END
+                                    AND (
+                                        better.confidence > byok_memory_entries.confidence
+                                        OR (better.confidence = byok_memory_entries.confidence AND better.updatedAt > byok_memory_entries.updatedAt)
+                                        OR (better.confidence = byok_memory_entries.confidence AND better.updatedAt = byok_memory_entries.updatedAt AND better.id > byok_memory_entries.id)
+                                    )
+                                )
+                            )
+                      )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_byok_memory_entries_scope_profileKey " +
+                        "ON byok_memory_entries(scope, profileKey)",
+                )
             }
         }
     }

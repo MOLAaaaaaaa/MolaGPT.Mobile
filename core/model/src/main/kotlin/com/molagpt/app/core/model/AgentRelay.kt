@@ -192,6 +192,7 @@ sealed interface RelayEvent {
         val inputTokens: Int? = null,
         val outputTokens: Int? = null,
         val totalTokens: Int? = null,
+        val reason: String? = null,
     ) : RelayEvent
 
     /** 回合失败。 */
@@ -199,6 +200,7 @@ sealed interface RelayEvent {
 
     /** 未识别 kind——容忍协议演进，reducer 忽略。 */
     data object Unknown : RelayEvent
+    data object HistoryReset : RelayEvent
 }
 
 /** 一个 seq 标记的 relay 信封（手机按 `seq > 已处理` 在重连后追赶）。 */

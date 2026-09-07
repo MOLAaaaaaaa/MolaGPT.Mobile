@@ -97,6 +97,10 @@ internal class AgentNotificationController(
         runCatching { nm.notify(notificationId(alert.sessionId, alert.kind), notification) }
     }
 
+    fun clearPermission(sessionId: String) {
+        NotificationManagerCompat.from(context).cancel(notificationId(sessionId, AgentAlertKind.Permission))
+    }
+
     private fun ensureChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java)

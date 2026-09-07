@@ -45,6 +45,11 @@ class AgentTranscriptReducer {
 
     /** 折入一个事件。返回是否产生了可见变化。 */
     fun apply(env: RelayEnvelope): Boolean {
+        if (env.event == RelayEvent.HistoryReset) {
+            reset()
+            lastSeq = env.seq
+            return true
+        }
         if (env.seq > lastSeq) lastSeq = env.seq
         val ev = env.event
         // 任何"智能体继续"的事件到达，意味着此前待决的权限请求已被处理（批准/拒绝/超时）——
@@ -142,7 +147,7 @@ class AgentTranscriptReducer {
                 }
             }
 
-            RelayEvent.Unknown -> false
+            RelayEvent.Unknown, RelayEvent.HistoryReset -> false
         }
         return changed || permFolded
     }

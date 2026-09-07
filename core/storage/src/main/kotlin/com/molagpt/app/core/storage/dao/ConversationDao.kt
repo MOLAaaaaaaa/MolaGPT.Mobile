@@ -105,6 +105,48 @@ interface ConversationDao {
     @Query("UPDATE conversations SET personaId = :personaId, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun updatePersona(sessionId: String, personaId: String?, now: Long)
 
+    /**
+     * 会话级记忆覆盖（仅 BYOK）。null 表示撤销覆盖、重新跟随全局开关。
+     * 不动 updatedAt / dirty：这是本地偏好，不该把会话顶到侧边栏最前，也不该推给云端。
+     */
+    @Query("UPDATE conversations SET byokMemoryEnabled = :enabled WHERE sessionId = :sessionId")
+    suspend fun updateByokMemoryEnabled(sessionId: String, enabled: Boolean?)
+
+    @Query("UPDATE conversations SET byokConversationRecallEnabled = :enabled WHERE sessionId = :sessionId")
+    suspend fun updateByokConversationRecallEnabled(sessionId: String, enabled: Boolean?)
+
+    /**
+     * 推进记忆整理水位线。只增不减：并发的两次整理里慢的那次不能把快的那次推进的结果退回去，
+     * 否则中间那段会被重复整理、重复计费。
+     */
+    @Query(
+        "UPDATE conversations SET byokMemoryWatermarkAt = MAX(byokMemoryWatermarkAt, :at) WHERE sessionId = :sessionId",
+    )
+    suspend fun advanceByokMemoryWatermark(sessionId: String, at: Long)
+
+    /** 「清除全部记忆」时把所有水位线归零之外的另一半：这里是把它推到当前时间，旧消息不再被扫。 */
+    @Query("UPDATE conversations SET byokMemoryWatermarkAt = :at")
+    suspend fun resetAllByokMemoryWatermarks(at: Long)
+
+    /** 有待整理消息的 BYOK 会话。按最近活动排序，整理时优先处理用户刚聊过的。 */
+    @Query(
+        """
+        SELECT c.sessionId
+        FROM conversations AS c
+        WHERE c.deletedAt IS NULL
+          AND c.placeholder = 0
+          AND c.providerKind = 'BYOK'
+          AND EXISTS (
+              SELECT 1 FROM messages AS m
+              WHERE m.sessionId = c.sessionId
+                AND m.createdAt > c.byokMemoryWatermarkAt
+          )
+        ORDER BY c.updatedAt DESC
+        LIMIT :limit
+        """,
+    )
+    suspend fun sessionsPendingMemory(limit: Int): List<String>
+
     @Query("UPDATE conversations SET pinned = :pinned, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun setPinned(sessionId: String, pinned: Boolean)
 

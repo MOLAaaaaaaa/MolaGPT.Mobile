@@ -1,7 +1,9 @@
 package com.molagpt.app.core.network
 
 import com.molagpt.app.core.common.DispatcherProvider
+import com.molagpt.app.core.model.ByokLocalToolHandler
 import com.molagpt.app.core.model.ByokMcpServer
+import com.molagpt.app.core.model.ByokProfileKey
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ChatMessageMetadataKeys
@@ -10,6 +12,7 @@ import com.molagpt.app.core.model.CustomBodyParam
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ImageGenerationConfig
+import com.molagpt.app.core.model.MemorySection
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.Role
@@ -84,6 +87,11 @@ class ByokChatService(
     private val byokImageApi: ByokImageApi = ByokImageApi(http),
     /** 把出图字节存为本地文件，返回 Coil 可加载的 url（file://...）；返回 null 表示存盘失败（回退内联 data URI）。 */
     private val imageFileSaver: suspend (bytes: ByteArray, ext: String) -> String? = { _, _ -> null },
+    /**
+     * 本地记忆与历史回忆工具的执行回调。数据在 `core:storage`，而 storage 依赖本模块，
+     * 因此执行必须回调出去，不能在这里直接读库。
+     */
+    private val localToolHandler: ByokLocalToolHandler = ByokLocalToolHandler.NoOp,
     private val dispatchers: DispatcherProvider,
 ) {
     fun sendMessage(request: ChatRequest): Flow<StreamEvent> = flow {
@@ -151,8 +159,37 @@ class ByokChatService(
         return provider to modelId
     }
 
-    private fun requestTitle(provider: ByokProvider, modelId: String, prompt: String): String? {
-        val body = buildTitleBody(provider, modelId, prompt)
+    /**
+     * 非流式纯文本补全。会话标题与记忆整理共用同一条路径——两者都是「一次问、一段答」，
+     * 都不需要工具循环、角色提示或流式渲染。
+     *
+     * 返回 null 表示 provider 不可用或请求失败；调用方据此静默降级，不打扰用户。
+     */
+    suspend fun completeText(
+        providerId: String,
+        modelId: String,
+        prompt: String,
+        maxTokens: Int = ANTHROPIC_TITLE_MAX_TOKENS,
+        temperature: Double = TITLE_TEMPERATURE,
+    ): String? {
+        val provider = providerResolver(providerId)?.takeIf { it.enabled } ?: return null
+        val target = modelId.trim().ifBlank { return null }
+        return runCatching {
+            withContext(dispatchers.io) { requestText(provider, target, prompt, maxTokens, temperature) }
+        }.getOrNull()
+    }
+
+    private fun requestTitle(provider: ByokProvider, modelId: String, prompt: String): String? =
+        requestText(provider, modelId, prompt, ANTHROPIC_TITLE_MAX_TOKENS, TITLE_TEMPERATURE)
+
+    private fun requestText(
+        provider: ByokProvider,
+        modelId: String,
+        prompt: String,
+        maxTokens: Int,
+        temperature: Double,
+    ): String? {
+        val body = buildTextBody(provider, modelId, prompt, maxTokens, temperature)
         val url = if (provider.type == ByokProviderType.GEMINI) {
             geminiEndpoint(provider, modelId, stream = false)
         } else {
@@ -176,17 +213,24 @@ class ByokChatService(
     }
 
     /**
-     * 标题请求体：单条 user 消息、非流式、不带工具、不带角色系统提示（否则猫娘人格会把标题写成「喵～」）。
+     * 纯文本请求体：单条 user 消息、非流式、不带工具、不带角色系统提示
+     * （否则猫娘人格会把标题写成「喵～」，也会把记忆整理写成角色扮演）。
      *
-     * **不设 max_tokens**：给推理模型设小上限会让预算全花在思考上、正文返回空。
-     * 控成本靠下面显式关思考，不靠截断。
+     * OpenAI 系**不设 max_tokens**：给推理模型设小上限会让预算全花在思考上、正文返回空。
+     * 控成本靠下面显式关思考，不靠截断。[maxTokens] 只用于 Anthropic——那是它的必填字段。
      */
-    private fun buildTitleBody(provider: ByokProvider, modelId: String, prompt: String): JsonObject =
+    private fun buildTextBody(
+        provider: ByokProvider,
+        modelId: String,
+        prompt: String,
+        maxTokens: Int,
+        temperature: Double,
+    ): JsonObject =
         when (provider.type) {
             ByokProviderType.OPENAI_COMPAT -> buildJsonObject {
                 put("model", modelId)
                 put("stream", false)
-                put("temperature", TITLE_TEMPERATURE)
+                put("temperature", temperature)
                 putJsonArray("messages") {
                     addJsonObject {
                         put("role", "user")
@@ -218,8 +262,8 @@ class ByokChatService(
             // max_tokens 是 Anthropic 必填字段；不发 thinking 即为关闭。
             ByokProviderType.ANTHROPIC -> buildJsonObject {
                 put("model", modelId)
-                put("max_tokens", ANTHROPIC_TITLE_MAX_TOKENS)
-                put("temperature", TITLE_TEMPERATURE)
+                put("max_tokens", maxTokens)
+                put("temperature", temperature)
                 put("stream", false)
                 putJsonArray("messages") {
                     addJsonObject {
@@ -1180,7 +1224,10 @@ class ByokChatService(
                 ToolSpec(
                     name = "search_web",
                     description = "Search the web for current information.",
-                    properties = mapOf("query" to "Search query", "max_results" to "Number of results"),
+                    properties = mapOf(
+                        "query" to ToolProperty("Search query"),
+                        "max_results" to ToolProperty("Number of results", ToolPropertyType.INTEGER),
+                    ),
                     required = listOf("query"),
                 ),
             )
@@ -1190,7 +1237,7 @@ class ByokChatService(
                 ToolSpec(
                     name = "fetch_url",
                     description = "Fetch and read a web page by URL.",
-                    properties = mapOf("url" to "URL to fetch"),
+                    properties = mapOf("url" to ToolProperty("URL to fetch")),
                     required = listOf("url"),
                 ),
             )
@@ -1203,8 +1250,10 @@ class ByokChatService(
                         "Images are numbered globally across the whole conversation in upload order, " +
                         "matching the [图片#N] markers shown inline in the messages.",
                     properties = mapOf(
-                        "image_index" to "1-based global index of the image, matching the [图片#N] marker. Defaults to the most recent image.",
-                        "query" to "What to inspect or answer about the image.",
+                        "image_index" to ToolProperty(
+                            "1-based global index of the image, matching the [图片#N] marker. Defaults to the most recent image.",
+                        ),
+                        "query" to ToolProperty("What to inspect or answer about the image."),
                     ),
                     required = listOf("image_index"),
                 ),
@@ -1215,7 +1264,7 @@ class ByokChatService(
                 ToolSpec(
                     name = "generate_image",
                     description = "Create an image from a prompt.",
-                    properties = mapOf("prompt" to "Image prompt"),
+                    properties = mapOf("prompt" to ToolProperty("Image prompt")),
                     required = listOf("prompt"),
                 ),
             )
@@ -1225,7 +1274,7 @@ class ByokChatService(
                 ToolSpec(
                     name = "mcp_list_tools",
                     description = "List tools exposed by enabled MCP servers.",
-                    properties = mapOf("server" to "Optional MCP server name"),
+                    properties = mapOf("server" to ToolProperty("Optional MCP server name")),
                     required = emptyList(),
                 ),
             )
@@ -1233,8 +1282,77 @@ class ByokChatService(
                 ToolSpec(
                     name = "mcp_call",
                     description = "Call an enabled MCP server tool.",
-                    properties = mapOf("server" to "MCP server name", "tool" to "Tool name", "arguments" to "Tool arguments JSON"),
+                    properties = mapOf(
+                        "server" to ToolProperty("MCP server name"),
+                        "tool" to ToolProperty("Tool name"),
+                        "arguments" to ToolProperty("Tool arguments JSON"),
+                    ),
                     required = listOf("server", "tool"),
+                ),
+            )
+        }
+        if (request.enabledTools.memory) {
+            add(
+                ToolSpec(
+                    name = ByokLocalToolHandler.SAVE_MEMORY,
+                    description = "Remember one stable fact about the user that will still be true in a different " +
+                        "conversation. Evidence must come from what the user said in the current turn. " +
+                        "Never store credentials, tokens, passwords, identity documents or payment details, " +
+                        "nor race, ethnicity, religion, sexual orientation, sex life, political views, " +
+                        "criminal record, or health and medical history.",
+                    properties = mapOf(
+                        "text" to ToolProperty(
+                            "A complete third-person statement about the user, at most 300 characters. " +
+                                "For a profile_key, put only the value itself.",
+                        ),
+                        "section" to ToolProperty(
+                            "Which section this fact belongs to.",
+                            enumValues = MemorySection.entries.map { it.wire },
+                        ),
+                        "source_quote" to ToolProperty(
+                            "Verbatim words from the user's current message that support this fact.",
+                        ),
+                        "profile_key" to ToolProperty(
+                            "Optional. Set only when the fact is exactly one of these profile values.",
+                            enumValues = ByokProfileKey.entries.map { it.wire },
+                        ),
+                    ),
+                    required = listOf("text", "section", "source_quote"),
+                ),
+            )
+            add(
+                ToolSpec(
+                    name = ByokLocalToolHandler.FORGET_MEMORY,
+                    description = "Delete a stored memory that the user just said is wrong or asked you to remove. " +
+                        "Only call this when the user said so in the current turn.",
+                    properties = mapOf(
+                        "query" to ToolProperty("What to forget."),
+                        "source_quote" to ToolProperty(
+                            "Verbatim words from the user's current message asking to remove or correct this.",
+                        ),
+                    ),
+                    required = listOf("query", "source_quote"),
+                ),
+            )
+        }
+        if (request.enabledTools.conversationRecall) {
+            add(
+                ToolSpec(
+                    name = ByokLocalToolHandler.RECALL_CONVERSATIONS,
+                    description = "Search past conversations stored on this device and read the messages around " +
+                        "each hit. Call it when the user refers to something discussed before.",
+                    properties = mapOf(
+                        // 用分隔字符串而非 array：四套 schema 对数组参数的支持差异大，
+                        // 字符串在弱模型上更稳，拆分成本可忽略。
+                        "queries" to ToolProperty(
+                            "One to four short phrases separated by |. A result matching any phrase is returned.",
+                        ),
+                        "limit" to ToolProperty("Maximum hits, 1 to 3. Defaults to 3.", ToolPropertyType.INTEGER),
+                        "conversation_id" to ToolProperty(
+                            "Optional. Restrict the search to one conversation returned by an earlier call.",
+                        ),
+                    ),
+                    required = listOf("queries"),
                 ),
             )
         }
@@ -1252,15 +1370,13 @@ class ByokChatService(
     private fun buildToolParameters(spec: ToolSpec, uppercaseTypes: Boolean): JsonObject = buildJsonObject {
         put("type", if (uppercaseTypes) "OBJECT" else "object")
         put("properties", buildJsonObject {
-            spec.properties.forEach { (key, desc) ->
+            spec.properties.forEach { (key, property) ->
                 put(key, buildJsonObject {
-                    val type = if (key == "max_results") {
-                        if (uppercaseTypes) "INTEGER" else "integer"
-                    } else {
-                        if (uppercaseTypes) "STRING" else "string"
+                    put("type", if (uppercaseTypes) property.type.upper else property.type.lower)
+                    put("description", property.description)
+                    if (property.enumValues.isNotEmpty()) {
+                        putJsonArray("enum") { property.enumValues.forEach { add(it) } }
                     }
-                    put("type", type)
-                    put("description", desc)
                 })
             }
         })
@@ -1319,6 +1435,11 @@ class ByokChatService(
         request: ChatRequest,
         call: ToolCall,
     ): ToolExecutionResult {
+        // 只执行本轮真正声明过的工具。模型会凭空调用没给它的工具（幻觉，或被读到的网页诱导），
+        // 而"关掉记忆"必须意味着写不进来，不能只是没告诉模型有这个工具。
+        if (toolSpecs(provider, request).none { it.name == call.name }) {
+            return ToolExecutionResult.failure("Tool ${call.name} is not enabled for this conversation.")
+        }
         val output = try {
             when (call.name) {
                 "search_web" -> searchWeb(call.arg("query"), call.arg("max_results")?.toIntOrNull())
@@ -1327,6 +1448,8 @@ class ByokChatService(
                 "generate_image" -> generateImage(provider, request, call.arg("prompt"))
                 "mcp_list_tools" -> listMcpTools(call.arg("server"))
                 "mcp_call" -> callMcpServer(call)
+                // 本地记忆与历史回忆：执行完全在 core:storage，这里只转发原始参数与会话 id。
+                in ByokLocalToolHandler.ALL -> localToolHandler.execute(call.name, call.arguments, request.sessionId)
                 else -> return ToolExecutionResult.failure("Unsupported tool: ${call.name}")
             }
         } catch (cancelled: CancellationException) {
@@ -1945,6 +2068,9 @@ class ByokChatService(
         "generate_image" -> "图像生成"
         "mcp_list_tools" -> "MCP 工具列表"
         "mcp_call" -> "MCP 服务器"
+        ByokLocalToolHandler.SAVE_MEMORY -> "记住"
+        ByokLocalToolHandler.FORGET_MEMORY -> "忘记"
+        ByokLocalToolHandler.RECALL_CONVERSATIONS -> "回忆对话"
         else -> "工具调用"
     }
 
@@ -1971,6 +2097,10 @@ class ByokChatService(
         return when (call.name) {
             "search_web", "web_search" -> call.arg("query")?.takeIf { it.isNotBlank() }?.take(200)
             "fetch_url" ->
+                result.output.lineSequence().takeWhile { it.isNotBlank() }.joinToString("\n").take(400)
+            // 回忆结果整份是给模型读的，铺进卡片既难读又会把这一项撑得比视口还高；
+            // 执行器已把命中的会话标题与时间放在首行，卡片只取抬头。
+            ByokLocalToolHandler.RECALL_CONVERSATIONS ->
                 result.output.lineSequence().takeWhile { it.isNotBlank() }.joinToString("\n").take(400)
             else -> result.output.take(1200)
         }
@@ -2192,9 +2322,25 @@ class ByokChatService(
     private data class ToolSpec(
         val name: String,
         val description: String,
-        val properties: Map<String, String>,
+        val properties: Map<String, ToolProperty>,
         val required: List<String>,
     )
+
+    /**
+     * 一个工具参数。带 [enumValues] 是为了让分节这类固定取值走 schema 约束而不是描述里的祈使句——
+     * 便宜小模型对 enum 的遵从度远高于「请从以下五项中选择」。
+     * OpenAI / Responses / Anthropic / Gemini 四套 schema 都支持 enum。
+     */
+    private data class ToolProperty(
+        val description: String,
+        val type: ToolPropertyType = ToolPropertyType.STRING,
+        val enumValues: List<String> = emptyList(),
+    )
+
+    private enum class ToolPropertyType(val lower: String, val upper: String) {
+        STRING("string", "STRING"),
+        INTEGER("integer", "INTEGER"),
+    }
     private data class DataUrl(val mimeType: String, val base64: String)
 }
 
@@ -2324,6 +2470,10 @@ internal fun classifyByokToolResult(name: String, output: String): ToolExecution
         "mcp_call" -> lower.startsWith("mcp failed:") ||
             lower.startsWith("mcp server not found:") ||
             lower.startsWith("mcp tool disabled:")
+        ByokLocalToolHandler.SAVE_MEMORY, ByokLocalToolHandler.FORGET_MEMORY ->
+            lower.startsWith(ByokLocalToolHandler.MEMORY_FAILURE_PREFIX)
+        ByokLocalToolHandler.RECALL_CONVERSATIONS ->
+            lower.startsWith(ByokLocalToolHandler.RECALL_FAILURE_PREFIX)
         else -> false
     }
     return if (commonFailure || toolFailure) {
@@ -2489,7 +2639,7 @@ private fun syntheticResponsesMessage(text: String): JsonObject = buildJsonObjec
 }
 
 private val com.molagpt.app.core.model.EnabledTools.hasByokTools: Boolean
-    get() = network || steelBrowser || vision || imageGeneration || mcp
+    get() = network || steelBrowser || vision || imageGeneration || mcp || memory || conversationRecall
 
 internal fun selectByokVisionModel(provider: ByokProvider, fallbackModelId: String): String {
     val current = provider.models.firstOrNull { it.id == fallbackModelId }

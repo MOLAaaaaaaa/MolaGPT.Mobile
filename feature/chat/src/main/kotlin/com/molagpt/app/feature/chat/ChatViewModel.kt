@@ -8,6 +8,7 @@ import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.Attachment
 import com.molagpt.app.core.model.AttachmentKind
 import com.molagpt.app.core.model.AttachmentMime
+import com.molagpt.app.core.model.ByokMemoryProjection
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.EnabledTools
@@ -26,6 +27,9 @@ import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.core.model.titleFallback
 import com.molagpt.app.core.network.resolveOpeningModelSelection
 import com.molagpt.app.core.storage.AppSettings
+import com.molagpt.app.core.storage.ByokMemoryConsolidator
+import com.molagpt.app.core.storage.ByokMemoryProjector
+import com.molagpt.app.core.storage.ByokMemoryRepository
 import com.molagpt.app.core.storage.ChatRepository
 import com.molagpt.app.core.storage.EditSnapshots
 import com.molagpt.app.core.storage.PersonaRepository
@@ -36,8 +40,10 @@ import com.molagpt.app.feature.file.AttachmentEncoder
 import com.molagpt.app.feature.file.AttachmentStore
 import com.molagpt.app.feature.file.DocumentTextExtractor
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -60,6 +66,10 @@ class ChatViewModel(
     private val backgroundStreams: BackgroundStreamManager,
     private val sessionRepository: SessionRepository,
     private val personaRepository: PersonaRepository,
+    /** BYOK 本地记忆。仅 BYOK 会话使用；MolaGPT 会话的记忆由服务端 Tracks 负责。 */
+    private val byokMemoryRepository: ByokMemoryRepository,
+    /** 记忆整理完成的通知。application scope 发出，页面存活时才展示。 */
+    private val memoryConsolidatedFlow: SharedFlow<Pair<String, ByokMemoryConsolidator.Result>>,
     private val syncEngine: SyncEngine,
     private val dispatchers: DispatcherProvider,
     private val modelsFlow: StateFlow<List<ProviderModel>>,
@@ -104,6 +114,13 @@ class ChatViewModel(
     private val _conversationPersonaId = MutableStateFlow<String?>(null)
     private val _conversationSystemPrompt = MutableStateFlow<String?>(null)
     private val _conversationSystemPromptMode = MutableStateFlow<String?>(null)
+
+    /**
+     * 会话级记忆覆盖。三态：null 跟随全局开关，显式 true/false 只对本会话生效。
+     * 用三态而非布尔，是为了让用户在设置页改全局开关时，没有表过态的会话跟着变。
+     */
+    private val _conversationMemoryOverride = MutableStateFlow<Boolean?>(null)
+    private val _conversationRecallOverride = MutableStateFlow<Boolean?>(null)
     private val _error = MutableStateFlow<String?>(null)
     private val _authExpired = MutableStateFlow(false)
     private val _enabledTools = MutableStateFlow(tools)
@@ -138,6 +155,11 @@ class ChatViewModel(
             backgroundStreams.completions.collect { completion ->
                 if (completion.sessionId != sessionId) return@collect
                 maybeShowReasoningMissHint()
+            }
+        }
+        viewModelScope.launch {
+            memoryConsolidatedFlow.collect { (consolidatedSessionId, result) ->
+                if (consolidatedSessionId == sessionId && !result.isEmpty) _memoryHint.value = result
             }
         }
     }
@@ -235,6 +257,75 @@ class ChatViewModel(
     fun selectPersona(personaId: String?) {
         _conversationPersonaId.value = personaId
         viewModelScope.launch { sessionRepository.updatePersona(sessionId, personaId) }
+    }
+
+    /**
+     * 会话覆盖优先，否则跟随全局开关。
+     *
+     * 请求构造读这两个函数而不是下面的 StateFlow：`WhileSubscribed` 在没有订阅者时不更新，
+     * 界面还没订阅上就发送会把「已开启」读成 false，记忆静默不生效且没有任何报错。
+     */
+    /** 记忆总开关。关掉时注入、回忆、学习一律不生效，不看任何子开关与会话覆盖。 */
+    private fun memoryMasterEnabled(): Boolean =
+        settingsFlow.value?.byokMemoryMasterEnabled == true
+
+    private fun effectiveMemoryEnabled(): Boolean = memoryMasterEnabled() &&
+        (_conversationMemoryOverride.value ?: (settingsFlow.value?.byokMemoryEnabled == true))
+
+    private fun effectiveRecallEnabled(): Boolean = memoryMasterEnabled() &&
+        (_conversationRecallOverride.value ?: (settingsFlow.value?.byokConversationRecallEnabled == true))
+
+    /** 记忆总开关是否打开。关着时 composer 上那个 chip 不出现——它此刻什么也控制不了。 */
+    val memoryAvailable: StateFlow<Boolean> = settingsFlow
+        .map { it?.byokMemoryMasterEnabled == true }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** 本会话是否使用长期记忆。仅供 UI 订阅。 */
+    val memoryEnabled: StateFlow<Boolean> = combine(
+        _conversationMemoryOverride, settingsFlow,
+    ) { override, settings ->
+        settings?.byokMemoryMasterEnabled == true && (override ?: (settings.byokMemoryEnabled))
+    }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** 本次请求实际会注入的记忆。会话内面板据此展示，与真正发出去的内容同源。 */
+    private val _memoryProjection = MutableStateFlow(ByokMemoryProjection())
+    val memoryProjection: StateFlow<ByokMemoryProjection> = _memoryProjection.asStateFlow()
+
+    /**
+     * 会话记忆开关。只在首轮发出之前可调（入口是 composer 的记忆 chip，有消息后即隐藏）：
+     * 记忆是否参与必须在**开口之前**决定，说完再关已经晚了。
+     *
+     * 关掉时历史检索一并关掉。用户点掉「记忆」要的是这轮不留痕迹，
+     * 只停注入却仍去翻旧对话不符合这个预期；打开则交还给全局开关，不替用户开他没开过的东西。
+     */
+    fun setMemoryEnabled(enabled: Boolean) {
+        _conversationMemoryOverride.value = enabled
+        _conversationRecallOverride.value = if (enabled) null else false
+        viewModelScope.launch { persistMemoryOverrides() }
+    }
+
+    private suspend fun persistMemoryOverrides() {
+        sessionRepository.updateByokMemoryEnabled(sessionId, _conversationMemoryOverride.value)
+        sessionRepository.updateByokConversationRecallEnabled(sessionId, _conversationRecallOverride.value)
+    }
+
+    /** 刷新会话内面板要展示的注入内容。打开面板时调用，不在每帧重算。 */
+    fun refreshMemoryProjection() {
+        viewModelScope.launch { _memoryProjection.value = byokMemoryRepository.projection() }
+    }
+
+    /**
+     * 整理完成提示。只在本会话仍打开时出现，用户点掉即止；
+     * 不向消息历史插入伪造的助手内容——那会让记忆写入看起来像模型说过的话。
+     *
+     * 写入与待确认分开计数：只排了候选却说「已更新」，是在声称一件没发生的事。
+     */
+    private val _memoryHint = MutableStateFlow<ByokMemoryConsolidator.Result?>(null)
+    val memoryHint: StateFlow<ByokMemoryConsolidator.Result?> = _memoryHint.asStateFlow()
+
+    fun dismissMemoryHint() {
+        _memoryHint.value = null
     }
 
     /** 当前会话标题（随重命名实时刷新）；空/缺省回退「新对话」。 */
@@ -664,6 +755,9 @@ class ChatViewModel(
                 personaId = _conversationPersonaId.value.takeIf { selectedModel.providerKind == ProviderKind.BYOK },
             )
             sessionRepository.updateModel(sessionId, modelId, selectedModel.providerId, selectedModel.providerKind)
+            // 会话行到这里才第一次落库。用户在首轮之前关掉的记忆开关必须跟着写进去——
+            // 否则进程重建后它会退回全局开关，用户以为关着的记忆又开了。
+            persistMemoryOverrides()
             _conversationProviderId.value = selectedModel.providerId
             _conversationProviderKind.value = selectedModel.providerKind
             val now = System.currentTimeMillis()
@@ -1021,13 +1115,19 @@ class ChatViewModel(
                 history
             }
             val messages = if (effectiveKind == ProviderKind.BYOK) {
-                val sysText = SystemPromptComposer.compose(
+                val personaText = SystemPromptComposer.compose(
                     personaPrompt = activePersona.value?.systemPrompt,
                     conversationPrompt = _conversationSystemPrompt.value,
                     mode = _conversationSystemPromptMode.value,
                     vars = buildPromptVariables(providerModel, modelDisplayName),
                 )
-                if (!sysText.isNullOrBlank()) listOf(systemMessage(sysText)) + requestHistory else requestHistory
+                // 顺序固定为 角色提示 → 会话提示 → 记忆块 → 记忆使用规则：
+                // 记忆是背景数据，必须排在角色定义之后，不能反过来影响助手身份。
+                val sysText = listOfNotNull(
+                    personaText?.takeIf { it.isNotBlank() },
+                    buildMemoryContext(requestTools),
+                ).joinToString("\n\n").takeIf { it.isNotBlank() }
+                if (sysText != null) listOf(systemMessage(sysText)) + requestHistory else requestHistory
             } else {
                 requestHistory
             }
@@ -1064,6 +1164,23 @@ class ChatViewModel(
             // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，
             // Room 落库的同一条消息不会与之重复显示，也避免“清空→回灌”的瞬时闪烁。
         }
+    }
+
+    /**
+     * 本次请求的记忆上下文：记忆块 + （工具真的挂上时的）使用规则。
+     *
+     * 会话记忆关闭时返回 null，请求里连一个字都不会带——这是「关闭」对用户的承诺。
+     * 使用规则跟随 [requestTools] 而非全局开关：不支持工具调用的模型挂不上工具，
+     * 教它调用不存在的工具只会换来一段道歉。
+     */
+    private suspend fun buildMemoryContext(requestTools: EnabledTools): String? {
+        val memoryOn = effectiveMemoryEnabled()
+        val block = if (memoryOn) byokMemoryRepository.projection().also { _memoryProjection.value = it }.block else ""
+        val rules = ByokMemoryProjector.usageRules(
+            memoryTools = requestTools.memory,
+            recallTool = requestTools.conversationRecall,
+        )
+        return listOf(block, rules).filter { it.isNotBlank() }.joinToString("\n\n").takeIf { it.isNotBlank() }
     }
 
     /** 角色注入用的 system 消息（仅本次请求，不落库）。各 BYOK provider 均读 rawText。 */
@@ -1126,6 +1243,11 @@ class ChatViewModel(
                     mcp = canTool && hasMcpServersFlow.value,
                     vision = settings.visionProxyEnabled && canTool,
                     imageGeneration = settings.imageGenEnabled && canTool,
+                    // 记忆读取不需要工具（走 system 注入），但显式记住/忘记与历史回忆需要。
+                    // 显式「记住这条」跟着记忆注入走：注入关着时写下的记忆没有出口，写了也用不上。
+                    memory = effectiveMemoryEnabled() && canTool,
+                    // 主动回忆是平级的子功能，只跟自己的开关和总开关走。
+                    conversationRecall = effectiveRecallEnabled() && canTool,
                 )
             }
         }
@@ -1138,6 +1260,8 @@ class ChatViewModel(
         _conversationPersonaId.value = conversation.personaId
         _conversationSystemPrompt.value = conversation.systemPrompt
         _conversationSystemPromptMode.value = conversation.systemPromptMode
+        _conversationMemoryOverride.value = conversation.byokMemoryEnabled
+        _conversationRecallOverride.value = conversation.byokConversationRecallEnabled
         conversation.model?.takeIf { it.isNotBlank() }?.let { _selectedModel.value = it }
         // 恢复后把推理档位适配到该模型（模型列表可能已加载）。
         val model = modelsFlow.value.firstOrNull {

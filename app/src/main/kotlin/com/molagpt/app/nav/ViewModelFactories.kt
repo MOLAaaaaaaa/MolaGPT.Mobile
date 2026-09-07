@@ -11,6 +11,7 @@ import com.molagpt.app.feature.auth.AuthViewModel
 import com.molagpt.app.feature.agentcontrol.AgentControlViewModel
 import com.molagpt.app.feature.chat.ChatViewModel
 import com.molagpt.app.feature.session.SessionViewModel
+import com.molagpt.app.feature.settings.ByokMemoryViewModel
 import com.molagpt.app.feature.settings.PersonalizationViewModel
 import com.molagpt.app.feature.settings.SettingsViewModel
 
@@ -29,6 +30,8 @@ object ViewModelFactories {
         AgentControlViewModel(
             service = container.agentControlService,
             onTurnSubmitted = container.agentNotificationMonitor::watch,
+            loadDismissedFailures = { container.settingsStore.seenAgentCommandFailureKeys() },
+            saveDismissedFailure = { container.settingsStore.addSeenAgentCommandFailureKey(it) },
         )
     }
 
@@ -58,13 +61,28 @@ object ViewModelFactories {
         )
     }
 
-    fun chat(container: AppContainer, sessionId: String, settings: AppSettings) = factory {
+    fun byokMemory(container: AppContainer) = factory {
+        ByokMemoryViewModel(
+            repository = container.byokMemoryRepository,
+            store = container.settingsStore,
+            byokProviders = container.byokProviderRepository,
+            consolidateNow = { container.consolidateByokMemoryNow() },
+        )
+    }
+
+    fun chat(
+        container: AppContainer,
+        sessionId: String,
+        settings: AppSettings,
+    ) = factory {
         ChatViewModel(
             sessionId = sessionId,
             chatRepository = container.chatRepository,
             backgroundStreams = container.backgroundStreamManager,
             sessionRepository = container.sessionRepository,
             personaRepository = container.personaRepository,
+            byokMemoryRepository = container.byokMemoryRepository,
+            memoryConsolidatedFlow = container.memoryConsolidated,
             syncEngine = container.syncEngine,
             dispatchers = container.dispatchers,
             modelsFlow = container.modelRegistry.models,
