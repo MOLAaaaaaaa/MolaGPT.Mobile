@@ -9,6 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.molagpt.app.core.storage.dao.ByokMemoryDao
 import com.molagpt.app.core.storage.dao.ConversationDao
 import com.molagpt.app.core.storage.dao.ByokProviderDao
+import com.molagpt.app.core.storage.dao.LorebookDao
 import com.molagpt.app.core.storage.dao.MessageDao
 import com.molagpt.app.core.storage.dao.PersonaDao
 import com.molagpt.app.core.storage.dao.StreamTaskDao
@@ -18,6 +19,7 @@ import com.molagpt.app.core.storage.entity.ByokMemoryEvidenceEntity
 import com.molagpt.app.core.storage.entity.ByokMemorySuppressionEntity
 import com.molagpt.app.core.storage.entity.ByokProviderEntity
 import com.molagpt.app.core.storage.entity.ConversationEntity
+import com.molagpt.app.core.storage.entity.LorebookEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
 import com.molagpt.app.core.storage.entity.PersonaEntity
 import com.molagpt.app.core.storage.entity.StreamTaskEntity
@@ -33,8 +35,9 @@ import com.molagpt.app.core.storage.entity.StreamTaskEntity
         ByokMemoryEvidenceEntity::class,
         ByokMemoryCandidateEntity::class,
         ByokMemorySuppressionEntity::class,
+        LorebookEntity::class,
     ],
-    version = 14,
+    version = 15,
     exportSchema = false,
 )
 abstract class MolaDatabase : RoomDatabase() {
@@ -43,12 +46,13 @@ abstract class MolaDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun streamTaskDao(): StreamTaskDao
     abstract fun personaDao(): PersonaDao
+    abstract fun lorebookDao(): LorebookDao
     abstract fun byokMemoryDao(): ByokMemoryDao
 
     companion object {
         fun build(context: Context): MolaDatabase =
             Room.databaseBuilder(context.applicationContext, MolaDatabase::class.java, "mola.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
                 .build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -379,6 +383,29 @@ abstract class MolaDatabase : RoomDatabase() {
                     "CREATE UNIQUE INDEX IF NOT EXISTS index_byok_memory_entries_scope_profileKey " +
                         "ON byok_memory_entries(scope, profileKey)",
                 )
+            }
+        }
+
+        /** 角色卡（酒馆）：角色挂卡片资料与头像，另起一张共享世界书表。 */
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE personas ADD COLUMN profileJson TEXT")
+                db.execSQL("ALTER TABLE personas ADD COLUMN avatarPath TEXT")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS lorebooks (
+                        id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        bookJson TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        deletedAt INTEGER,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_lorebooks_deletedAt_updatedAt ON lorebooks(deletedAt, updatedAt)")
             }
         }
     }

@@ -74,7 +74,10 @@ fun MessageList(
     onRegenerate: () -> Unit = {},
     onRegenerateWithModel: (String) -> Unit = {},
     onEditUser: (String) -> Unit = {},
+    onEditAssistant: (String) -> Unit = {},
     canEdit: Boolean = true,
+    /** 编辑回答仅 BYOK 会话开放；用户消息编辑不受此限。 */
+    canEditAssistant: Boolean = false,
     models: List<ProviderModel> = emptyList(),
     onNavVersion: (String, Int) -> Unit = { _, _ -> },
     onNavEditSnapshot: (String, Int) -> Unit = { _, _ -> },
@@ -85,7 +88,7 @@ fun MessageList(
     var autoFollow by remember { mutableStateOf(true) }
     StreamRenderPacingEffect(messages.any(ChatMessage::isStreaming))
     val renderRequests = remember { Channel<MessageRenderRequest>(Channel.CONFLATED) }
-    val renderRequest = MessageRenderRequest(messages, models, canEdit)
+    val renderRequest = MessageRenderRequest(messages, models, canEdit, canEditAssistant)
     SideEffect {
         renderRequests.trySend(renderRequest)
     }
@@ -100,6 +103,7 @@ fun MessageList(
             parseMarkdown = false,
             modelDisplayNameOf = initialModelNameOf,
             canEditUser = canEdit,
+            canEditAssistant = canEditAssistant,
         )
     }
     val rows by produceState(
@@ -117,6 +121,7 @@ fun MessageList(
                     parseMarkdown = true,
                     modelDisplayNameOf = modelNameOf,
                     canEditUser = latest.canEdit,
+                    canEditAssistant = latest.canEditAssistant,
                 )
             }
             renderedRequest = latest
@@ -242,7 +247,7 @@ fun MessageList(
                             onCopy = { clipboard.setText(AnnotatedString(row.text)) },
                             onRegenerate = if (row.canRegenerate) onRegenerate else null,
                             onEdit = if (row.canEdit) {
-                                { onEditUser(row.messageId) }
+                                { if (row.editsAssistant) onEditAssistant(row.messageId) else onEditUser(row.messageId) }
                             } else {
                                 null
                             },
@@ -350,6 +355,7 @@ private data class MessageRenderRequest(
     val messages: List<ChatMessage>,
     val models: List<ProviderModel>,
     val canEdit: Boolean,
+    val canEditAssistant: Boolean,
 )
 
 private sealed interface MessageListRow {
@@ -431,6 +437,8 @@ private sealed interface MessageListRow {
         val text: String,
         val canRegenerate: Boolean,
         val canEdit: Boolean = false,
+        /** 编辑的是助手回答：改写后存成一个新版本，不重新请求模型。 */
+        val editsAssistant: Boolean = false,
         val alignEnd: Boolean = false,
         override val topPaddingDp: Int,
     ) : MessageListRow {
@@ -465,6 +473,7 @@ private fun List<ChatMessage>.toMessageRows(
     parseMarkdown: Boolean,
     modelDisplayNameOf: (String) -> String,
     canEditUser: Boolean = true,
+    canEditAssistant: Boolean = false,
 ): List<MessageListRow> {
     val rows = ArrayList<MessageListRow>()
     val lastAssistantId = lastOrNull { it.role == Role.ASSISTANT }?.messageId
@@ -616,7 +625,13 @@ private fun List<ChatMessage>.toMessageRows(
                     MessageListRow.Actions(
                         messageId = message.messageId,
                         text = copyText,
-                        canRegenerate = message.messageId == lastAssistantId,
+                        // 开场白是卡里写好的台词，不是模型生成的，「重新生成」对它没有意义
+                        // （此时也还没有任何用户消息可供重答）。备选开场白走下面的版本栏切换。
+                        canRegenerate = message.messageId == lastAssistantId && !message.isRoleGreeting,
+                        // 只给最新一条回答开编辑口子：改中途的回答不会重新生成后文，
+                        // 留在那里的只会是一段和上下文对不上的历史。
+                        canEdit = canEditAssistant && message.messageId == lastAssistantId,
+                        editsAssistant = true,
                         topPaddingDp = top,
                     )
                 }

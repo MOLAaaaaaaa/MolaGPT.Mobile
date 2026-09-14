@@ -21,6 +21,8 @@ import java.util.concurrent.TimeUnit
 class MolaHttp(
     val userAgent: String,
     enableLogging: Boolean = false,
+    loadDeviceCookie: () -> String? = { null },
+    saveDeviceCookie: (String?) -> Unit = {},
 ) {
     val json: Json = Json {
         ignoreUnknownKeys = true
@@ -30,6 +32,7 @@ class MolaHttp(
     }
 
     val okHttp: OkHttpClient = OkHttpClient.Builder()
+        .cookieJar(MolaDeviceCookieJar(loadDeviceCookie, saveDeviceCookie))
         .retryOnConnectionFailure(true)
         .connectTimeout(30, TimeUnit.SECONDS)
         // SSE：读/整体超时不限制，靠协程取消 + 服务端 stop_stream 收尾。

@@ -52,6 +52,7 @@ import com.molagpt.app.feature.settings.ByokProviderDetailScreen
 import com.molagpt.app.feature.settings.ByokProvidersScreen
 import com.molagpt.app.feature.settings.ByokToolsScreen
 import com.molagpt.app.feature.settings.ImageWorkbenchScreen
+import com.molagpt.app.feature.settings.LorebookScreen
 import com.molagpt.app.feature.settings.McpServerDetailScreen
 import com.molagpt.app.feature.settings.MolaAccountScreen
 import com.molagpt.app.feature.settings.PersonaEditScreen
@@ -61,6 +62,7 @@ import com.molagpt.app.feature.settings.ByokMemoryScreen
 import com.molagpt.app.feature.settings.ByokMemoryViewModel
 import com.molagpt.app.feature.settings.PersonalizationScreen
 import com.molagpt.app.feature.settings.PersonalizationViewModel
+import com.molagpt.app.feature.settings.PostProcessingScreen
 import com.molagpt.app.feature.settings.SettingsScreen
 import com.molagpt.app.feature.settings.SettingsViewModel
 import com.molagpt.app.feature.settings.StartupNoticesHost
@@ -81,6 +83,8 @@ private object Routes {
     const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
     const val BYOK_TOOLS = "byok_tools"
     const val BYOK_MEMORY = "byok_memory"
+    const val POST_PROCESSING = "post_processing"
+    const val LOREBOOKS = "lorebooks"
     const val MCP_SERVER_DETAIL = "mcp_server_detail"
     const val PERSONA_MANAGEMENT = "persona_management"
     const val PERSONA_VIEW = "persona_view"
@@ -264,6 +268,16 @@ fun MolaNavHost(
                 onOpenByokMemory = {
                     if (navController.currentDestination?.route != Routes.BYOK_MEMORY) {
                         navController.navigate(Routes.BYOK_MEMORY) { launchSingleTop = true }
+                    }
+                },
+                onOpenPostProcessing = {
+                    if (navController.currentDestination?.route != Routes.POST_PROCESSING) {
+                        navController.navigate(Routes.POST_PROCESSING) { launchSingleTop = true }
+                    }
+                },
+                onOpenLorebooks = {
+                    if (navController.currentDestination?.route != Routes.LOREBOOKS) {
+                        navController.navigate(Routes.LOREBOOKS) { launchSingleTop = true }
                     }
                 },
                 buildLabel = "MolaGPT v${com.molagpt.app.BuildConfig.VERSION_NAME} · 构建 ${com.molagpt.app.BuildConfig.BUILD_TIME}",
@@ -469,6 +483,36 @@ fun MolaNavHost(
             )
         }
 
+        // 回答后处理页：规则在流结束后施加、处理结果直接落库，与 BYOK 无关，对所有模型生效。
+        composable(Routes.POST_PROCESSING) {
+            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            PostProcessingScreen(
+                viewModel = vm,
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.POST_PROCESSING) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.LOREBOOKS) {
+            LorebookScreen(
+                repository = container.lorebookRepository,
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.LOREBOOKS) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
         composable(Routes.PERSONALIZATION) {
             val vm: PersonalizationViewModel = viewModel(factory = ViewModelFactories.personalization(container))
             PersonalizationScreen(
@@ -502,6 +546,7 @@ fun MolaNavHost(
         composable(Routes.PERSONA_MANAGEMENT) {
             PersonaManagementScreen(
                 repository = container.personaRepository,
+                avatars = container.personaAvatars,
                 onOpenView = { id ->
                     navController.navigate("${Routes.PERSONA_VIEW}/$id") { launchSingleTop = true }
                 },
@@ -551,6 +596,7 @@ fun MolaNavHost(
         ) { backStackEntry ->
             PersonaEditScreen(
                 repository = container.personaRepository,
+                lorebooks = container.lorebookRepository,
                 personaId = backStackEntry.arguments?.getString("personaId"),
                 copyFromId = backStackEntry.arguments?.getString("copyFromId"),
                 onClose = {
@@ -567,9 +613,9 @@ fun MolaNavHost(
     StartupNoticesHost(
         versionName = com.molagpt.app.BuildConfig.VERSION_NAME,
         settingsStore = container.settingsStore,
-        onOpenByokMemory = {
-            if (navController.currentDestination?.route != Routes.BYOK_MEMORY) {
-                navController.navigate(Routes.BYOK_MEMORY) { launchSingleTop = true }
+        onOpenPersonaManagement = {
+            if (navController.currentDestination?.route != Routes.PERSONA_MANAGEMENT) {
+                navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
             }
         },
     )
@@ -713,8 +759,10 @@ private fun ChatHost(
                     alpha = if (progress < 0.01f) 0f else 1f
                 },
         ) {
+            val personaLabels by sessionVm.personaLabels.collectAsStateWithLifecycle()
             SessionDrawer(
                 sessions = sessionVm.sessionItems,
+                personaLabels = personaLabels,
                 currentSessionId = currentSessionId,
                 drawerOpen = drawerOpen,
                 onNewChat = {

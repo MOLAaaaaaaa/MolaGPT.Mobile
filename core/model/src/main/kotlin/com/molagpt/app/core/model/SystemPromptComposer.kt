@@ -16,15 +16,20 @@ object SystemPromptComposer {
         if (template.isNullOrEmpty()) return ""
         if (!template.contains("{{")) return template
         return PLACEHOLDER.replace(template) { match ->
-            when (match.groupValues[1].lowercase()) {
+            val key = match.groupValues[1]
+            when (key.lowercase()) {
                 "date" -> vars.date
                 "time" -> vars.time
                 "datetime" -> vars.datetime
                 "model" -> vars.modelDisplayName ?: match.value
                 "model_id" -> vars.modelId ?: match.value
                 "provider" -> vars.providerName ?: match.value
-                "username" -> vars.username?.takeIf { it.isNotBlank() } ?: "用户"
-                else -> match.value
+                "username", "user" -> vars.username?.takeIf { it.isNotBlank() } ?: "用户"
+                // 角色卡里通行的两个写法，指同一件事。
+                "char", "character" -> vars.characterName?.takeIf { it.isNotBlank() } ?: match.value
+                "original" -> vars.original
+                // 角色字段与世界书的命名出口；都没有就原样留着（用户可能写的是 JSON 样式的花括号）。
+                else -> vars.roleFields[key] ?: vars.outlets[key] ?: match.value
             }
         }
     }
@@ -61,6 +66,10 @@ object SystemPromptComposer {
 
 /**
  * 插值上下文。date/time 由调用方按本地时区格式化后传入（保持本对象不依赖具体时间 API）。
+ *
+ * 后四项只有角色扮演链路会用到：[characterName] 对应 `{{char}}`，[roleFields] 是角色卡的
+ * description / personality / scenario / persona 等字段，[outlets] 是世界书的命名出口，
+ * [original] 供会话级提示词用 `{{original}}` 引用角色本身的提示词。
  */
 data class PromptVariables(
     val date: String,
@@ -70,4 +79,8 @@ data class PromptVariables(
     val modelId: String? = null,
     val providerName: String? = null,
     val username: String? = null,
+    val characterName: String? = null,
+    val roleFields: Map<String, String> = emptyMap(),
+    val outlets: Map<String, String> = emptyMap(),
+    val original: String = "",
 )

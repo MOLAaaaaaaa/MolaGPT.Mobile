@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.render.MolaLogo
+import com.molagpt.app.core.render.PersonaAvatar
 import com.molagpt.app.core.render.PersonaIcons
 
 /**
@@ -39,6 +40,8 @@ import com.molagpt.app.core.render.PersonaIcons
 fun PersonaWelcome(
     activePersona: Persona?,
     isByok: Boolean,
+    /** 当前角色的卡片头像；没有就退回矢量图标。 */
+    avatar: java.io.File? = null,
     onOpenPersonaPicker: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -67,6 +70,7 @@ fun PersonaWelcome(
             Spacer(Modifier.height(32.dp))
             PersonaSelectorChip(
                 persona = activePersona,
+                avatar = avatar,
                 onClick = onOpenPersonaPicker,
                 modifier = Modifier.padding(horizontal = 32.dp),
             )
@@ -76,6 +80,7 @@ fun PersonaWelcome(
 
 @Composable
 private fun PersonaSelectorChip(
+    avatar: java.io.File?,
     persona: Persona?,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -91,20 +96,11 @@ private fun PersonaSelectorChip(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .clip(CircleShape)
-                .background(cs.primary.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = PersonaIcons.resolve(persona?.icon),
-                contentDescription = null,
-                tint = cs.primary,
-                modifier = Modifier.size(22.dp),
-            )
-        }
+        PersonaAvatar(
+            file = avatar,
+            fallbackIcon = PersonaIcons.resolve(persona?.icon),
+            size = 38.dp,
+        )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f, fill = false)) {
             Text(

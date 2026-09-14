@@ -9,7 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -20,7 +20,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -133,7 +132,7 @@ internal fun SelectPill(
     }
 }
 
-internal enum class TracksIconKind { Sparkles, Info, Persona }
+internal enum class TracksIconKind { Sparkles, Info, Persona, Lore }
 
 /** Canvas 绘制的 30dp 主色调圆角图标块。用于设置/BYOK 入口卡片的前导图标。 */
 @Composable
@@ -176,19 +175,48 @@ internal fun TracksRowIcon(kind: TracksIconKind) {
                         style = Stroke(stroke),
                     )
                 }
+                // 摊开的书：中缝一竖 + 两侧书页。
+                TracksIconKind.Lore -> {
+                    drawLine(tint, Offset(center.x, size.height * 0.22f), Offset(center.x, size.height * 0.88f), stroke)
+                    drawLine(tint, Offset(size.width * 0.08f, size.height * 0.16f), Offset(size.width * 0.08f, size.height * 0.80f), stroke)
+                    drawLine(tint, Offset(size.width * 0.92f, size.height * 0.16f), Offset(size.width * 0.92f, size.height * 0.80f), stroke)
+                    drawLine(tint, Offset(size.width * 0.08f, size.height * 0.16f), Offset(center.x, size.height * 0.28f), stroke)
+                    drawLine(tint, Offset(size.width * 0.92f, size.height * 0.16f), Offset(center.x, size.height * 0.28f), stroke)
+                    drawLine(tint, Offset(size.width * 0.08f, size.height * 0.80f), Offset(center.x, size.height * 0.88f), stroke)
+                    drawLine(tint, Offset(size.width * 0.92f, size.height * 0.80f), Offset(center.x, size.height * 0.88f), stroke)
+                }
             }
         }
     }
 }
 
-/** 前向（右向）箭头：复用返回箭头旋转 180°，用于「进入子页面」入口卡。 */
+/** 设置入口使用的统一图标容器。 */
+@Composable
+internal fun SettingsRowIcon(imageVector: ImageVector) {
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier
+            .size(30.dp)
+            .clip(RoundedCornerShape(15.dp))
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = imageVector,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+/** 进入子页面的箭头。 */
 @Composable
 internal fun ForwardChevron(modifier: Modifier = Modifier) {
     Icon(
-        Icons.AutoMirrored.Filled.ArrowBack,
+        Icons.AutoMirrored.Filled.KeyboardArrowRight,
         contentDescription = null,
         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = modifier.size(20.dp).rotate(180f),
+        modifier = modifier.size(20.dp),
     )
 }
 

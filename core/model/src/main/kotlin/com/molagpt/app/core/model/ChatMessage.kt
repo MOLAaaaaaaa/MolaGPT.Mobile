@@ -19,14 +19,53 @@ data class ChatMessage(
 ) {
     val isStreaming: Boolean
         get() = status == MessageStatus.STREAMING || status == MessageStatus.PENDING
+
+    /** 按位置插入的角色补充：不能被当成普通 system 抽到最前面。 */
+    val isRoleInjection: Boolean
+        get() = role == Role.SYSTEM && metadata.containsKey(ChatMessageMetadataKeys.ROLE_INJECTION)
+
+    /** 角色卡的开场白：内容来自卡而非模型。 */
+    val isRoleGreeting: Boolean
+        get() = metadata.containsKey(ChatMessageMetadataKeys.ROLE_GREETING)
 }
 
 enum class Role { USER, ASSISTANT, SYSTEM, TOOL }
 
 object ChatMessageMetadataKeys {
+    /**
+     * 标记一条**按位置插入**的角色补充（世界书的 at_depth、角色补充、后置指令）。
+     *
+     * 它的值在于位置本身，不能像普通 system 那样被收拢到请求最前面。各协议的处理并不相同，
+     * 理由也不同，不要一并套用：
+     * - OpenAI chat/completions 与 Responses：协议本来就接受任意位置的 system
+     *   （Responses 见 `EasyInputMessage.role`），**原样保留身份与位置**。
+     * - Anthropic / Gemini：协议的消息列表里根本没有 system 这个身份，system 只能放在
+     *   顶层 `system` / `systemInstruction`。带此标记的只能**原地降级成 user** 发出去：
+     *   位置保住了，身份语义并不等同于 system——这是协议限制下的取舍。
+     */
+    const val ROLE_INJECTION = "roleInjection"
+
+    /**
+     * 角色开场白。它是卡里写好的台词，不是模型生成的，所以不给「重新生成」；
+     * 备选开场白复用重试版本栈，切换直接走消息下方那条版本栏。
+     */
+    const val ROLE_GREETING = "roleGreeting"
+
     const val OPENAI_WIRE_HISTORY = "openAiWireHistory"
     const val ANTHROPIC_WIRE_HISTORY = "anthropicWireHistory"
     const val GEMINI_WIRE_HISTORY = "geminiWireHistory"
+
+    /**
+     * 上一轮助手消息的 provider 原生协议快照，下一轮原样回放。
+     *
+     * 正文一旦变了（后处理改写、用户编辑、切到另一个版本），这份快照就必须跟着变或者作废，
+     * 否则下一轮发出去的是屏幕上没有的文本。
+     */
+    val WIRE_HISTORY: Set<String> = setOf(
+        OPENAI_WIRE_HISTORY,
+        ANTHROPIC_WIRE_HISTORY,
+        GEMINI_WIRE_HISTORY,
+    )
 
     // —— 单次请求统计（见 [MessageStats]）。历史消息大多缺字段，读取方一律按可空处理。——
     /** 总 token 数。历史最久的一个键，早于其余统计字段存在。 */

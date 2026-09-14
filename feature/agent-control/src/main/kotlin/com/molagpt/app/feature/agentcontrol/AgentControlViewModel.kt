@@ -11,6 +11,8 @@ import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.RelaySessionMeta
 import com.molagpt.app.core.model.isBusy
 import com.molagpt.app.core.model.isOnline
+import com.molagpt.app.core.model.isOwnerLive
+import com.molagpt.app.core.model.isStalled
 import com.molagpt.app.core.model.phaseEnum
 import com.molagpt.app.core.model.sortAtMs
 import com.molagpt.app.core.network.AgentControlService
@@ -30,8 +32,13 @@ data class AgentSessionUiState(
     val blocks: List<AgentBlock> = emptyList(),
     val loading: Boolean = false,
     val input: String = "",
+    /** 桌面端在回合中途离开了：meta 还写着忙态，但没人会再把它跑完。 */
+    val stalled: Boolean = false,
 ) {
     val phase: AgentPhase get() = meta?.phaseEnum ?: AgentPhase.Idle
+
+    /** 真正在跑（停止按钮、输入禁用、活动指示器都看它，而不是裸 phase）。 */
+    val busy: Boolean get() = meta?.isBusy == true && !stalled
 }
 
 data class AgentCommandFailure(
@@ -217,7 +224,13 @@ class AgentControlViewModel(
             _selectedId.value?.let { id ->
                 list.firstOrNull { it.conversationId == id }?.let { raw ->
                     val fresh = mergeDerivedPhase(raw)
-                    _selected.update { it.copy(meta = fresh, modelOptions = modelOptionsFor(fresh, list)) }
+                    _selected.update {
+                        it.copy(
+                            meta = fresh,
+                            modelOptions = modelOptionsFor(fresh, list),
+                            stalled = isStalled(fresh),
+                        )
+                    }
                 }
             }
             _refreshing.value = false
@@ -254,6 +267,7 @@ class AgentControlViewModel(
             meta = mergedMeta,
             modelOptions = modelOptionsFor(mergedMeta, _sessions.value),
             loading = true,
+            stalled = isStalled(mergedMeta),
         )
         streamJob = viewModelScope.launch {
             val snapshot = runCatching {
@@ -305,8 +319,14 @@ class AgentControlViewModel(
         if (_selectedId.value != sessionId) return false
         val meta = _selected.value.meta ?: return false
         if (meta.conversationId != sessionId) return false
-        return reducer.syncActivityIndicator(busy = meta.isBusy)
+        // 桌面已经离开时 meta 上的忙态是个永远收不了尾的残留值——再挂着指示器，
+        // 页面就会一直转圈假装任务还在跑。
+        return reducer.syncActivityIndicator(busy = meta.isBusy && !isStalled(meta))
     }
+
+    /** 这个会话的忙态是否已不可信：拥有它的桌面掉线了，没人能再把回合跑完。 */
+    private fun isStalled(meta: RelaySessionMeta?): Boolean =
+        meta != null && meta.isStalled(_machines.value)
 
     /** meta 变化（服务器刷新 / 乐观置忙）后也要重算指示器，并把结果推进 UI。 */
     private fun refreshActivityIndicator(sessionId: String) {
@@ -580,7 +600,11 @@ class AgentControlViewModel(
             val meta = state.meta
             if (meta?.conversationId == sessionId) {
                 val patched = patch(meta)
-                state.copy(meta = patched, modelOptions = modelOptionsFor(patched, _sessions.value))
+                state.copy(
+                    meta = patched,
+                    modelOptions = modelOptionsFor(patched, _sessions.value),
+                    stalled = isStalled(patched),
+                )
             } else {
                 state
             }
@@ -608,7 +632,11 @@ class AgentControlViewModel(
         val fresh = list.firstOrNull { it.conversationId == sessionId }?.let(::mergeDerivedPhase) ?: return
         _selected.update { state ->
             if (state.meta?.conversationId == sessionId) {
-                state.copy(meta = fresh, modelOptions = modelOptionsFor(fresh, list))
+                state.copy(
+                    meta = fresh,
+                    modelOptions = modelOptionsFor(fresh, list),
+                    stalled = isStalled(fresh),
+                )
             } else {
                 state
             }
@@ -778,12 +806,23 @@ class AgentControlViewModel(
 
     private fun applyPhase(sessionId: String, phase: AgentPhase) {
         val attention = phase == AgentPhase.Waiting
+        // 桌面已经离开时，事件流里那些"没收尾"的工具卡/快照只是回合被截断前的残留，
+        // 不能据此把会话推回忙态——否则进一次已中断的会话就又转起圈来。
+        if (phase == AgentPhase.Running || phase == AgentPhase.Waiting) {
+            val owner = _selected.value.meta?.takeIf { it.conversationId == sessionId }
+                ?: _sessions.value.firstOrNull { it.conversationId == sessionId }
+            if (owner != null && !owner.isOwnerLive(_machines.value)) return
+        }
         markDerivedPhase(sessionId, phase)
         _selected.update { state ->
             val meta = state.meta
             if (meta?.conversationId == sessionId) {
                 val patched = meta.copy(phase = phase.ordinal, needsAttention = attention)
-                state.copy(meta = patched, modelOptions = modelOptionsFor(patched, _sessions.value))
+                state.copy(
+                    meta = patched,
+                    modelOptions = modelOptionsFor(patched, _sessions.value),
+                    stalled = isStalled(patched),
+                )
             } else {
                 state
             }

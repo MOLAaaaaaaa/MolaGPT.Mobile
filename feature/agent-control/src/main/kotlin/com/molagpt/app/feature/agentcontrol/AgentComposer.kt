@@ -59,6 +59,7 @@ import com.molagpt.app.core.render.SegmentedControl
 fun AgentComposer(
     value: String,
     busy: Boolean,
+    stalled: Boolean,
     meta: RelaySessionMeta?,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -70,7 +71,8 @@ fun AgentComposer(
     val cs = MaterialTheme.colorScheme
     // 活动中（思考/执行/等待审批）隐藏模型·模式·思考强度切换：这些只能在下一轮的新进程生效，
     // 跑到一半切还会重建进程；只在会话空闲时显示。空闲时才允许发送。
-    val active = busy || meta?.phaseEnum == AgentPhase.Waiting
+    // 桌面已离线的会话不算活动中——那个"等待审批"永远等不到人来批。
+    val active = busy || (meta?.phaseEnum == AgentPhase.Waiting && !stalled)
     val canSend = value.isNotBlank() && !active
 
     val efforts = remember(meta?.backendId) {
@@ -92,6 +94,14 @@ fun AgentComposer(
         border = BorderStroke(1.dp, cs.outline.copy(alpha = 0.14f)),
     ) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (stalled) {
+                Text(
+                    "桌面端已离线，未完成对话",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = cs.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                )
+            }
             if (meta != null && !active) {
                 Row(
                     Modifier.fillMaxWidth().height(40.dp).horizontalScroll(rememberScrollState()),

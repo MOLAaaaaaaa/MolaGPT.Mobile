@@ -10,7 +10,9 @@ import com.molagpt.app.core.model.AttachmentKind
 import com.molagpt.app.core.model.AttachmentMime
 import com.molagpt.app.core.model.ByokMemoryProjection
 import com.molagpt.app.core.model.ChatMessage
+import com.molagpt.app.core.model.ChatMessageMetadataKeys
 import com.molagpt.app.core.model.ChatRequest
+import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.EnabledTools
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
@@ -20,6 +22,9 @@ import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.PromptVariables
+import com.molagpt.app.core.model.RolePromptBuilder
+import com.molagpt.app.core.model.RolePromptPlan
+import com.molagpt.app.core.model.RolePromptResult
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.SystemPromptComposer
@@ -32,6 +37,8 @@ import com.molagpt.app.core.storage.ByokMemoryProjector
 import com.molagpt.app.core.storage.ByokMemoryRepository
 import com.molagpt.app.core.storage.ChatRepository
 import com.molagpt.app.core.storage.EditSnapshots
+import com.molagpt.app.core.storage.LorebookRepository
+import com.molagpt.app.core.storage.PersonaAvatarStore
 import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.RetryAttempts
 import com.molagpt.app.core.storage.SessionRepository
@@ -66,10 +73,14 @@ class ChatViewModel(
     private val backgroundStreams: BackgroundStreamManager,
     private val sessionRepository: SessionRepository,
     private val personaRepository: PersonaRepository,
+    /** 共享世界书；只有角色卡引用了才会去读。 */
+    private val lorebookRepository: LorebookRepository,
     /** BYOK 本地记忆。仅 BYOK 会话使用；MolaGPT 会话的记忆由服务端 Tracks 负责。 */
     private val byokMemoryRepository: ByokMemoryRepository,
     /** 记忆整理完成的通知。application scope 发出，页面存活时才展示。 */
     private val memoryConsolidatedFlow: SharedFlow<Pair<String, ByokMemoryConsolidator.Result>>,
+    /** 后处理规则跑挂了的提示。规则是用户写的，出错要说出来，但不该看着像模型失败。 */
+    private val postProcessFailureFlow: SharedFlow<String>,
     private val syncEngine: SyncEngine,
     private val dispatchers: DispatcherProvider,
     private val modelsFlow: StateFlow<List<ProviderModel>>,
@@ -98,6 +109,11 @@ class ChatViewModel(
 
     /** BYOK 附件的本地托管目录与文本抽取器。BYOK 不经服务端，附件字节只在本机流转。 */
     private val attachmentStore = AttachmentStore(appContext)
+
+    /** 角色卡头像（列表/选择器/欢迎页共用一份解码缓存，见 PersonaAvatar）。 */
+    private val personaAvatars = PersonaAvatarStore(appContext)
+
+    fun personaAvatarFile(persona: Persona?): java.io.File? = personaAvatars.resolve(persona?.avatarPath)
     private val documentExtractor = DocumentTextExtractor(attachmentStore)
     private val initialByokChat = modelsFlow.value.filter {
         it.providerKind == ProviderKind.BYOK && it.supportsChat
@@ -161,6 +177,9 @@ class ChatViewModel(
             memoryConsolidatedFlow.collect { (consolidatedSessionId, result) ->
                 if (consolidatedSessionId == sessionId && !result.isEmpty) _memoryHint.value = result
             }
+        }
+        viewModelScope.launch {
+            postProcessFailureFlow.collect { message -> _error.value = message }
         }
     }
 
@@ -256,7 +275,60 @@ class ChatViewModel(
     /** 切换当前会话角色：更新内存态并写本地会话 personaId（仅 BYOK 会话使用）。 */
     fun selectPersona(personaId: String?) {
         _conversationPersonaId.value = personaId
-        viewModelScope.launch { sessionRepository.updatePersona(sessionId, personaId) }
+        viewModelScope.launch {
+            sessionRepository.updatePersona(sessionId, personaId)
+            ensureRoleGreeting(personaId)
+        }
+    }
+
+    /**
+     * 空白会话选中角色卡时，把卡里的开场白落成第一条助手消息。
+     *
+     * 备选开场白直接塞进重试版本栈：消息下方那条「‹ 1/3 ›」本来就能切，不必再造一套 UI。
+     * 只在会话还完全空白时写，切角色、重进页面都不会多出一条。
+     */
+    private suspend fun ensureRoleGreeting(personaId: String?) {
+        if (_conversationProviderKind.value != ProviderKind.BYOK) return
+        val persona = personaId?.let { personaRepository.get(it) } ?: return
+        val profile = persona.profile ?: return
+        val greetings = (listOf(profile.greeting) + profile.alternateGreetings).filter { it.isNotBlank() }
+        if (greetings.isEmpty()) return
+        if (chatRepository.messageCount(sessionId) > 0) return
+
+        val vars = buildPromptVariables(null, "").copy(
+            characterName = profile.nickname.ifBlank { persona.name },
+            username = profile.userName.takeIf { it.isNotBlank() },
+        )
+        val texts = greetings.map { SystemPromptComposer.interpolate(it, vars) }
+        val now = System.currentTimeMillis()
+        val attempts = texts.map { text ->
+            RetryAttempt(
+                fragments = listOf(MessageFragment.Text(Ids.newFragmentId(), text)),
+                rawText = text,
+                model = null,
+                modelDisplayName = persona.name,
+                status = MessageStatus.COMPLETE.name,
+            )
+        }
+        val message = ChatMessage(
+            messageId = Ids.newMessageId(),
+            sessionId = sessionId,
+            role = Role.ASSISTANT,
+            status = MessageStatus.COMPLETE,
+            createdAt = now,
+            updatedAt = now,
+            rawText = texts.first(),
+            fragments = attempts.first().fragments,
+            metadata = buildMap {
+                put(ChatMessageMetadataKeys.ROLE_GREETING, "1")
+                put("modelDisplayName", persona.name)
+                if (attempts.size > 1) {
+                    put(RetryAttempts.KEY_ATTEMPTS, RetryAttempts.encode(attempts))
+                    put(RetryAttempts.KEY_CURRENT, "0")
+                }
+            },
+        )
+        chatRepository.persistGreeting(message)
     }
 
     /**
@@ -744,7 +816,9 @@ class ChatViewModel(
                 chatRepository.deleteMessagesFrom(sessionId, editing.createdAt)
                 _editingMessage.value = null
             }
-            val shouldGenerateTitle = chatRepository.messageCount(sessionId) == 0
+            // 看「用户说过几句」而不是总条数：角色会话开场就有一条助手开场白，
+            // 用总条数判断会让首轮标题永远生成不出来。
+            val shouldGenerateTitle = chatRepository.userMessageCount(sessionId) == 0
             val titleSeed = content.ifBlank { _pendingAttachments.value.firstOrNull()?.name ?: "附件" }
             sessionRepository.ensure(
                 sessionId = sessionId,
@@ -1005,6 +1079,49 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * 编辑一条回答：把改写后的文本存成一个新版本，随时能切回模型原本写的那一版。
+     * **不重新请求模型**——这是「编辑回答」，不是「重新生成」。
+     */
+    fun editAssistant(messageId: String, text: String) {
+        if (backgroundStreams.isStreaming(sessionId)) return
+        // 仅 BYOK：MolaGPT 会话与网页端双向同步，改回答要连同那边的版本语义一起想清楚，
+        // 不在这次范围内。用户消息编辑、重试、EditSnapshots 两个阵营都照旧。
+        if (_conversationProviderKind.value != ProviderKind.BYOK) return
+        val msg = uiState.value.messages.firstOrNull { it.messageId == messageId } ?: return
+        if (msg.role != Role.ASSISTANT) return
+        val body = text.trim()
+        if (body.isEmpty() || body == msg.rawText?.trim()) return
+
+        val prior = RetryAttempts.decode(msg.metadata[RetryAttempts.KEY_ATTEMPTS])
+            .ifEmpty { listOf(attemptOf(msg)) }
+        // 编辑版只留正文：思考过程与工具卡片属于模型那一次真实生成，挂在人改过的文本下面会误导。
+        // 原版完整躺在版本栈里，切回去就都在。
+        val edited = RetryAttempt(
+            fragments = listOf(MessageFragment.Text(Ids.newFragmentId(), body)),
+            rawText = body,
+            model = msg.model,
+            modelDisplayName = msg.metadata["modelDisplayName"],
+            status = MessageStatus.COMPLETE.name,
+        )
+        val all = prior + edited
+        val updated = msg.copy(
+            fragments = edited.fragments,
+            rawText = body,
+            status = MessageStatus.COMPLETE,
+            updatedAt = System.currentTimeMillis(),
+            metadata = msg.metadata + mapOf(
+                RetryAttempts.KEY_ATTEMPTS to RetryAttempts.encode(all),
+                RetryAttempts.KEY_CURRENT to all.lastIndex.toString(),
+            ) - ChatMessageMetadataKeys.WIRE_HISTORY,
+        )
+        backgroundStreams.updateInFlight(sessionId, updated)
+        viewModelScope.launch {
+            chatRepository.updateMessage(updated)
+            syncEngine.schedulePush(sessionId)
+        }
+    }
+
     /** 切换用户消息的编辑分支（delta = -1/+1）：整体换回该分支的时间线。 */
     fun navEditSnapshot(messageId: String, delta: Int) {
         if (backgroundStreams.isStreaming(sessionId)) return
@@ -1044,6 +1161,9 @@ class ChatViewModel(
         val meta = msg.metadata.toMutableMap().apply {
             put(RetryAttempts.KEY_CURRENT, next.toString())
             if (modelDisplayName != null) put("modelDisplayName", modelDisplayName) else remove("modelDisplayName")
+            // 线格式快照只对写下它的那一版成立。切到别的版本还留着它，下一轮发出去的就会是
+            // 屏幕上没显示的那段回答——原样回放必须跟着版本一起作废。
+            keys.removeAll(ChatMessageMetadataKeys.WIRE_HISTORY)
         }
         val updated = msg.copy(
             fragments = v.fragments,
@@ -1115,11 +1235,15 @@ class ChatViewModel(
                 history
             }
             val messages = if (effectiveKind == ProviderKind.BYOK) {
-                val personaText = SystemPromptComposer.compose(
+                val vars = buildPromptVariables(providerModel, modelDisplayName)
+                // 角色卡（酒馆）走完整组装：人设分段、示例对话、世界书按位置插入。
+                // 普通助手角色仍是「一段 system 提示」那条老路，没必要为它跑一遍匹配器。
+                val role = buildRolePrompt(vars, requestHistory, streamSessionId)
+                val personaText = role?.systemPrompt ?: SystemPromptComposer.compose(
                     personaPrompt = activePersona.value?.systemPrompt,
                     conversationPrompt = _conversationSystemPrompt.value,
                     mode = _conversationSystemPromptMode.value,
-                    vars = buildPromptVariables(providerModel, modelDisplayName),
+                    vars = vars,
                 )
                 // 顺序固定为 角色提示 → 会话提示 → 记忆块 → 记忆使用规则：
                 // 记忆是背景数据，必须排在角色定义之后，不能反过来影响助手身份。
@@ -1127,7 +1251,8 @@ class ChatViewModel(
                     personaText?.takeIf { it.isNotBlank() },
                     buildMemoryContext(requestTools),
                 ).joinToString("\n\n").takeIf { it.isNotBlank() }
-                if (sysText != null) listOf(systemMessage(sysText)) + requestHistory else requestHistory
+                val body = applyRolePlan(requestHistory, role?.plan)
+                if (sysText != null) listOf(systemMessage(sysText)) + body else body
             } else {
                 requestHistory
             }
@@ -1181,6 +1306,96 @@ class ChatViewModel(
             recallTool = requestTools.conversationRecall,
         )
         return listOf(block, rules).filter { it.isNotBlank() }.joinToString("\n\n").takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * 角色卡的提示词组装。只有导入过角色卡、且卡里确实有角色扮演内容的角色才走这条路；
+     * 普通助手角色（一段 system 提示）不必跑一遍世界书匹配。
+     *
+     * 世界书匹配是 CPU 活，放 [DispatcherProvider.default]。
+     */
+    private suspend fun buildRolePrompt(
+        vars: PromptVariables,
+        history: List<ChatMessage>,
+        generationId: String,
+    ): RolePromptResult? {
+        val persona = activePersona.value ?: return null
+        val profile = persona.profile ?: return null
+        if (profile.isEmpty) return null
+        val shared = runCatching { lorebookRepository.byIds(profile.sharedLorebookIds) }.getOrDefault(emptyList())
+        val scanText = history.filter { it.role != Role.SYSTEM }.mapNotNull { it.rawText?.takeIf(String::isNotBlank) }
+        return runCatching {
+            withContext(dispatchers.default) {
+                RolePromptBuilder.build(
+                    personaName = persona.name,
+                    profile = profile,
+                    personaSystemPrompt = persona.systemPrompt,
+                    conversationPrompt = _conversationSystemPrompt.value,
+                    promptMode = _conversationSystemPromptMode.value,
+                    history = scanText,
+                    books = profile.lorebooks + shared,
+                    vars = vars,
+                    generationId = generationId,
+                )
+            }
+        }.onFailure { error ->
+            // 卡里写坏的正则或控制项不该把这一轮对话堵死：退回普通提示词，把原因说出来。
+            _error.value = error.message ?: "角色世界书解析失败"
+        }.getOrNull()
+    }
+
+    /**
+     * 把示例对话与按深度插入的补充放进这一轮的消息列表。
+     *
+     * 深度按「距末尾几条」算：0 贴在最后一条之后，1 插在最后一条之前，超出历史长度的落到最前面。
+     * 插入的 system 消息带 [ChatMessageMetadataKeys.ROLE_INJECTION] 标记——网络层据此让它留在原位，
+     * 而不是像普通 system 那样被收拢到最前面。
+     */
+    private fun applyRolePlan(history: List<ChatMessage>, plan: RolePromptPlan?): List<ChatMessage> {
+        if (plan == null || plan.isEmpty) return history
+        val out = mutableListOf<ChatMessage>()
+        var seq = 0
+        fun synthetic(role: Role, text: String, injection: Boolean): ChatMessage = ChatMessage(
+            messageId = "role-${if (injection) "inject" else "example"}-$sessionId-${seq++}",
+            sessionId = sessionId,
+            role = role,
+            status = MessageStatus.COMPLETE,
+            createdAt = 0L,
+            updatedAt = 0L,
+            rawText = text,
+            metadata = if (injection) mapOf(ChatMessageMetadataKeys.ROLE_INJECTION to "1") else emptyMap(),
+        )
+
+        // 示例对话排在历史之前。Anthropic 要求首条必须是 user，所以以 assistant 开头的块整块丢掉。
+        for (block in plan.examples) {
+            val usable = block.dropWhile { it.role == "assistant" }
+            for (message in usable) {
+                if (message.text.isBlank()) continue
+                out += synthetic(if (message.role == "assistant") Role.ASSISTANT else Role.USER, message.text, false)
+            }
+        }
+
+        val byDepth = plan.insertions.groupBy { it.depth }
+        fun emit(depth: Int) {
+            byDepth[depth]?.sortedBy { it.order }?.forEach {
+                out += synthetic(
+                    when (it.role) {
+                        "assistant" -> Role.ASSISTANT
+                        "user" -> Role.USER
+                        else -> Role.SYSTEM
+                    },
+                    it.text,
+                    injection = it.role != "assistant" && it.role != "user",
+                )
+            }
+        }
+        byDepth.keys.filter { it > history.size }.sortedDescending().forEach(::emit)
+        history.forEachIndexed { index, message ->
+            emit(history.size - index)
+            out += message
+        }
+        emit(0)
+        return out
     }
 
     /** 角色注入用的 system 消息（仅本次请求，不落库）。各 BYOK provider 均读 rawText。 */
@@ -1268,6 +1483,9 @@ class ChatViewModel(
             it.id == _selectedModel.value && it.providerKind == _conversationProviderKind.value
         }
         model?.let { adaptThinkingStateTo(it) }
+        // 新会话带着角色 id 建出来（从角色选择器点「用这个角色开新对话」）时，
+        // selectPersona 不会被调到，开场白得在这儿补上。persistGreeting 自带幂等保护。
+        ensureRoleGreeting(conversation.personaId)
         return true
     }
 

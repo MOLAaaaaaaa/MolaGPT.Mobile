@@ -23,7 +23,7 @@ object ViewModelFactories {
     }
 
     fun session(container: AppContainer) = factory {
-        SessionViewModel(container.sessionRepository)
+        SessionViewModel(container.sessionRepository, container.personaRepository)
     }
 
     fun agentControl(container: AppContainer) = factory {
@@ -81,8 +81,10 @@ object ViewModelFactories {
             backgroundStreams = container.backgroundStreamManager,
             sessionRepository = container.sessionRepository,
             personaRepository = container.personaRepository,
+            lorebookRepository = container.lorebookRepository,
             byokMemoryRepository = container.byokMemoryRepository,
             memoryConsolidatedFlow = container.memoryConsolidated,
+            postProcessFailureFlow = container.postProcessFailures,
             syncEngine = container.syncEngine,
             dispatchers = container.dispatchers,
             modelsFlow = container.modelRegistry.models,

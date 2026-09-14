@@ -62,10 +62,56 @@ object MarkdownParser {
     }
 
     private fun stripHiddenContext(input: String): String =
-        input
-            .replace(Regex("""✝[^✝]*✝"""), "")
-            .replace(Regex("""†[^†]*†"""), "")
-            .replace(Regex("""⟦MEM[:：][\s\S]*?⟧"""), "")
+        HIDDEN_CONTEXT.fold(input) { acc, regex -> acc.replace(regex, "") }
+
+    /**
+     * 正文改写（回答后处理）必须整段跳过的区间：代码围栏与行内代码、行内与块级公式，
+     * 以及记忆注入这类隐藏标记。结果按起点升序且互不重叠，端点包含在内。
+     *
+     * 复用解析路径同一套扫描器，因此对流式中途的半截内容同样安全——未闭合的代码围栏一直
+     * 保护到文本末尾，未闭合的公式则仍是普通文本、不受保护。
+     */
+    fun protectedRanges(markdown: String): List<IntRange> {
+        if (markdown.isEmpty()) return emptyList()
+        val ranges = ArrayList<IntRange>()
+        for ((start, end) in markdownCodeRanges(markdown)) {
+            if (end > start) ranges += start until end
+        }
+        for (seg in splitDisplayMath(markdown)) {
+            if (seg.isMath) {
+                if (seg.end > seg.start) ranges += seg.start until seg.end
+            } else {
+                // 行内公式的下标相对本分段，而非数学分段的 text 与原串逐字对应，加上段首即可。
+                for (token in extractInlineMath(seg.text).inlineMath.tokens) {
+                    if (token.end > token.start) {
+                        ranges += (seg.start + token.start) until (seg.start + token.end)
+                    }
+                }
+            }
+        }
+        for (regex in HIDDEN_CONTEXT) {
+            regex.findAll(markdown).forEach { ranges += it.range }
+        }
+        return mergeRanges(ranges)
+    }
+
+    private fun mergeRanges(ranges: MutableList<IntRange>): List<IntRange> {
+        if (ranges.isEmpty()) return emptyList()
+        ranges.sortBy { it.first }
+        val out = ArrayList<IntRange>(ranges.size)
+        var current = ranges[0]
+        for (index in 1 until ranges.size) {
+            val next = ranges[index]
+            current = if (next.first <= current.last + 1) {
+                current.first..maxOf(current.last, next.last)
+            } else {
+                out += current
+                next
+            }
+        }
+        out += current
+        return out
+    }
 
     private fun parseCommonmark(
         md: String,
@@ -235,7 +281,8 @@ object MarkdownParser {
      * 因此先在源码层把已闭合的行内公式替换为私有占位符，AST 生成后再恢复成 [MdInline.Math]。
      * 未闭合公式、代码围栏和行内代码保持原文，适配逐 token 重解析。
      */
-    private data class InlineMathToken(val expression: String, val source: String)
+    /** [start]/[end] 是本段公式在所属分段中的半开区间，供 [protectedRanges] 定位。 */
+    private data class InlineMathToken(val expression: String, val source: String, val start: Int, val end: Int)
 
     private data class InlineMathContext(
         val markerStart: String,
@@ -248,21 +295,21 @@ object MarkdownParser {
         val tokens = ArrayList<InlineMathToken>()
         val out = StringBuilder(src.length)
         val markerStart = inlineMathMarkerStartFor(src)
-        val protectedRanges = markdownCodeRanges(src)
+        val codeRanges = markdownCodeRanges(src)
         var protectedIndex = 0
         var i = 0
 
-        fun appendMath(expr: String, source: String) {
+        fun appendMath(expr: String, start: Int, end: Int) {
             val index = tokens.size
-            tokens += InlineMathToken(expr.trim(), source)
+            tokens += InlineMathToken(expr.trim(), src.substring(start, end), start, end)
             out.append(markerStart).append(index).append(INLINE_MATH_MARKER_END)
         }
 
         while (i < src.length) {
-            while (protectedIndex < protectedRanges.size && i >= protectedRanges[protectedIndex].second) {
+            while (protectedIndex < codeRanges.size && i >= codeRanges[protectedIndex].second) {
                 protectedIndex++
             }
-            val protected = protectedRanges.getOrNull(protectedIndex)
+            val protected = codeRanges.getOrNull(protectedIndex)
             if (protected != null && i >= protected.first && i < protected.second) {
                 out.append(src, i, protected.second)
                 i = protected.second
@@ -276,7 +323,7 @@ object MarkdownParser {
                 if (close >= 0) {
                     val expr = src.substring(i + 2, close)
                     if (expr.isNotBlank()) {
-                        appendMath(expr, src.substring(i, close + 2))
+                        appendMath(expr, i, close + 2)
                         i = close + 2
                         continue
                     }
@@ -289,7 +336,7 @@ object MarkdownParser {
                 if (close >= 0) {
                     val expr = src.substring(i + 2, close)
                     if (expr.isNotBlank()) {
-                        appendMath(expr, src.substring(i, close + 2))
+                        appendMath(expr, i, close + 2)
                         i = close + 2
                         continue
                     }
@@ -301,7 +348,7 @@ object MarkdownParser {
                 if (close >= 0) {
                     val expr = src.substring(i + 2, close)
                     if (expr.isNotBlank()) {
-                        appendMath(expr, src.substring(i, close + 2))
+                        appendMath(expr, i, close + 2)
                         i = close + 2
                         continue
                     }
@@ -313,7 +360,7 @@ object MarkdownParser {
                 if (close >= 0) {
                     val expr = src.substring(i + 1, close)
                     if (isLikelySingleDollarMath(expr, src.getOrNull(close + 1))) {
-                        appendMath(expr, src.substring(i, close + 1))
+                        appendMath(expr, i, close + 1)
                     } else {
                         // 把被判定为货币/普通文本的一整对作为字面量消费，避免与后续 `$` 交叉配对。
                         out.append(src, i, close + 1)
@@ -490,7 +537,8 @@ object MarkdownParser {
     }
 
     // —— fence 感知的块级公式分段 ——
-    private data class Seg(val isMath: Boolean, val text: String)
+    /** [start]/[end] 是本段在原串中的半开区间，供 [protectedRanges] 定位，解析路径不使用。 */
+    private data class Seg(val isMath: Boolean, val text: String, val start: Int, val end: Int)
 
     private fun splitDisplayMath(src: String): List<Seg> {
         val protected = markdownCodeRanges(src)
@@ -498,9 +546,10 @@ object MarkdownParser {
 
         val segs = ArrayList<Seg>()
         val sb = StringBuilder()
-        fun flushText() {
+        var textStart = 0
+        fun flushText(end: Int) {
             if (sb.isNotEmpty()) {
-                segs.add(Seg(false, sb.toString()))
+                segs.add(Seg(false, sb.toString(), textStart, end))
                 sb.setLength(0)
             }
         }
@@ -514,8 +563,8 @@ object MarkdownParser {
             ) {
                 val close = findDisplayClose(src, i + 2) { idx -> !isProtected(idx) }
                 if (close >= 0) {
-                    flushText()
-                    segs.add(Seg(true, src.substring(i + 2, close)))
+                    flushText(i)
+                    segs.add(Seg(true, src.substring(i + 2, close), i, close + 2))
                     i = close + 2
                     continue
                 }
@@ -529,8 +578,8 @@ object MarkdownParser {
             ) {
                 val close = findBracketDisplayClose(src, i + 2) { idx -> !isProtected(idx) }
                 if (close >= 0) {
-                    flushText()
-                    segs.add(Seg(true, src.substring(i + 2, close)))
+                    flushText(i)
+                    segs.add(Seg(true, src.substring(i + 2, close), i, close + 2))
                     i = close + 2
                     continue
                 }
@@ -541,18 +590,19 @@ object MarkdownParser {
                 val closeToken = "\\end{${environment.name}}"
                 val close = findUnescapedToken(src, environment.contentStart, closeToken) { idx -> !isProtected(idx) }
                 if (close >= 0) {
-                    flushText()
+                    flushText(i)
                     val end = close + closeToken.length
-                    segs.add(Seg(true, src.substring(i, end)))
+                    segs.add(Seg(true, src.substring(i, end), i, end))
                     i = end
                     continue
                 }
             }
 
+            if (sb.isEmpty()) textStart = i
             sb.append(src[i])
             i++
         }
-        flushText()
+        flushText(src.length)
         return segs
     }
 
@@ -673,6 +723,13 @@ object MarkdownParser {
         if (length < 3) return null
         return FenceMarker(character, length, line.substring(indent + length))
     }
+
+    /** 记忆注入等隐藏上下文的包裹标记：渲染时剥离，改写时同样不能碰。 */
+    private val HIDDEN_CONTEXT = listOf(
+        Regex("""✝[^✝]*✝"""),
+        Regex("""†[^†]*†"""),
+        Regex("""⟦MEM[:：][\s\S]*?⟧"""),
+    )
 
     private val MATH_FENCE_LANGUAGES = setOf("math", "latex", "tex", "katex")
     private val DISPLAY_MATH_ENVIRONMENTS = setOf(

@@ -2,11 +2,15 @@ package com.molagpt.app.core.storage
 
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.Persona
+import com.molagpt.app.core.model.PersonaProfile
 import com.molagpt.app.core.storage.dao.PersonaDao
 import com.molagpt.app.core.storage.entity.PersonaEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import java.util.UUID
 
 /**
@@ -169,6 +173,9 @@ class PersonaRepository(
     }
 }
 
+/** 角色卡资料的编解码。解析失败只让这个角色退化成普通助手，不让整张列表读不出来。 */
+private val personaJson = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
+
 private fun PersonaEntity.toDomain(): Persona = Persona(
     id = id,
     name = name,
@@ -183,6 +190,10 @@ private fun PersonaEntity.toDomain(): Persona = Persona(
     isBuiltin = isBuiltin,
     createdAt = createdAt,
     updatedAt = updatedAt,
+    profile = profileJson?.takeIf { it.isNotBlank() }?.let { raw ->
+        runCatching { personaJson.decodeFromString<PersonaProfile>(raw) }.getOrNull()
+    },
+    avatarPath = avatarPath,
 )
 
 private fun Persona.toEntity(): PersonaEntity = PersonaEntity(
@@ -200,4 +211,6 @@ private fun Persona.toEntity(): PersonaEntity = PersonaEntity(
     createdAt = createdAt,
     updatedAt = updatedAt,
     deletedAt = null,
+    profileJson = profile?.let { personaJson.encodeToString(it) },
+    avatarPath = avatarPath,
 )

@@ -29,4 +29,13 @@ data class PersonaEntity(
     val updatedAt: Long,
     /** 软删墓碑（毫秒）；内置角色不会被打墓碑。 */
     val deletedAt: Long? = null,
+    /**
+     * 角色卡资料（[com.molagpt.app.core.model.PersonaProfile] 的 JSON）。null = 这就是个普通助手。
+     *
+     * 整块存而不是摊成三十个列：卡片规范还在变，字段多且大多只在提示词组装时一次性读完，
+     * 摊开只会换来一串没人查询的列和无穷无尽的迁移。
+     */
+    val profileJson: String? = null,
+    /** 卡片头像在托管目录里的相对路径；没有就用 [icon] 的矢量图标。 */
+    val avatarPath: String? = null,
 )

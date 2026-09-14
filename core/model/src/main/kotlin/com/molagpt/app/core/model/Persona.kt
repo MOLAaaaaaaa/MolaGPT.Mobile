@@ -26,10 +26,19 @@ data class Persona(
     val isBuiltin: Boolean = false,
     val createdAt: Long = 0L,
     val updatedAt: Long = 0L,
+    /** 角色卡资料（导入 SillyTavern 卡后才有）。null = 普通助手，只有一段系统提示。 */
+    val profile: PersonaProfile? = null,
+    /** 卡片头像在托管目录里的相对路径；没有就退回 [icon] 的矢量图标。 */
+    val avatarPath: String? = null,
 ) {
+    /** 角色扮演角色：走完整的角色卡组装（人设、开场白、示例对话、世界书）。 */
+    val isRolePlay: Boolean get() = profile?.defaultMode == ConversationMode.ATMOSPHERE
+
     /** 提示词首行预览，用于列表副标题。 */
     val preview: String
-        get() = systemPrompt.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+        get() = profile?.summary?.takeIf { it.isNotBlank() }
+            ?: profile?.description?.lineSequence()?.map { it.trim() }?.firstOrNull { it.isNotEmpty() }
+            ?: systemPrompt.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
             ?: "自定义角色，尚未设置提示词"
 
     companion object {

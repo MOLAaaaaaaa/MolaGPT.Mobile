@@ -13,4 +13,6 @@ dependencies {
     implementation(libs.commonmark)
     implementation(libs.commonmark.ext.gfm.tables)
     implementation(libs.commonmark.ext.gfm.strikethrough)
+
+    testImplementation(libs.junit)
 }

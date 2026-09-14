@@ -10,6 +10,7 @@ import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderKind
+import com.molagpt.app.core.model.ResponseTextProcessor
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.TitleRequest
@@ -40,6 +41,8 @@ class ChatRepository(
     private val conversationDao: ConversationDao,
     private val streamTaskDao: StreamTaskDao,
     private val dispatchers: DispatcherProvider,
+    /** 回答后处理（设置 → 后处理）。默认原样返回，测试与预览可以不接。 */
+    private val postProcessor: ResponseTextProcessor = ResponseTextProcessor { it },
 ) {
     private val controller = ChatStreamController()
 
@@ -55,6 +58,21 @@ class ChatRepository(
 
     suspend fun messageCount(sessionId: String): Int =
         withContext(dispatchers.io) { messageDao.count(sessionId) }
+
+    /** 用户说过几句。角色会话开场就有一条助手开场白，「是不是第一轮」不能再看总条数。 */
+    suspend fun userMessageCount(sessionId: String): Int =
+        withContext(dispatchers.io) { messageDao.countUserMessages(sessionId) }
+
+    /**
+     * 写入角色开场白。会话里已经有任何消息就不写——开场白只在空白会话上出现一次，
+     * 重复调用（切角色、重新进入页面）必须是幂等的。
+     */
+    suspend fun persistGreeting(message: ChatMessage): Boolean = withContext(dispatchers.io) {
+        if (messageDao.count(message.sessionId) > 0) return@withContext false
+        messageDao.upsert(message.toEntity())
+        conversationDao.refreshListVisibility(message.sessionId)
+        true
+    }
 
     suspend fun generateTitle(request: TitleRequest): String = chatService.generateTitle(request)
 
@@ -176,6 +194,7 @@ class ChatRepository(
         emit(msg)
         var firstTokenAt: Long? = null
         var usage: Usage? = null
+        var processed = false
         try {
             chatService.sendMessage(request).webTypingPaced().collect { event ->
                 controller.toCommands(event).forEach { cmd ->
@@ -190,11 +209,17 @@ class ChatRepository(
                 emit(msg.copy(updatedAt = System.currentTimeMillis()))
             }
             if (msg.status == MessageStatus.STREAMING) msg = msg.copy(status = MessageStatus.COMPLETE)
+            // 后处理必须赶在版本快照之前：晚一步，存进 retryAttempts 的就是没改写过的原文，
+            // 切回这一版时替换会凭空消失。
+            msg = withContext(NonCancellable) { applyPostProcessing(msg) }
+            processed = true
             msg = msg.withRequestStats(request.providerKind, usage, start, firstTokenAt)
             // 重生成：把本次答案追加为新版本，让 in-flight 帧立即带上版本信息(切换栏才会显示)。
             if (priorAttempts.isNotEmpty()) msg = msg.withAttempts(priorAttempts)
             emit(msg)
         } finally {
+            // 用户停止或流中出错时上面的分支没跑到：半截文本同样要落成用户看到的样子。
+            if (!processed) msg = withContext(NonCancellable) { applyPostProcessing(msg) }
             var finalMsg = msg.copy(
                 status = if (msg.status == MessageStatus.STREAMING) MessageStatus.STOPPED else msg.status,
                 rawText = visibleText(msg),
@@ -257,14 +282,18 @@ class ChatRepository(
             ),
         )
         emit(msg)
+        var processed = false
         try {
             chatService.resumeStream(apiUrl, streamSessionId, 0).webTypingPaced().collect { event ->
                 controller.toCommands(event).forEach { cmd -> msg = applyCommand(msg, cmd) }
                 emit(msg.copy(updatedAt = System.currentTimeMillis()))
             }
             if (msg.status == MessageStatus.STREAMING) msg = msg.copy(status = MessageStatus.COMPLETE)
+            msg = withContext(NonCancellable) { applyPostProcessing(msg) }
+            processed = true
             emit(msg)
         } finally {
+            if (!processed) msg = withContext(NonCancellable) { applyPostProcessing(msg) }
             val finalMsg = msg.copy(
                 status = if (msg.status == MessageStatus.STREAMING) MessageStatus.STOPPED else msg.status,
                 rawText = visibleText(msg),
@@ -408,6 +437,19 @@ class ChatRepository(
             }
         }
     }
+
+    /**
+     * 对已完成（或已中断）的回答施加后处理规则。
+     *
+     * 只碰 [MessageFragment.Text]：思考、工具卡片、代码块、公式都是各自独立的片段，
+     * 规则够不到它们——这也是移动端不必像桌面端那样为工具标记做偏移重映射的原因。
+     * 正文变了的话，下一轮回放用的协议快照由 [ResponseRewrite] 一并跟上。
+     *
+     * **无论如何都不会抛**：规则是用户自己写的，写坏了顶多是不改写，绝不能让一条回答
+     * 因此落不了库。
+     */
+    private suspend fun applyPostProcessing(msg: ChatMessage): ChatMessage =
+        runCatching { ResponseRewrite.apply(msg) { postProcessor.process(it) } }.getOrDefault(msg)
 
     private fun visibleText(msg: ChatMessage): String = buildString {
         msg.fragments.forEach { frag ->

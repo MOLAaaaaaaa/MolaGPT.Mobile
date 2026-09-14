@@ -40,12 +40,13 @@ import com.molagpt.app.core.model.approvalPolicyEnum
 import com.molagpt.app.core.model.displayMachine
 import com.molagpt.app.core.model.displayName
 import com.molagpt.app.core.model.displayWorkspace
-import com.molagpt.app.core.model.isBusy
 import com.molagpt.app.core.model.isOnline
 import com.molagpt.app.core.model.isQuickChat
+import com.molagpt.app.core.model.isStalled
 import com.molagpt.app.core.model.permissionModeEnum
 import com.molagpt.app.core.model.phaseEnum
 import com.molagpt.app.core.model.sortAtMs
+import com.molagpt.app.core.model.wasInterrupted
 
 /**
  * Agent Hub —— 一级页面的主体。桌面端状态 hero + 按机器分组，其下再分项目/快聊。
@@ -110,13 +111,13 @@ fun AgentHub(
                     GroupHeader("项目", list.first().displayWorkspace)
                 }
                 items(list.sortedByDescending { it.sortAtMs }, key = { it.conversationId }) { meta ->
-                    SessionCard(meta, onSelect, showMachine = false)
+                    SessionCard(meta, onSelect, showMachine = false, stalled = meta.isStalled(machines, now))
                 }
             }
             if (chats.isNotEmpty()) {
                 item(key = "ch-head-${group.machineId}") { GroupHeader("快聊", "Quick Chat") }
                 items(chats, key = { it.conversationId }) { meta ->
-                    SessionCard(meta, onSelect, showMachine = false)
+                    SessionCard(meta, onSelect, showMachine = false, stalled = meta.isStalled(machines, now))
                 }
             }
         }
@@ -286,6 +287,7 @@ private fun SessionCard(
     meta: RelaySessionMeta,
     onSelect: (RelaySessionMeta) -> Unit,
     showMachine: Boolean = false,
+    stalled: Boolean = false,
 ) {
     Surface(
         onClick = { onSelect(meta) },
@@ -312,7 +314,7 @@ private fun SessionCard(
                 )
                 Spacer(Modifier.size(7.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    PhasePill(meta.phaseEnum)
+                    PhasePill(meta.phaseEnum, stalled = stalled, interrupted = meta.wasInterrupted)
                     Text(
                         modeLabel(meta),
                         style = MaterialTheme.typography.labelSmall,
@@ -321,7 +323,7 @@ private fun SessionCard(
                     )
                 }
             }
-            if (meta.needsAttention) {
+            if (meta.needsAttention && !stalled) {
                 Spacer(Modifier.width(8.dp))
                 Dot(MaterialTheme.colorScheme.error, 9.dp)
             }
@@ -345,8 +347,13 @@ internal fun BackendBadge(backendId: String) {
 }
 
 @Composable
-internal fun PhasePill(phase: AgentPhase) {
+internal fun PhasePill(phase: AgentPhase, stalled: Boolean = false, interrupted: Boolean = false) {
     val p = agentPalette()
+    // 忙态但桌面已离线，或 relay 已把它判为中断——都不是"运行中"，也不是桌面自己报的失败。
+    if (stalled || (phase == AgentPhase.Failed && interrupted)) {
+        Pill("⚠ 已中断", p.amber, p.amberSoft)
+        return
+    }
     val (text, fg, bg) = when (phase) {
         AgentPhase.Running, AgentPhase.Spawning -> Triple("● 运行中", p.blue, p.blueSoft)
         AgentPhase.Waiting -> Triple("⏸ 等待审批", p.amber, p.amberSoft)

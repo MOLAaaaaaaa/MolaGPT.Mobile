@@ -39,6 +39,9 @@ data class RelaySessionMeta(
     val lastCommandId: String? = null,
     val lastCommandError: String? = null,
     val lastCommandAtMs: Long = 0,
+    /** relay 判定"桌面已离开、这个回合不会再有结果"后写下的中断标记；老服务端为 0/null。 */
+    val interruptedAtMs: Long = 0,
+    val interruptReason: String? = null,
 )
 
 /** 一台最近心跳过的桌面桥接机器（`GET agent_sessions.php` 的 `machines`）。 */
@@ -122,6 +125,51 @@ val RelaySessionMeta.sortAtMs: Long get() = activityAtMs.takeIf { it > 0 } ?: up
 /** 是否正在跑（决定 composer 显 Stop、列表显忙碌点）。 */
 val RelaySessionMeta.isBusy: Boolean
     get() = phaseEnum == AgentPhase.Spawning || phaseEnum == AgentPhase.Running
+
+/** 桌面心跳窗口：桌面每 ~10–15s 心跳一次，超过即视为离开。 */
+const val MachineHeartbeatTimeoutMs = 45_000L
+
+/**
+ * 忙态是否已经不可信——即"没有任何活着的桌面还能把这个回合跑完"。
+ *
+ * relay 上的 [phase] 由桌面书写，只有桌面能把它推进到 Completed/Failed。桌面在回合
+ * 中途被关掉（或崩溃、断网）时没人再写那个终态，会话就永远停在 Running：手机的
+ * 常驻监控通知一直不消失，列表里也一直挂着一个其实没在跑的任务。
+ *
+ * 判据是拥有该会话的机器还在不在心跳窗口内；机器表缺失（老服务端不下发）时回退到
+ * 会话自身的心跳时间。新版 relay 会直接把这种会话落成 Failed + [interruptReason]，
+ * 这里是对老服务端和那段判定延迟的兜底。
+ */
+fun RelaySessionMeta.isStalled(
+    machines: List<RelayMachine>,
+    nowMs: Long = System.currentTimeMillis(),
+): Boolean =
+    (isBusy || phaseEnum == AgentPhase.Waiting) && !isOwnerLive(machines, nowMs)
+
+/**
+ * 拥有该会话的桌面是否还在心跳窗口内。机器表缺失（老服务端不下发）时回退到会话
+ * 自身的心跳时间——桌面在线时 relay 每次心跳都会刷新它。
+ *
+ * 桌面不在线时，这个会话上的一切"忙"信号（meta 的 phase、事件流里没收尾的工具卡）
+ * 都只是回合被截断前的残留，不能再拿来判断它还在跑。
+ */
+fun RelaySessionMeta.isOwnerLive(
+    machines: List<RelayMachine>,
+    nowMs: Long = System.currentTimeMillis(),
+): Boolean {
+    val owner = machineId?.takeIf { it.isNotBlank() }
+    if (owner != null && machines.isNotEmpty()) {
+        // 机器表里已经没有这台机器 = 它早就过了保留窗口，更不可能在线。
+        val machine = machines.firstOrNull { it.id == owner } ?: return false
+        return machine.isOnline(nowMs, MachineHeartbeatTimeoutMs)
+    }
+    val heartbeat = maxOf(updatedAtMs, activityAtMs)
+    return heartbeat > 0 && nowMs - heartbeat <= MachineHeartbeatTimeoutMs
+}
+
+/** 这个会话的回合是被 relay 判定中断的（而不是桌面自己报的失败）。 */
+val RelaySessionMeta.wasInterrupted: Boolean
+    get() = interruptedAtMs > 0 || !interruptReason.isNullOrBlank()
 
 /** 是否 Quick Chat（无工作区 / rootless 会话）。 */
 val RelaySessionMeta.isQuickChat: Boolean get() = workspaceKey.isNullOrBlank()

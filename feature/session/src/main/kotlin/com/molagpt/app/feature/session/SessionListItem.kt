@@ -1,6 +1,8 @@
 package com.molagpt.app.feature.session
 
+import androidx.compose.runtime.Immutable
 import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.storage.SessionHit
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -25,6 +27,29 @@ sealed interface SessionListItem {
     ) : SessionListItem {
         override val key: String = conversation.sessionId
         override val contentType: String = "conversation"
+    }
+}
+
+/**
+ * 会话行上的角色名快照（角色 id → 名称）。
+ *
+ * 只提示「非默认角色」：未绑定角色、绑定的角色已被删除，两种情况聊天页都回退内置「通用助手」，
+ * 是绝大多数会话的状态，标出来只会挤掉标题。
+ */
+@Immutable
+class PersonaLabels private constructor(private val namesById: Map<String, String>) {
+
+    /** 角色名；null 表示这一行不需要角色提示。 */
+    fun nameOf(personaId: String?): String? {
+        if (personaId == null || personaId == Persona.BUILTIN_DEFAULT_ID) return null
+        return namesById[personaId]
+    }
+
+    companion object {
+        val Empty = PersonaLabels(emptyMap())
+
+        fun from(personas: List<Persona>): PersonaLabels =
+            PersonaLabels(personas.associate { it.id to it.name })
     }
 }
 

@@ -425,6 +425,8 @@ class AgentControlService(
             lastCommandId = string("lastCommandId", "last_command_id", "LastCommandId"),
             lastCommandError = string("lastCommandError", "last_command_error", "LastCommandError"),
             lastCommandAtMs = long("lastCommandAtMs", "last_command_at_ms", "LastCommandAtMs") ?: 0L,
+            interruptedAtMs = long("interruptedAtMs", "interrupted_at_ms", "InterruptedAtMs") ?: 0L,
+            interruptReason = string("interruptReason", "interrupt_reason", "InterruptReason"),
         )
     }
 

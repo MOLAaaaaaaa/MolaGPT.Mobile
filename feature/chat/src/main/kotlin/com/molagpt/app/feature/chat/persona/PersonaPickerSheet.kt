@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.render.ImeDismissBackHandler
+import com.molagpt.app.core.render.PersonaAvatar
 import com.molagpt.app.core.render.PersonaIcons
 
 /**
@@ -57,6 +58,8 @@ import com.molagpt.app.core.render.PersonaIcons
 fun PersonaPickerSheet(
     personas: List<Persona>,
     selectedPersona: Persona?,
+    /** 角色卡头像；没有卡或没有头像时返回 null，退回矢量图标。 */
+    avatarOf: (Persona) -> java.io.File? = { null },
     onSelect: (Persona) -> Unit,
     onManage: () -> Unit,
     onDismiss: () -> Unit,
@@ -135,6 +138,7 @@ fun PersonaPickerSheet(
                     items(filtered, key = { it.id }) { persona ->
                         PersonaPickerItem(
                             persona = persona,
+                            avatar = avatarOf(persona),
                             selected = selectedPersona?.id == persona.id ||
                                 (selectedPersona == null && persona.id == Persona.BUILTIN_DEFAULT_ID),
                             onClick = { onSelect(persona); onDismiss() },
@@ -149,6 +153,7 @@ fun PersonaPickerSheet(
 @Composable
 private fun PersonaPickerItem(
     persona: Persona,
+    avatar: java.io.File?,
     selected: Boolean,
     onClick: () -> Unit,
 ) {
@@ -162,20 +167,11 @@ private fun PersonaPickerItem(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .background(cs.primary.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = PersonaIcons.resolve(persona.icon),
-                contentDescription = null,
-                tint = cs.primary,
-                modifier = Modifier.size(24.dp),
-            )
-        }
+        PersonaAvatar(
+            file = avatar,
+            fallbackIcon = PersonaIcons.resolve(persona.icon),
+            size = 42.dp,
+        )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

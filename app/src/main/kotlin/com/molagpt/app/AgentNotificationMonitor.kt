@@ -4,8 +4,10 @@ import com.molagpt.app.core.common.Logger
 import com.molagpt.app.core.model.AgentPhase
 import com.molagpt.app.core.model.RelayEnvelope
 import com.molagpt.app.core.model.RelayEvent
+import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.RelaySessionMeta
 import com.molagpt.app.core.model.isBusy
+import com.molagpt.app.core.model.isStalled
 import com.molagpt.app.core.model.phaseEnum
 import com.molagpt.app.core.network.AgentControlService
 import kotlinx.coroutines.CoroutineScope
@@ -92,6 +94,7 @@ internal class AgentNotificationTracker {
     @Synchronized
     fun observe(
         sessions: List<RelaySessionMeta>,
+        machines: List<RelayMachine> = emptyList(),
         nowMs: Long = System.currentTimeMillis(),
     ): AgentTrackerUpdate {
         val fetches = mutableListOf<AgentEventCursor>()
@@ -101,9 +104,14 @@ internal class AgentNotificationTracker {
         for (meta in sessions) {
             seen += meta.conversationId
             val phase = meta.phaseEnum
+            // The desktop owns `phase` and is the only writer of its terminal.
+            // Once that desktop is gone the busy state can never resolve itself,
+            // so it must not keep this session — and the ongoing foreground
+            // notification behind it — alive forever.
+            val stalled = meta.isStalled(machines, nowMs)
             val state = states[meta.conversationId]
             if (state == null) {
-                val busy = meta.isBusy || phase == AgentPhase.Waiting
+                val busy = (meta.isBusy || phase == AgentPhase.Waiting) && !stalled
                 states[meta.conversationId] = SessionState(
                     lastSeq = meta.seq,
                     phase = phase,
@@ -116,13 +124,20 @@ internal class AgentNotificationTracker {
                 )
                 // A currently unresolved approval remains actionable after an app
                 // restart.  Completion history, by contrast, is only baselined.
-                if (hasPendingApproval(meta, nowMs)) alerts += permissionAlert(meta)
+                if (!stalled && hasPendingApproval(meta, nowMs)) alerts += permissionAlert(meta)
                 continue
             }
 
             state.title = meta.title
             state.backendId = meta.backendId
             state.lastSeenAtMs = nowMs
+            if (stalled) {
+                alerts += applyStall(state, meta)
+                if (meta.seq > state.lastSeq) state.lastSeq = meta.seq
+                state.phase = phase
+                state.needsAttention = false
+                continue
+            }
             if (meta.seq > state.lastSeq) {
                 fetches += AgentEventCursor(meta, state.lastSeq)
             } else {
@@ -272,6 +287,20 @@ internal class AgentNotificationTracker {
     @Synchronized
     fun reset() = states.clear()
 
+    /**
+     * Retire a session whose owning desktop went away mid-turn.  Only a turn the
+     * user actually started (armed) reports back — a long-dead session picked up
+     * from the list on a cold start stays silent.
+     */
+    private fun applyStall(state: SessionState, meta: RelaySessionMeta): List<AgentAlert> {
+        if (!state.active) return emptyList()
+        state.active = false
+        state.manualWatchUntilMs = 0L
+        if (!state.terminalAlertArmed) return emptyList()
+        state.terminalAlertArmed = false
+        return listOf(terminalAlert(AgentAlertKind.Failed, meta, "桌面端已离线，任务中断"))
+    }
+
     private fun applyMetaFallback(
         state: SessionState,
         meta: RelaySessionMeta,
@@ -370,6 +399,12 @@ internal class AgentNotificationMonitor(
     private val tracker = AgentNotificationTracker()
     private val wake = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var foregroundRunning = false
+    /** Forces one stop() on the first sync: a service (and its ongoing
+     *  notification) can outlive the monitor that started it — e.g. the process
+     *  was killed while a turn was in flight and Android restarted the service
+     *  alone.  Without this the leftover notification only clears when something
+     *  else happens to start and stop the service again. */
+    @Volatile private var foregroundSynced = false
 
     init {
         scope.launch { runLoop() }
@@ -396,9 +431,11 @@ internal class AgentNotificationMonitor(
 
             runCatching {
                 val snapshot = service.listSessions()
-                snapshot.sessions.filterNot { hasPendingApproval(it, System.currentTimeMillis()) }
+                val now = System.currentTimeMillis()
+                snapshot.sessions
+                    .filterNot { hasPendingApproval(it, now) && !it.isStalled(snapshot.machines, now) }
                     .forEach { controller.clearPermission(it.conversationId) }
-                val update = tracker.observe(snapshot.sessions)
+                val update = tracker.observe(snapshot.sessions, snapshot.machines, now)
                 update.alerts.forEach(controller::post)
                 for (cursor in update.fetches) {
                     val events = runCatching {
@@ -424,10 +461,11 @@ internal class AgentNotificationMonitor(
         val shouldRun = activeId != null && notifyEnabled() && isAuthenticated()
         if (shouldRun && !foregroundRunning) {
             foregroundRunning = AgentMonitorForegroundService.start(controller.context, activeId)
-        } else if (!shouldRun && foregroundRunning) {
+        } else if (!shouldRun && (foregroundRunning || !foregroundSynced)) {
             AgentMonitorForegroundService.stop(controller.context)
             foregroundRunning = false
         }
+        foregroundSynced = true
     }
 
     private suspend fun awaitWake(timeoutMs: Long) {

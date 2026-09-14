@@ -46,6 +46,8 @@ import com.molagpt.app.core.storage.ConversationRecallRepository
 import com.molagpt.app.core.storage.ConversationTitler
 import com.molagpt.app.core.storage.CredentialStore
 import com.molagpt.app.core.storage.MolaDatabase
+import com.molagpt.app.core.storage.LorebookRepository
+import com.molagpt.app.core.storage.PersonaAvatarStore
 import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.core.storage.SettingsStore
@@ -55,13 +57,17 @@ import com.molagpt.app.core.storage.allModels
 import com.molagpt.app.feature.auth.MolaGptAuthService
 import com.molagpt.app.feature.chat.BackgroundStreamManager
 import com.molagpt.app.feature.file.AttachmentStore
+import com.molagpt.app.core.markdown.ResponsePostProcessor
+import com.molagpt.app.core.model.ResponseTextProcessor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
@@ -70,6 +76,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * 手动 DI 容器（不引 Hilt，降低多模块盲构建风险）。在 [com.molagpt.app.MolaApp] 创建一次，
@@ -93,9 +100,13 @@ class AppContainer(
 
     val userAgent: String = UserAgentProvider.build(versionName, sdkInt)
 
-    private val http = MolaHttp(userAgent = userAgent, enableLogging = isDebug)
-
     val credentialStore = CredentialStore(context)
+    private val http = MolaHttp(
+        userAgent = userAgent,
+        enableLogging = isDebug,
+        loadDeviceCookie = { credentialStore.loadSecret("molagpt.device_cookie") },
+        saveDeviceCookie = { credentialStore.saveSecret("molagpt.device_cookie", it) },
+    )
     val settingsStore = SettingsStore(context)
     private val agentDeviceId: String = run {
         val androidId = runCatching {
@@ -138,6 +149,15 @@ class AppContainer(
         personaDao = database.personaDao(),
         dispatchers = dispatchers,
     )
+
+    /** 共享世界书（独立于角色卡，可被多个角色引用）。 */
+    val lorebookRepository = LorebookRepository(
+        dao = database.lorebookDao(),
+        dispatchers = dispatchers,
+    )
+
+    /** 角色卡头像的托管目录。与聊天附件分开回收，见 PersonaAvatarStore。 */
+    val personaAvatars = PersonaAvatarStore(appContext)
 
     val authApi = AuthApi(http)
 
@@ -309,6 +329,27 @@ class AppContainer(
         cloudSyncEnabled = { currentSettings.cloudSyncEnabled },
     )
 
+    /**
+     * 回答后处理里跑挂了的规则。规则是用户自己写的正则，写错不是模型的错，
+     * 所以不占用回答本身的错误位，只在聊天页提示一次。
+     */
+    private val _postProcessFailures = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val postProcessFailures: SharedFlow<String> = _postProcessFailures.asSharedFlow()
+
+    /**
+     * 设置 → 后处理。规则在流结束后一次性施加，处理结果直接落库；
+     * 正则是 CPU 活，放 [DispatcherProvider.default]，别占住写库用的 IO 线程。
+     */
+    private val responseTextProcessor = ResponseTextProcessor { markdown ->
+        val settings = currentSettings
+        if (!settings.responsePostProcessingEnabled) return@ResponseTextProcessor markdown
+        val rules = settings.responseRegexRules
+        if (rules.none { it.enabled }) return@ResponseTextProcessor markdown
+        val result = withContext(dispatchers.default) { ResponsePostProcessor.apply(markdown, rules) }
+        result.failures.forEach { _postProcessFailures.tryEmit("后处理规则「${it.ruleName}」未生效：${it.reason}") }
+        result.text
+    }
+
     /** ChatRepository 唯一实例（始终对接真实服务）。 */
     val chatRepository: ChatRepository = ChatRepository(
         chatService = chatService,
@@ -316,6 +357,7 @@ class AppContainer(
         conversationDao = database.conversationDao(),
         streamTaskDao = database.streamTaskDao(),
         dispatchers = dispatchers,
+        postProcessor = responseTextProcessor,
     )
 
     /** 云同步底层调用（会话同步 / 用户设置写入 update_setting）。 */
@@ -577,6 +619,10 @@ class AppContainer(
         runCatching {
             val referenced = chatRepository.referencedAttachmentPaths()
             AttachmentStore(appContext).sweep(referenced)
+        }
+        // 角色头像自成一套：删角色、重新导入同一张卡都会留下没人要的文件。
+        runCatching {
+            personaAvatars.sweep(personaRepository.list().mapNotNull { it.avatarPath }.toSet())
         }
     }
 

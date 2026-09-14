@@ -30,6 +30,8 @@ dependencies {
     implementation(project(":core:storage"))
     implementation(project(":core:network"))
     implementation(project(":core:render"))
+    // 后处理页的规则校验与预览复用 ResponsePostProcessor，与聊天链路同一份实现。
+    implementation(project(":core:markdown"))
 
     implementation(libs.bundles.compose)
     implementation(libs.androidx.compose.material.icons.extended)
@@ -41,4 +43,5 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 }

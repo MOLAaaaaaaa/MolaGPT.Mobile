@@ -26,7 +26,7 @@ private const val Tag = "StartupNotices"
 fun StartupNoticesHost(
     versionName: String,
     settingsStore: SettingsStore,
-    onOpenByokMemory: () -> Unit = {},
+    onOpenPersonaManagement: () -> Unit = {},
 ) {
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
     var pendingOpsMessages by remember { mutableStateOf<List<OpsMessage>>(emptyList()) }
@@ -89,7 +89,7 @@ fun StartupNoticesHost(
             onPrimary = {
                 scope.launch { settingsStore.addSeenPromoId(currentPromo.id) }
                 pendingPromos = pendingPromos.drop(1)
-                onOpenByokMemory()
+                onOpenPersonaManagement()
             },
             onDismiss = {
                 scope.launch { settingsStore.addSeenPromoId(currentPromo.id) }

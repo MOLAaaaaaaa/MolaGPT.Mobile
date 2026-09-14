@@ -52,7 +52,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.AgentBackendIds
 import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.displayWorkspace
-import com.molagpt.app.core.model.isBusy
 import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.MolaMotion
 
@@ -283,7 +282,7 @@ private fun SessionScaffold(
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
                 },
                 actions = {
-                    if (meta?.isBusy == true) TextButton(onClick = { vm.interrupt() }) { Text("停止") }
+                    if (state.busy) TextButton(onClick = { vm.interrupt() }) { Text("停止") }
                 },
             )
         },
@@ -323,7 +322,8 @@ private fun SessionPane(
         Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))) {
             AgentComposer(
                 value = state.input,
-                busy = meta?.isBusy == true,
+                busy = state.busy,
+                stalled = state.stalled,
                 meta = meta,
                 onValueChange = vm::updateInput,
                 onSend = vm::send,

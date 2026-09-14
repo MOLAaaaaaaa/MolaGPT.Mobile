@@ -38,4 +38,10 @@ dependencies {
     implementation(libs.androidx.security.crypto)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    // 仅测试用：正文一致性要拿真正的后处理器验（含代码/公式保护区），不能用裸正则当替身。
+    // 生产代码不依赖它——改写入口是注入进来的 ResponseTextProcessor。
+    testImplementation(project(":core:markdown"))
 }

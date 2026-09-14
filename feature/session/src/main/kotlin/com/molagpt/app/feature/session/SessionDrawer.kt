@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -82,6 +83,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun SessionDrawer(
     sessions: SessionItemsSource,
+    /** 角色名快照：BYOK 会话绑定了非默认角色时，行上的来源小标里带出角色名。 */
+    personaLabels: PersonaLabels,
     currentSessionId: String?,
     /** 抽屉是否可见。抽屉常驻 composition，返回键兜底必须按它收口，否则会抢走聊天页的返回。 */
     drawerOpen: Boolean,
@@ -222,6 +225,7 @@ fun SessionDrawer(
                                 val sessionId = item.conversation.sessionId
                                 SessionRow(
                                     conversation = item.conversation,
+                                    personaLabel = personaLabels.nameOf(item.conversation.personaId),
                                     selected = sessionId == currentSessionId,
                                     time = item.time,
                                     query = appliedQuery,
@@ -560,6 +564,8 @@ private fun GroupLabel(text: String) {
 @Composable
 private fun SessionRow(
     conversation: Conversation,
+    /** 该会话使用的角色名；null 表示默认角色，不提示。 */
+    personaLabel: String?,
     selected: Boolean,
     time: String,
     /** 已生效的搜索词，用于高亮；非搜索态为空串，此时渲染与无高亮完全一致。 */
@@ -630,7 +636,7 @@ private fun SessionRow(
                 )
                 if (conversation.providerKind == ProviderKind.BYOK) {
                     Spacer(Modifier.width(6.dp))
-                    SourceBadge("BYOK")
+                    SourceBadge("BYOK", detail = personaLabel)
                 }
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -677,18 +683,37 @@ private fun SessionRow(
     }
 }
 
+/**
+ * 会话来源小标。[detail] 是同一枚标签里的次要信息（BYOK 会话的角色名），
+ * 单独成 chip 会和来源抢注意力，所以并进来、压低一档字重与透明度。
+ */
 @Composable
-private fun SourceBadge(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.primary,
-        fontWeight = FontWeight.SemiBold,
+private fun SourceBadge(text: String, detail: String? = null) {
+    Row(
         modifier = Modifier
             .clip(RoundedCornerShape(50))
             .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f))
             .padding(horizontal = 6.dp, vertical = 2.dp),
-    )
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.SemiBold,
+        )
+        if (detail != null) {
+            Text(
+                // 角色名长度不可控（角色卡常是一整句），限宽截断，保住标题的可读长度。
+                text = " · $detail",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 76.dp),
+            )
+        }
+    }
 }
 
 private fun LazyPagingItems<SessionListItem>.nextSessionIdAfterDelete(

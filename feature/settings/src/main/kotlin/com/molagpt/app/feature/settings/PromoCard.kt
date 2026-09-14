@@ -21,9 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -52,6 +53,7 @@ import androidx.compose.ui.unit.dp
  */
 data class PromoCard(
     val id: String,
+    val icon: ImageVector,
     val badge: String,
     val kicker: String,
     val title: String,
@@ -62,22 +64,23 @@ data class PromoCard(
 )
 
 object BuiltInPromos {
-    /** 首期：BYOK 本地记忆上线说明。 */
-    val LocalMemoryV1 = PromoCard(
-        id = "byok-local-memory-v1",
+    /** 本期：角色卡与世界书上线说明。 */
+    val RoleplayCardsV1 = PromoCard(
+        id = "roleplay-cards-v1",
+        icon = Icons.Filled.AutoStories,
         badge = "NEW",
-        kicker = "本地记忆",
-        title = "BYOK 模型现已支持记忆",
-        body = "模型可记住您的身份、偏好和正在做的事。",
+        kicker = "角色扮演",
+        title = "现已支持角色卡与世界书",
+        body = "导入 SillyTavern 角色卡，用世界书还原完整人设与背景设定。",
         highlights = listOf(
-            "所有记忆数据仅保存于本机",
-            "模型还可主动回忆历史对话中的具体内容",
+            "支持 PNG、JSON、charX 角色卡，覆盖 V1 至 V3 规范",
+            "会话列表直接显示当前使用的角色",
         ),
         primaryLabel = "立刻体验",
         footerNote = " ",
     )
 
-    val all = listOf(LocalMemoryV1)
+    val all = listOf(RoleplayCardsV1)
 }
 
 /** Promo 卡底部弹窗：X / 手势 / 点遮罩关闭都算已读，由调用方落库。 */
@@ -149,7 +152,7 @@ fun PromoCardSheet(
                         ),
                 ) {
                     Icon(
-                        Icons.Filled.Psychology,
+                        card.icon,
                         contentDescription = null,
                         tint = cs.primary,
                         modifier = Modifier.size(38.dp),

@@ -12,6 +12,8 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.molagpt.app.core.model.ByokMcpServer
 import com.molagpt.app.core.model.ProviderKind
+import com.molagpt.app.core.model.ResponseRegexRule
+import com.molagpt.app.core.model.ResponseRegexRules
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -112,6 +114,10 @@ data class AppSettings(
     val lastSyncAt: Long = 0L,
     /** 后台对话完成通知开关（个人中心）。 */
     val completionNotify: Boolean = true,
+    /** 回答后处理总开关：关闭后一条规则都不跑，模型写什么就存什么。 */
+    val responsePostProcessingEnabled: Boolean = true,
+    /** 后处理规则，按列表顺序依次施加。未配置过时是内置的中文标点两条。 */
+    val responseRegexRules: List<ResponseRegexRule> = ResponseRegexRules.DEFAULTS,
 )
 
 /** DataStore 设置存储。 */
@@ -171,6 +177,8 @@ class SettingsStore(private val context: Context) {
             tracksEnabled = p[Keys.TRACKS] ?: false,
             lastSyncAt = p[Keys.LAST_SYNC_AT] ?: 0L,
             completionNotify = p[Keys.COMPLETION_NOTIFY] ?: true,
+            responsePostProcessingEnabled = p[Keys.RESPONSE_POST_PROCESSING] ?: true,
+            responseRegexRules = decodeRegexRules(p[Keys.RESPONSE_REGEX_RULES]),
         )
     }
 
@@ -259,6 +267,16 @@ class SettingsStore(private val context: Context) {
     suspend fun setLastSyncAt(v: Long) = edit { it[Keys.LAST_SYNC_AT] = v }
     suspend fun setCompletionNotify(v: Boolean) = edit { it[Keys.COMPLETION_NOTIFY] = v }
 
+    suspend fun setResponsePostProcessingEnabled(v: Boolean) = edit { it[Keys.RESPONSE_POST_PROCESSING] = v }
+
+    /** 保存规则列表。空列表也要落盘：那是「我把规则都删了」，不能被当成「没配置过」回灌默认值。 */
+    suspend fun setResponseRegexRules(rules: List<ResponseRegexRule>) = edit {
+        it[Keys.RESPONSE_REGEX_RULES] = json.encodeToString(rules)
+    }
+
+    /** 恢复内置的中文标点两条：把键删掉即可，读取时自然回到默认。 */
+    suspend fun resetResponseRegexRules() = edit { it.remove(Keys.RESPONSE_REGEX_RULES) }
+
     /** 云同步游标（服务端 ISO last_sync_timestamp）；与展示用的 [lastSyncAt] 分开存。 */
     suspend fun syncCursorIso(): String =
         context.settingsDataStore.data.map { it[Keys.SYNC_CURSOR] ?: SyncMapper.EPOCH_ISO }.first()
@@ -307,6 +325,23 @@ class SettingsStore(private val context: Context) {
             runCatching { json.decodeFromString<List<ByokMcpServer>>(it) }.getOrDefault(emptyList())
         }.orEmpty()
 
+    /** 键不存在 = 从未配置过，回落到内置规则；存在（哪怕是空数组）就按用户存的来。 */
+    private fun decodeRegexRules(raw: String?): List<ResponseRegexRule> =
+        if (raw == null) {
+            ResponseRegexRules.DEFAULTS
+        } else {
+            runCatching { json.decodeFromString<List<ResponseRegexRule>>(raw) }
+                .map { rules ->
+                    rules.map { rule ->
+                        if (rule.description != null) rule
+                        else ResponseRegexRules.DEFAULTS.firstOrNull {
+                            it.id == rule.id && it.pattern == rule.pattern && it.replacement == rule.replacement
+                        }?.let { rule.copy(description = it.description) } ?: rule
+                    }
+                }
+                .getOrDefault(ResponseRegexRules.DEFAULTS)
+        }
+
     private object Keys {
         val THEME = stringPreferencesKey("theme_mode")
         val DEFAULT_MODEL = stringPreferencesKey("default_model")
@@ -351,6 +386,8 @@ class SettingsStore(private val context: Context) {
         val LAST_SYNC_AT = longPreferencesKey("last_sync_at")
         val SYNC_CURSOR = stringPreferencesKey("sync_cursor_iso")
         val COMPLETION_NOTIFY = booleanPreferencesKey("completion_notify")
+        val RESPONSE_POST_PROCESSING = booleanPreferencesKey("response_post_processing_enabled")
+        val RESPONSE_REGEX_RULES = stringPreferencesKey("response_regex_rules")
         val SEEN_OPS_MESSAGE_IDS = stringSetPreferencesKey("seen_ops_message_ids")
         val SEEN_PROMO_IDS = stringSetPreferencesKey("seen_promo_ids")
         val SEEN_AGENT_COMMAND_FAILURES = stringSetPreferencesKey("seen_agent_command_failure_keys")

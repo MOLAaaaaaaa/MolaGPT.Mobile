@@ -9,6 +9,7 @@ import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderPresets
 import com.molagpt.app.core.model.byokMcpServerTokenKey
 import com.molagpt.app.core.model.McpToolInfo
+import com.molagpt.app.core.model.ResponseRegexRule
 import com.molagpt.app.core.model.webSearchApiKeyKey
 import com.molagpt.app.core.model.withoutToken
 import com.molagpt.app.core.network.AccountStatusCache
@@ -262,6 +263,16 @@ class SettingsViewModel(
     }
 
     fun setCompletionNotify(v: Boolean) = viewModelScope.launch { store.setCompletionNotify(v) }
+
+    // —— 回答后处理 ——
+
+    fun setResponsePostProcessingEnabled(v: Boolean) =
+        viewModelScope.launch { store.setResponsePostProcessingEnabled(v) }
+
+    fun setResponseRegexRules(rules: List<ResponseRegexRule>) =
+        viewModelScope.launch { store.setResponseRegexRules(rules) }
+
+    fun resetResponseRegexRules() = viewModelScope.launch { store.resetResponseRegexRules() }
 
     fun byokPreset(id: String): ByokProvider? = byokProviders.preset(id)
 

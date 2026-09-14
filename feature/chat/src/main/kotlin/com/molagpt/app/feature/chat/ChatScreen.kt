@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -45,11 +47,14 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
@@ -75,11 +80,14 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.AttachmentMime
+import com.molagpt.app.core.model.ChatMessage
+import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
@@ -131,6 +139,8 @@ fun ChatScreen(
     val memoryHint by viewModel.memoryHint.collectAsStateWithLifecycle()
     var modelMenuOpen by remember { mutableStateOf(false) }
     var personaSheetOpen by remember { mutableStateOf(false) }
+    /** 正在改写的助手消息 id。编辑回答走独立弹层而不是输入框——输入框的按钮是「发送」，语义不同。 */
+    var editingAssistantId by remember { mutableStateOf<String?>(null) }
     var memoryPanelOpen by remember { mutableStateOf(false) }
     var pendingCrossModel by remember { mutableStateOf<ProviderModel?>(null) }
     val focusManager = LocalFocusManager.current
@@ -231,10 +241,27 @@ fun ChatScreen(
         PersonaPickerSheet(
             personas = personas,
             selectedPersona = activePersona,
+            avatarOf = viewModel::personaAvatarFile,
             onSelect = { viewModel.selectPersona(it.id) },
             onManage = onOpenPersonaManagement,
             onDismiss = { personaSheetOpen = false },
         )
+    }
+
+    editingAssistantId?.let { id ->
+        val target = state.messages.firstOrNull { it.messageId == id }
+        if (target == null) {
+            editingAssistantId = null
+        } else {
+            AssistantEditSheet(
+                initial = target.editableMarkdown(),
+                onDismiss = { editingAssistantId = null },
+                onSave = { text ->
+                    viewModel.editAssistant(id, text)
+                    editingAssistantId = null
+                },
+            )
+        }
     }
 
     if (memoryPanelOpen) {
@@ -614,6 +641,7 @@ fun ChatScreen(
                 PersonaWelcome(
                     activePersona = activePersona,
                     isByok = state.providerKind == ProviderKind.BYOK,
+                    avatar = viewModel.personaAvatarFile(activePersona),
                     onOpenPersonaPicker = { personaSheetOpen = true },
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -624,7 +652,9 @@ fun ChatScreen(
                     onRegenerate = { viewModel.regenerateLast() },
                     onRegenerateWithModel = { viewModel.regenerateLast(it) },
                     onEditUser = viewModel::startEditUser,
+                    onEditAssistant = { editingAssistantId = it },
                     canEdit = !state.isStreaming,
+                    canEditAssistant = !state.isStreaming && state.providerKind == ProviderKind.BYOK,
                     onNavVersion = viewModel::navVersion,
                     onNavEditSnapshot = viewModel::navEditSnapshot,
                 )
@@ -760,4 +790,78 @@ private fun AgentMonitorIcon(tint: androidx.compose.ui.graphics.Color) {
         drawLine(tint, androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.66f), androidx.compose.ui.geometry.Offset(w * 0.5f, h * 0.80f), strokeWidth = sw, cap = cap)
         drawLine(tint, androidx.compose.ui.geometry.Offset(w * 0.34f, h * 0.84f), androidx.compose.ui.geometry.Offset(w * 0.66f, h * 0.84f), strokeWidth = sw, cap = cap)
     }
+}
+
+/**
+ * 编辑回答的弹层。改写的结果存成一个新版本，用消息下方的版本条就能切回模型写的那一版，
+ * 所以这里不需要「确认覆盖」一类的拦截。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AssistantEditSheet(
+    initial: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var text by remember(initial) { mutableStateOf(initial) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+        ) {
+            Text("编辑回答", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "编辑模型的回答将直接改动对话结构。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+            )
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 340.dp),
+                label = { Text("回答内容") },
+                textStyle = MaterialTheme.typography.bodyMedium,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+            )
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 20.dp)) {
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) { Text("取消") }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = { onSave(text) },
+                    enabled = text.isNotBlank() && text.trim() != initial.trim(),
+                ) { Text("保存") }
+            }
+        }
+    }
+}
+
+/** 编辑时使用当前消息实际展示的 Markdown；rawText 只作为没有可见片段时的兼容镜像。 */
+private fun ChatMessage.editableMarkdown(): String {
+    val fromFragments = buildString {
+        fragments.forEach { fragment ->
+            when (fragment) {
+                is MessageFragment.Text -> append(fragment.markdown)
+                is MessageFragment.CodeBlock -> append("\n```")
+                    .append(fragment.language.orEmpty())
+                    .append('\n')
+                    .append(fragment.code)
+                    .append("\n```\n")
+                is MessageFragment.Latex -> append(
+                    if (fragment.display) "$$${fragment.expr}$$" else "\$${fragment.expr}\$",
+                )
+                is MessageFragment.Mermaid -> append("\n```mermaid\n")
+                    .append(fragment.source)
+                    .append("\n```\n")
+                else -> Unit
+            }
+        }
+    }.trim()
+    return fromFragments.ifBlank { rawText.orEmpty() }
 }

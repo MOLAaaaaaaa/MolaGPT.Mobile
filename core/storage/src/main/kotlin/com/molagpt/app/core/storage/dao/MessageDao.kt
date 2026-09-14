@@ -66,6 +66,13 @@ interface MessageDao {
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun count(sessionId: String): Int
 
+    /**
+     * 用户说过几句。角色扮演会话一开场就有一条助手开场白，
+     * 「这是不是第一轮」不能再用总条数判断，否则自动标题会被开场白顶掉。
+     */
+    @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId AND role = 'USER'")
+    suspend fun countUserMessages(sessionId: String): Int
+
     /** 附件孤儿回收用：附件信息编码在 metadataJson 里，取全量交给上层解析。 */
     @Query("SELECT metadataJson FROM messages WHERE metadataJson LIKE '%localPath%'")
     suspend fun allMetadataWithAttachments(): List<String>

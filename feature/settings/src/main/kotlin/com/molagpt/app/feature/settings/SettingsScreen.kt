@@ -2,11 +2,10 @@ package com.molagpt.app.feature.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import com.molagpt.app.core.common.Logger
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,43 +16,39 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.DesktopWindows
+import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Face
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.molagpt.app.core.model.ByokMcpServer
-import com.molagpt.app.core.model.ByokProvider
-import com.molagpt.app.core.model.ByokProviderType
-import com.molagpt.app.core.model.ProviderKind
-import com.molagpt.app.core.model.ProviderModel
 
 /**
  * 设置页 = 个人中心 + 偏好。账户区登录态由 app 层注入（[loggedIn]/[username]），配额/userType 来自 VM 拉取的 status。
@@ -73,7 +68,9 @@ fun SettingsScreen(
     onOpenByokProviders: () -> Unit,
     onOpenByokTools: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
+    onOpenLorebooks: () -> Unit,
     onOpenByokMemory: () -> Unit,
+    onOpenPostProcessing: () -> Unit,
     buildLabel: String,
     modifier: Modifier = Modifier,
 ) {
@@ -114,57 +111,85 @@ fun SettingsScreen(
                 onClick = onOpenMolaAccount,
             )
 
-            SectionTitle("自定义模型")
-            ModelServiceCard(
+            SectionTitle("模型与对话")
+            ModelAndConversationCard(
                 providerCount = byokProviders.size,
                 modelCount = byokProviders.sumOf { it.models.size },
                 memoryEnabled = s.byokMemoryMasterEnabled,
+                postProcessingEnabled = s.responsePostProcessingEnabled,
+                activeRules = s.responseRegexRules.count { it.enabled },
+                toolsEnabledCount = listOf(
+                    s.byokMcpServers.any { it.enabled },
+                    s.visionProxyEnabled,
+                    s.imageGenEnabled,
+                ).count { it },
                 onOpenByokProviders = onOpenByokProviders,
-                onOpenPersonaManagement = onOpenPersonaManagement,
+                onOpenByokTools = onOpenByokTools,
                 onOpenByokMemory = onOpenByokMemory,
+                onOpenPostProcessing = onOpenPostProcessing,
             )
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
-            SectionTitle("对话工具")
-            ByokToolsEntryCard(
-                mcp = s.byokMcpServers.any { it.enabled },
-                vision = s.visionProxyEnabled,
-                image = s.imageGenEnabled,
-                servers = s.byokMcpServers,
-                onClick = onOpenByokTools,
+            SectionTitle("角色扮演")
+            RoleplayCard(
+                onOpenPersonaManagement = onOpenPersonaManagement,
+                onOpenLorebooks = onOpenLorebooks,
             )
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             SectionTitle("外观与输入")
-            SegmentedRow(
-                label = "主题",
-                options = listOf("auto" to "跟随系统", "light" to "浅色", "dark" to "深色"),
-                selected = s.themeMode,
-                onSelect = viewModel::setThemeMode,
-            )
-            ToggleRow("Enter 发送（关闭则换行）", s.enterToSend, viewModel::setEnterToSend)
-            ToggleRow(
-                label = "在顶部显示 Agent 控制按钮",
-                checked = s.showAgentControlShortcut,
-                onChange = viewModel::setShowAgentControlShortcut,
-                leadingIcon = Icons.Outlined.DesktopWindows,
-            )
-            ToggleRow(
-                label = "在顶部显示图像工作台按钮",
-                checked = s.showImageWorkbenchShortcut,
-                onChange = viewModel::setShowImageWorkbenchShortcut,
-                leadingIcon = Icons.Filled.Palette,
-            )
+            SettingsGroup {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    SegmentedRow(
+                        label = "主题",
+                        options = listOf("auto" to "跟随系统", "light" to "浅色", "dark" to "深色"),
+                        selected = s.themeMode,
+                        onSelect = viewModel::setThemeMode,
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                    ToggleRow(
+                        label = "Enter 键发送",
+                        checked = s.enterToSend,
+                        onChange = viewModel::setEnterToSend,
+                        subtitle = "关闭后按 Enter 键换行",
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                    ToggleRow(
+                        label = "Agent 控制快捷入口",
+                        checked = s.showAgentControlShortcut,
+                        onChange = viewModel::setShowAgentControlShortcut,
+                        subtitle = "显示在对话页顶部",
+                        leadingIcon = Icons.Outlined.DesktopWindows,
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                    ToggleRow(
+                        label = "图像工作台快捷入口",
+                        checked = s.showImageWorkbenchShortcut,
+                        onChange = viewModel::setShowImageWorkbenchShortcut,
+                        subtitle = "显示在对话页顶部",
+                        leadingIcon = Icons.Filled.Palette,
+                    )
+                }
+            }
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             SectionTitle("远程控制")
-            AgentControlEntryCard(onOpenAgentControl = onOpenAgentControl)
+            SettingsGroup {
+                SettingsEntryRow(
+                    icon = Icons.Outlined.DesktopWindows,
+                    title = "Agent 控制",
+                    subtitle = "远程查看和控制桌面端 Agent 会话",
+                    onClick = onOpenAgentControl,
+                )
+            }
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             SectionTitle("关于")
-            AboutEntryCard(onOpenAbout = onOpenAbout)
+            SettingsGroup {
+                SettingsEntryRow(
+                    icon = Icons.Outlined.Info,
+                    title = "关于 MolaGPT",
+                    subtitle = "版本、开源项目与许可证",
+                    onClick = onOpenAbout,
+                )
+            }
 
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Text(
                 text = buildLabel,
                 style = MaterialTheme.typography.labelSmall,
@@ -231,201 +256,96 @@ private fun MolaAccountEntryCard(
     }
 }
 
-/**
- * 「自定义模型」域卡片：把 BYOK 模型的「来源」与「行为」收进同一张卡，用分隔线分面。
- * - `自定义 API 模型`：模型从哪来（provider / 模型清单）。
- * - `角色管理`：这些模型怎么说话（系统提示 / 角色，仅 BYOK 生效）。
- * - `本地记忆`：这些模型记得什么（本机长期记忆，仅 BYOK 生效）。
- * 结构对齐 `MolaAccountScreen` 里 TracksCard（开关/入口两行同卡）的既有范式。
- */
 @Composable
-private fun ModelServiceCard(
+private fun ModelAndConversationCard(
     providerCount: Int,
     modelCount: Int,
     memoryEnabled: Boolean,
+    postProcessingEnabled: Boolean,
+    activeRules: Int,
+    toolsEnabledCount: Int,
     onOpenByokProviders: () -> Unit,
-    onOpenPersonaManagement: () -> Unit,
+    onOpenByokTools: () -> Unit,
     onOpenByokMemory: () -> Unit,
+    onOpenPostProcessing: () -> Unit,
 ) {
+    SettingsGroup {
+        SettingsEntryRow(
+            icon = Icons.Outlined.Cloud,
+            title = "模型服务",
+            subtitle = if (providerCount == 0) "尚未添加服务" else "$providerCount 个服务 · $modelCount 个模型",
+            onClick = onOpenByokProviders,
+            showDivider = true,
+        )
+        SettingsEntryRow(
+            icon = Icons.Outlined.Extension,
+            title = "模型工具",
+            subtitle = if (toolsEnabledCount == 0) "联网搜索、MCP、视觉理解与图像生成" else "$toolsEnabledCount 项已开启",
+            onClick = onOpenByokTools,
+            showDivider = true,
+        )
+        SettingsEntryRow(
+            icon = Icons.Outlined.Memory,
+            title = "本地记忆",
+            subtitle = if (memoryEnabled) "已开启" else "未开启",
+            onClick = onOpenByokMemory,
+            showDivider = true,
+        )
+        SettingsEntryRow(
+            icon = Icons.Outlined.Tune,
+            title = "回答后处理",
+            subtitle = when {
+                !postProcessingEnabled -> "替换回答内容 · 已关闭"
+                activeRules == 0 -> "替换回答内容 · 未启用规则"
+                else -> "替换回答内容 · $activeRules 条规则已启用"
+            },
+            onClick = onOpenPostProcessing,
+        )
+    }
+}
+
+@Composable
+private fun RoleplayCard(
+    onOpenPersonaManagement: () -> Unit,
+    onOpenLorebooks: () -> Unit,
+) {
+    SettingsGroup {
+        SettingsEntryRow(
+            icon = Icons.Outlined.Face,
+            title = "角色管理",
+            subtitle = "角色设定与角色卡",
+            onClick = onOpenPersonaManagement,
+            showDivider = true,
+        )
+        SettingsEntryRow(
+            icon = Icons.AutoMirrored.Outlined.MenuBook,
+            title = "世界书",
+            subtitle = "角色背景与世界设定",
+            onClick = onOpenLorebooks,
+        )
+    }
+}
+
+@Composable
+private fun SettingsGroup(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onOpenByokProviders)
-                    .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TracksRowIcon(kind = TracksIconKind.Sparkles)
-                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text("自定义 API 模型", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        if (providerCount == 0) "接入你自己的 OpenAI / Claude / Gemini 服务"
-                        else "$providerCount 个服务 · $modelCount 个模型",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-                ForwardChevron()
-            }
-
-            HorizontalDivider(
-                modifier = Modifier.padding(start = 58.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
-            )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onOpenPersonaManagement)
-                    .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TracksRowIcon(kind = TracksIconKind.Persona)
-                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text("角色管理", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "管理自定义模型使用的系统提示词",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-                ForwardChevron()
-            }
-
-            HorizontalDivider(
-                modifier = Modifier.padding(start = 58.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
-            )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onOpenByokMemory)
-                    .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TracksRowIcon(kind = TracksIconKind.Sparkles)
-                Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text("本地记忆", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        if (memoryEnabled) {
-                            "已开启 · 由已配置的模型服务使用"
-                        } else {
-                            "让自定义模型记住重要信息"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-                ForwardChevron()
-            }
-        }
+        Column(modifier = Modifier.fillMaxWidth(), content = content)
     }
 }
 
 @Composable
-private fun AgentControlEntryCard(onOpenAgentControl: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable {
-                    Logger.d("AgentControl", "Agent control entry card clicked!")
-                    onOpenAgentControl()
-                }
-                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TracksRowIcon(kind = TracksIconKind.Info)
-            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text("Agent 控制", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    "远程查看与控制电脑上的 Claude Code / Codex 会话",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp).rotate(180f),
-            )
-        }
-    }
-}
-
-@Composable
-private fun AboutEntryCard(onOpenAbout: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onOpenAbout)
-                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TracksRowIcon(kind = TracksIconKind.Info)
-            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text("关于 MolaGPT", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    "版本、开源项目与许可证",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp).rotate(180f),
-            )
-        }
-    }
-}
-
-/**
- * BYOK 自定义工具入口卡：进入独立的 BYOK 自定义工具页（网络搜索、MCP、视觉理解、图像生成）。
- * MolaGPT 账户侧的对应能力（联网/网页/代码执行）已随账户域迁至 `MolaAccountScreen`，
- * 因此本页「对话工具」区现在只服务 BYOK。
- */
-@Composable
-private fun ByokToolsEntryCard(
-    mcp: Boolean,
-    vision: Boolean,
-    image: Boolean,
-    servers: List<ByokMcpServer>,
+private fun SettingsEntryRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
     onClick: () -> Unit,
+    showDivider: Boolean = false,
 ) {
-    val enabledCount = listOf(mcp, vision, image).count { it }
-    val subtitle = buildString {
-        append("对自定义模型生效")
-        if (servers.isNotEmpty()) append(" · ${servers.count { it.enabled }} 个 MCP 已启用")
-        if (enabledCount > 0) append(" · $enabledCount 项已开启")
-    }
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
-    ) {
+    Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -433,9 +353,9 @@ private fun ByokToolsEntryCard(
                 .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TracksRowIcon(kind = TracksIconKind.Sparkles)
+            SettingsRowIcon(icon)
             Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text("BYOK 自定义工具", style = MaterialTheme.typography.bodyLarge)
+                Text(title, style = MaterialTheme.typography.bodyLarge)
                 Text(
                     subtitle,
                     style = MaterialTheme.typography.bodySmall,
@@ -444,6 +364,12 @@ private fun ByokToolsEntryCard(
                 )
             }
             ForwardChevron()
+        }
+        if (showDivider) {
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 58.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+            )
         }
     }
 }

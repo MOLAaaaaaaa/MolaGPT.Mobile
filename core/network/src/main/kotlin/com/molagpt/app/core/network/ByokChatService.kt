@@ -581,15 +581,16 @@ class ByokChatService(
         stream: Boolean,
         includeTools: Boolean,
     ): JsonObject {
-        // system 角色消息抽到 instructions，其余进 input。
-        val systemText = messages
-            .filter { it["role"]?.jsonPrimitive?.contentOrNull == "system" }
+        // 只把**开头连续的** system 抽到 instructions——那是角色/系统提示该待的地方。
+        // 出现在对话中间的 system 是按位置生效的补充（世界书深度注入），它的价值就是位置，
+        // 抽走等于静默失效。Responses 的 input 本来就接受 system 身份
+        // （EasyInputMessage.role: user | assistant | system | developer），原样留在原位即可。
+        val leadingSystem = messages.takeWhile { it["role"]?.jsonPrimitive?.contentOrNull == "system" }
+        val systemText = leadingSystem
             .mapNotNull { it["content"]?.jsonPrimitive?.contentOrNull }
             .joinToString("\n\n")
             .takeIf { it.isNotBlank() }
-        val inputItems = messages
-            .filter { it["role"]?.jsonPrimitive?.contentOrNull != "system" }
-            .map(::toOpenAiResponseInputItem)
+        val inputItems = messages.drop(leadingSystem.size).map(::toOpenAiResponseInputItem)
         return buildJsonObject {
             put("model", request.modelId)
             put("stream", stream)
@@ -1082,7 +1083,8 @@ class ByokChatService(
         val replaceImages = replaceImagesWithText(provider, request)
         val imageOrdinal = AtomicInteger(0)
         return buildList {
-            request.messages.filter { it.role != Role.SYSTEM }.forEach { message ->
+            // 带 ROLE_INJECTION 标记的 system 消息靠位置生效，必须留在原处（下面按 user 身份发出）。
+            request.messages.filter { it.role != Role.SYSTEM || it.isRoleInjection }.forEach { message ->
                 if (message.role == Role.ASSISTANT) {
                     val preserved = NativeWireHistory.decode(
                         http.json,
@@ -1110,7 +1112,8 @@ class ByokChatService(
         val replaceImages = replaceImagesWithText(provider, request)
         val imageOrdinal = AtomicInteger(0)
         return buildList {
-            request.messages.filter { it.role != Role.SYSTEM }.forEach { message ->
+            // 带 ROLE_INJECTION 标记的 system 消息靠位置生效，必须留在原处（下面按 user 身份发出）。
+            request.messages.filter { it.role != Role.SYSTEM || it.isRoleInjection }.forEach { message ->
                 if (message.role == Role.ASSISTANT) {
                     val preserved = NativeWireHistory.decode(
                         http.json,
@@ -1169,6 +1172,8 @@ class ByokChatService(
                 )
                 add(
                     buildJsonObject {
+                        // chat/completions 与 Responses 都接受任意位置的 system，身份原样发出。
+                        // 深度注入的位置由 buildOpenAiResponseBody 的「只抽开头的 system」保住。
                         put("role", wire.role)
                         put("content", wire.content)
                         if (replayDeepSeekReasoning && message.role == Role.ASSISTANT) {
@@ -2121,7 +2126,7 @@ class ByokChatService(
             messages.forEach { add(it) }
         }
         val systemText = request.messages
-            .filter { it.role == com.molagpt.app.core.model.Role.SYSTEM }
+            .filter { it.role == com.molagpt.app.core.model.Role.SYSTEM && !it.isRoleInjection }
             .joinToString("\n") { it.rawText.orEmpty() }
             .trim()
         if (systemText.isNotBlank()) put("system", systemText)
@@ -2192,7 +2197,7 @@ class ByokChatService(
             contents.forEach { add(it) }
         }
         val systemText = request.messages
-            .filter { it.role == com.molagpt.app.core.model.Role.SYSTEM }
+            .filter { it.role == com.molagpt.app.core.model.Role.SYSTEM && !it.isRoleInjection }
             .joinToString("\n") { it.rawText.orEmpty() }
             .trim()
         if (systemText.isNotBlank()) {
