@@ -294,15 +294,21 @@ class ByokChatService(
         if (request.enabledTools.hasByokTools) {
             var messages = baseMessages
             var usage: Usage? = null
+            // 整条回答共用一份来源账本，跨工具轮累计——编号才连得上正文的 <ref>。
+            val citations = WebSearchCitations()
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val toolRound = runToolRound(provider, request, messages) { emit(it) }
+                val toolRound = runToolRound(provider, request, messages, citations) { event ->
+                    if (event is StreamEvent.UsageUpdate) {
+                        usage = usage.accumulate(event.usage)
+                        emit(StreamEvent.UsageUpdate(usage!!))
+                    } else emit(event)
+                }
                 if (toolRound == null) {
                     emit(StreamEvent.Failed("OpenAI Compatible 工具响应格式无效"))
                     return@flow
                 }
                 messages = toolRound.messages
-                usage = usage.accumulate(toolRound.usage)
                 if (toolRound.completed) {
                     emit(
                         StreamEvent.WireHistory(
@@ -326,7 +332,7 @@ class ByokChatService(
     private fun streamAnthropic(provider: ByokProvider, request: ChatRequest): Flow<StreamEvent> = flow {
         val messages = buildAnthropicMessages(provider, request)
         if (request.enabledTools.hasByokTools) {
-            runAnthropicToolLoop(provider, request, messages) { emit(it) }
+            runAnthropicToolLoop(provider, request, messages, WebSearchCitations()) { emit(it) }
             return@flow
         }
         val body = buildAnthropicBody(provider, request, messages)
@@ -349,11 +355,27 @@ class ByokChatService(
                     emit(StreamEvent.Failed("BYOK 响应为空"))
                     return@flow
                 }
+                var streamUsage: Usage? = null
                 sseFlow { source.readUtf8Line() }.collect { payload ->
                     currentCoroutineContext().ensureActive()
                     if (payload.isDone) {
                         emit(StreamEvent.Finish("stop"))
                         return@collect
+                    }
+                    val root = http.json.parseToJsonElement(payload.data).jsonObject
+                    val incoming = when (root["type"]?.jsonPrimitive?.contentOrNull) {
+                        "message_start" -> (root["message"] as? JsonObject)?.let { anthropicUsage(it) }
+                        "message_delta" -> anthropicUsage(root)
+                        else -> null
+                    }
+                    if (incoming != null) {
+                        streamUsage = Usage(
+                            promptTokens = incoming.promptTokens ?: streamUsage?.promptTokens,
+                            completionTokens = incoming.completionTokens ?: streamUsage?.completionTokens,
+                            cachedTokens = incoming.cachedTokens ?: streamUsage?.cachedTokens,
+                            cacheWriteTokens = incoming.cacheWriteTokens ?: streamUsage?.cacheWriteTokens,
+                        )
+                        emit(StreamEvent.UsageUpdate(streamUsage))
                     }
                     parseAnthropicEvent(payload.data)?.let { emit(it) }
                 }
@@ -366,7 +388,7 @@ class ByokChatService(
     private fun streamGemini(provider: ByokProvider, request: ChatRequest): Flow<StreamEvent> = flow {
         val contents = buildGeminiContents(provider, request)
         if (request.enabledTools.hasByokTools) {
-            runGeminiToolLoop(provider, request, contents) { emit(it) }
+            runGeminiToolLoop(provider, request, contents, WebSearchCitations()) { emit(it) }
             return@flow
         }
         val body = buildGeminiBody(provider, request, contents)
@@ -464,15 +486,20 @@ class ByokChatService(
         if (request.enabledTools.hasByokTools) {
             var input = baseMessages
             var usage: Usage? = null
+            val citations = WebSearchCitations()
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val toolRound = runResponseToolRound(provider, request, input) { emit(it) }
+                val toolRound = runResponseToolRound(provider, request, input, citations) { event ->
+                    if (event is StreamEvent.UsageUpdate) {
+                        usage = usage.accumulate(event.usage)
+                        emit(StreamEvent.UsageUpdate(usage!!))
+                    } else emit(event)
+                }
                 if (toolRound == null) {
                     emit(StreamEvent.Failed("Responses API 工具响应格式无效"))
                     return@flow
                 }
                 input = toolRound.messages
-                usage = usage.accumulate(toolRound.usage)
                 if (toolRound.completed) {
                     emit(
                         StreamEvent.WireHistory(
@@ -625,6 +652,7 @@ class ByokChatService(
         provider: ByokProvider,
         request: ChatRequest,
         messages: List<JsonObject>,
+        citations: WebSearchCitations,
         emitEvent: suspend (StreamEvent) -> Unit,
     ): ToolRoundResult? {
         val body = buildOpenAiResponseBody(provider, request, messages, stream = false, includeTools = true)
@@ -640,6 +668,7 @@ class ByokChatService(
             val output = (root["output"] as? JsonArray)
                 ?.mapNotNull { it as? JsonObject }
                 ?: return null
+            emitEvent(StreamEvent.UsageUpdate(parseOpenAiResponseUsage(root) ?: Usage(costComplete = false)))
             val parsedOutput = parseResponseOutputItems(output)
             val functionOutputs = ArrayList<ResponseFunctionOutput>()
             val hasFunctionCalls = parsedOutput.any { it is ParsedResponseOutputItem.FunctionCall }
@@ -661,7 +690,7 @@ class ByokChatService(
                             arguments = item.arguments,
                             responseCallId = item.callId,
                         )
-                        val result = executeAndEmitTool(provider, request, call, emitEvent)
+                        val result = executeAndEmitTool(provider, request, call, citations, emitEvent)
                         functionOutputs.add(
                             ResponseFunctionOutput(
                                 callId = call.responseCallId ?: call.id,
@@ -677,7 +706,6 @@ class ByokChatService(
             return ToolRoundResult(
                 messages = newInput,
                 completed = !hasFunctionCalls,
-                usage = parseOpenAiResponseUsage(root),
             )
         }
     }
@@ -686,6 +714,7 @@ class ByokChatService(
         provider: ByokProvider,
         request: ChatRequest,
         baseMessages: List<JsonObject>,
+        citations: WebSearchCitations,
         emitEvent: suspend (StreamEvent) -> Unit,
     ): ToolRoundResult? {
         val body = buildOpenAiBody(provider, request, baseMessages, stream = false, includeTools = true)
@@ -699,6 +728,7 @@ class ByokChatService(
             if (!resp.isSuccessful) return null
             val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
             val roundUsage = parseOpenAiUsage(root)
+            emitEvent(StreamEvent.UsageUpdate(roundUsage ?: Usage(costComplete = false)))
             val message = (root["choices"] as? JsonArray)
                 ?.firstOrNull()
                 ?.jsonObject
@@ -718,12 +748,12 @@ class ByokChatService(
             if (!preamble.isNullOrBlank()) emitEvent(StreamEvent.Delta(text = preamble))
             val messages = baseMessages.toMutableList()
             messages.add(message)
-            if (calls.isEmpty()) return ToolRoundResult(messages, completed = true, usage = roundUsage)
+            if (calls.isEmpty()) return ToolRoundResult(messages, completed = true)
             for (call in calls) {
-                val result = executeAndEmitTool(provider, request, call, emitEvent)
+                val result = executeAndEmitTool(provider, request, call, citations, emitEvent)
                 messages.add(toolResultMessage(call.id, result.output))
             }
-            return ToolRoundResult(messages, completed = false, usage = roundUsage)
+            return ToolRoundResult(messages, completed = false)
         }
     }
 
@@ -736,6 +766,7 @@ class ByokChatService(
         provider: ByokProvider,
         request: ChatRequest,
         initialMessages: List<JsonObject>,
+        citations: WebSearchCitations,
         emitEvent: suspend (StreamEvent) -> Unit,
     ) {
         val messages = initialMessages.toMutableList()
@@ -782,7 +813,8 @@ class ByokChatService(
                 emitEvent(StreamEvent.Failed("Anthropic 响应缺少 content"))
                 return
             }
-            usage = usage.accumulate(anthropicUsage(root))
+            usage = usage.accumulate(anthropicUsage(root) ?: Usage(costComplete = false))
+            usage?.let { emitEvent(StreamEvent.UsageUpdate(it)) }
             val assistantMessage = buildJsonObject {
                 put("role", "assistant")
                 put("content", contentBlocks)
@@ -822,7 +854,7 @@ class ByokChatService(
             }
 
             val results = calls.map { call ->
-                val execution = executeAndEmitTool(provider, request, call, emitEvent)
+                val execution = executeAndEmitTool(provider, request, call, citations, emitEvent)
                 NativeToolResult(
                     callId = call.id,
                     name = call.name,
@@ -844,6 +876,7 @@ class ByokChatService(
         provider: ByokProvider,
         request: ChatRequest,
         initialContents: List<JsonObject>,
+        citations: WebSearchCitations,
         emitEvent: suspend (StreamEvent) -> Unit,
     ) {
         val contents = initialContents.toMutableList()
@@ -894,7 +927,8 @@ class ByokChatService(
             val modelContent = ensureGeminiModelRole(rawContent)
             contents += modelContent
             turnItems += modelContent
-            usage = usage.accumulate(geminiUsage(root))
+            usage = usage.accumulate(geminiUsage(root) ?: Usage(costComplete = false))
+            usage?.let { emitEvent(StreamEvent.UsageUpdate(it)) }
 
             val calls = ArrayList<ToolCall>()
             val parts = modelContent["parts"] as? JsonArray ?: JsonArray(emptyList())
@@ -929,7 +963,7 @@ class ByokChatService(
             }
 
             val results = calls.map { call ->
-                val execution = executeAndEmitTool(provider, request, call, emitEvent)
+                val execution = executeAndEmitTool(provider, request, call, citations, emitEvent)
                 NativeToolResult(
                     callId = call.responseCallId,
                     name = call.name,
@@ -1321,6 +1355,12 @@ class ByokChatService(
                             "Optional. Set only when the fact is exactly one of these profile values.",
                             enumValues = ByokProfileKey.entries.map { it.wire },
                         ),
+                        "topic" to ToolProperty("Optional short topic name. Reuse an existing topic when possible."),
+                        "group" to ToolProperty(
+                            "Topic group.",
+                            enumValues = com.molagpt.app.core.model.ByokMemoryTopics.groups,
+                        ),
+                        "summary" to ToolProperty("Optional one-sentence topic summary."),
                     ),
                     required = listOf("text", "section", "source_quote"),
                 ),
@@ -1418,27 +1458,38 @@ class ByokChatService(
         provider: ByokProvider,
         request: ChatRequest,
         call: ToolCall,
+        citations: WebSearchCitations,
         emitEvent: suspend (StreamEvent) -> Unit,
-    ): ToolExecutionResult = emitByokToolLifecycle(
-        id = call.id,
-        name = call.name,
-        label = labelForTool(call.name),
-        argsJson = call.arguments,
-        execute = {
-            val execution = executeTool(provider, request, call)
-            // 出图工具：把 base64/图片转本地文件 + Image 事件，回给模型的只留占位文本（绝不回灌 base64）。
-            execution.copy(output = processImageToolResult(call, execution.output, emitEvent))
-        },
-        resultPreview = { result ->
-            if (shouldShowToolPreview(call.name)) toolPreviewOf(call, result) else null
-        },
-        emitEvent = emitEvent,
-    )
+    ): ToolExecutionResult {
+        val before = citations.snapshot().size
+        val result = emitByokToolLifecycle(
+            id = call.id,
+            name = call.name,
+            label = labelForTool(call.name),
+            argsJson = call.arguments,
+            execute = {
+                val execution = executeTool(provider, request, call, citations)
+                // 出图工具：把 base64/图片转本地文件 + Image 事件，回给模型的只留占位文本（绝不回灌 base64）。
+                execution.copy(output = processImageToolResult(call, execution.output, emitEvent))
+            },
+            resultPreview = { result ->
+                if (shouldShowToolPreview(call.name)) toolPreviewOf(call, result) else null
+            },
+            emitEvent = emitEvent,
+        )
+        // 搜到新来源就把整份账本发给 UI。发全量而不是增量：SetSources 是整体替换，
+        // 而且一轮里搜第二次时，第一次的来源必须还在——正文的 <ref> 仍然指着它们。
+        if (citations.snapshot().size > before) {
+            emitEvent(StreamEvent.Sources(citations.snapshot(), citations.queryLabel()))
+        }
+        return result
+    }
 
     private suspend fun executeTool(
         provider: ByokProvider,
         request: ChatRequest,
         call: ToolCall,
+        citations: WebSearchCitations,
     ): ToolExecutionResult {
         // 只执行本轮真正声明过的工具。模型会凭空调用没给它的工具（幻觉，或被读到的网页诱导），
         // 而"关掉记忆"必须意味着写不进来，不能只是没告诉模型有这个工具。
@@ -1447,7 +1498,7 @@ class ByokChatService(
         }
         val output = try {
             when (call.name) {
-                "search_web" -> searchWeb(call.arg("query"), call.arg("max_results")?.toIntOrNull())
+                "search_web" -> searchWeb(call.arg("query"), call.arg("max_results")?.toIntOrNull(), citations)
                 "fetch_url" -> fetchUrl(call.arg("url"))
                 "view_image" -> viewImage(provider, request, call)
                 "generate_image" -> generateImage(provider, request, call.arg("prompt"))
@@ -1861,18 +1912,38 @@ class ByokChatService(
         }
     }
 
-    private fun searchWeb(query: String?, requestedMax: Int?): String {
+    /**
+     * 搜完就地编号：命中进 [citations] 拿到跨调用连续的编号，模型看到的是带 `[来源 N]`
+     * 的上下文加一条引用规则，UI 拿到的是同一批来源（由调用方发 [StreamEvent.Sources]）。
+     *
+     * 三家 provider 的差别只在解析：DDG 抓 HTML 只有标题和链接，Tavily/Exa 还带摘要和日期。
+     * 摘要缺了来源卡照样成立，所以没有为此把 DDG 排除在外。
+     */
+    private fun searchWeb(query: String?, requestedMax: Int?, citations: WebSearchCitations): String {
         if (query.isNullOrBlank()) return "Missing query"
         val options = webSearchOptionsProvider()
         val maxResults = (requestedMax ?: options.maxResults).coerceIn(1, options.maxResults.coerceIn(1, 10))
-        return when (options.provider) {
+        val outcome = when (options.provider) {
             WebSearchProvider.TAVILY -> searchTavily(query, options.apiKey, maxResults)
             WebSearchProvider.EXA -> searchExa(query, options.apiKey, maxResults)
             WebSearchProvider.DUCKDUCKGO -> searchDuckDuckGo(query, maxResults)
         }
+        return when (outcome) {
+            is WebSearchOutcome.Message -> outcome.text
+            is WebSearchOutcome.Hits -> listOfNotNull(
+                outcome.note,
+                citations.toolResult(citations.absorb(query, outcome.hits)),
+            ).joinToString("\n\n")
+        }
     }
 
-    private fun searchDuckDuckGo(query: String, maxResults: Int): String {
+    /** 搜索的两种结局：拿到命中（可附带 provider 自己给的摘要），或一段直接回给模型的说明。 */
+    private sealed interface WebSearchOutcome {
+        data class Hits(val hits: List<WebSearchHit>, val note: String? = null) : WebSearchOutcome
+        data class Message(val text: String) : WebSearchOutcome
+    }
+
+    private fun searchDuckDuckGo(query: String, maxResults: Int): WebSearchOutcome {
         val encoded = URLEncoder.encode(query, Charsets.UTF_8.name())
         // UA 不在此处设置：MolaHttp 的拦截器会统一覆盖为固定 UA。实测 DDG 恰好对固定 UA 返回正常
         // 结果，而浏览器 UA 会触发 202 反爬页，故不要在这里改写 UA。
@@ -1882,35 +1953,40 @@ class ByokChatService(
             .build()
         return runCatching {
             http.okHttp.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return "Search failed: HTTP ${resp.code}"
+                if (!resp.isSuccessful) return WebSearchOutcome.Message("Search failed: HTTP ${resp.code}")
                 val html = resp.body?.string().orEmpty()
                 // DDG HTML 结构多变：href 与 title 顺序/属性可能调换，故用更宽松的两段匹配。
                 val regex = Regex(
                     """<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>""",
                     setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
                 )
-                val results = regex.findAll(html).take(maxResults).mapIndexed { index, match ->
+                val hits = regex.findAll(html).take(maxResults).map { match ->
                     val url = decodeDuckDuckGoHref(htmlDecode(match.groupValues[1]))
-                    val title = stripHtml(htmlDecode(match.groupValues[2])).ifBlank { url }
-                    "${index + 1}. $title\n$url"
+                    // 抓 HTML 只拿得到标题和链接：没有摘要，也没有发布日期。
+                    WebSearchHit(title = stripHtml(htmlDecode(match.groupValues[2])).ifBlank { url }, url = url)
                 }.toList()
-                results.takeIf { it.isNotEmpty() }?.joinToString("\n\n")
-                    ?: "未从 DuckDuckGo 获取到结果（可能被反爬限制），可在设置改用 Tavily/Exa。"
+                if (hits.isEmpty()) {
+                    WebSearchOutcome.Message("未从 DuckDuckGo 获取到结果（可能被反爬限制），可在设置改用 Tavily/Exa。")
+                } else {
+                    WebSearchOutcome.Hits(hits)
+                }
             }
-        }.getOrElse { "Search failed: ${it.message}" }
+        }.getOrElse { WebSearchOutcome.Message("Search failed: ${it.message}") }
     }
 
     /** DDG 的 result__a href 常是 /l/?uddg=<encoded-real-url> 跳转链接，解出真实 URL。 */
     private fun decodeDuckDuckGoHref(href: String): String {
         val marker = "uddg="
         val idx = href.indexOf(marker)
-        if (idx < 0) return href
+        // 没有跳转包装时 href 可能是 //host/path 这种省略协议的写法，补全再交出去：
+        // 这个字符串现在是来源的 url，要能被系统浏览器直接打开。
+        if (idx < 0) return if (href.startsWith("//")) "https:$href" else href
         val raw = href.substring(idx + marker.length).substringBefore('&')
         return runCatching { java.net.URLDecoder.decode(raw, Charsets.UTF_8.name()) }.getOrDefault(href)
     }
 
-    private fun searchTavily(query: String, apiKey: String?, maxResults: Int): String {
-        if (apiKey.isNullOrBlank()) return "未配置 Tavily API Key，请在设置填写"
+    private fun searchTavily(query: String, apiKey: String?, maxResults: Int): WebSearchOutcome {
+        if (apiKey.isNullOrBlank()) return WebSearchOutcome.Message("未配置 Tavily API Key，请在设置填写")
         val body = buildJsonObject {
             put("api_key", apiKey)
             put("query", query)
@@ -1925,25 +2001,32 @@ class ByokChatService(
         return runCatching {
             http.okHttp.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) return "Search failed: HTTP ${resp.code} ${text.take(300)}"
+                if (!resp.isSuccessful) {
+                    return WebSearchOutcome.Message("Search failed: HTTP ${resp.code} ${text.take(300)}")
+                }
                 val root = http.json.parseToJsonElement(text).jsonObject
-                val results = (root["results"] as? JsonArray).orEmpty().mapIndexedNotNull { index, item ->
-                    val obj = item as? JsonObject ?: return@mapIndexedNotNull null
-                    val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: ""
-                    val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: ""
-                    val content = obj["content"]?.jsonPrimitive?.contentOrNull?.take(500) ?: ""
-                    "${index + 1}. $title\n$url\n$content"
+                val hits = (root["results"] as? JsonArray).orEmpty().mapNotNull { item ->
+                    val obj = item as? JsonObject ?: return@mapNotNull null
+                    WebSearchHit(
+                        title = obj["title"]?.jsonPrimitive?.contentOrNull ?: "",
+                        url = obj["url"]?.jsonPrimitive?.contentOrNull ?: "",
+                        snippet = obj["content"]?.jsonPrimitive?.contentOrNull?.take(500),
+                        // news 主题才带日期，general 不带；取不到就让来源卡只显示站点。
+                        publishedDate = obj["published_date"]?.jsonPrimitive?.contentOrNull,
+                    )
                 }
                 val answer = root["answer"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                listOfNotNull(answer?.let { "摘要：$it" }, results.joinToString("\n\n").takeIf { it.isNotBlank() })
-                    .joinToString("\n\n")
-                    .ifBlank { "Tavily 未返回结果" }
+                if (hits.isEmpty()) {
+                    WebSearchOutcome.Message(answer?.let { "摘要：$it" } ?: "Tavily 未返回结果")
+                } else {
+                    WebSearchOutcome.Hits(hits, note = answer?.let { "摘要：$it" })
+                }
             }
-        }.getOrElse { "Search failed: ${it.message}" }
+        }.getOrElse { WebSearchOutcome.Message("Search failed: ${it.message}") }
     }
 
-    private fun searchExa(query: String, apiKey: String?, maxResults: Int): String {
-        if (apiKey.isNullOrBlank()) return "未配置 Exa API Key，请在设置填写"
+    private fun searchExa(query: String, apiKey: String?, maxResults: Int): WebSearchOutcome {
+        if (apiKey.isNullOrBlank()) return WebSearchOutcome.Message("未配置 Exa API Key，请在设置填写")
         val body = buildJsonObject {
             put("query", query)
             put("numResults", maxResults)
@@ -1960,18 +2043,22 @@ class ByokChatService(
         return runCatching {
             http.okHttp.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) return "Search failed: HTTP ${resp.code} ${text.take(300)}"
-                val root = http.json.parseToJsonElement(text).jsonObject
-                val results = (root["results"] as? JsonArray).orEmpty().mapIndexedNotNull { index, item ->
-                    val obj = item as? JsonObject ?: return@mapIndexedNotNull null
-                    val title = obj["title"]?.jsonPrimitive?.contentOrNull ?: ""
-                    val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: ""
-                    val content = obj["text"]?.jsonPrimitive?.contentOrNull?.take(500) ?: ""
-                    "${index + 1}. $title\n$url\n$content"
+                if (!resp.isSuccessful) {
+                    return WebSearchOutcome.Message("Search failed: HTTP ${resp.code} ${text.take(300)}")
                 }
-                results.joinToString("\n\n").ifBlank { "Exa 未返回结果" }
+                val root = http.json.parseToJsonElement(text).jsonObject
+                val hits = (root["results"] as? JsonArray).orEmpty().mapNotNull { item ->
+                    val obj = item as? JsonObject ?: return@mapNotNull null
+                    WebSearchHit(
+                        title = obj["title"]?.jsonPrimitive?.contentOrNull ?: "",
+                        url = obj["url"]?.jsonPrimitive?.contentOrNull ?: "",
+                        snippet = obj["text"]?.jsonPrimitive?.contentOrNull?.take(500),
+                        publishedDate = obj["publishedDate"]?.jsonPrimitive?.contentOrNull,
+                    )
+                }
+                if (hits.isEmpty()) WebSearchOutcome.Message("Exa 未返回结果") else WebSearchOutcome.Hits(hits)
             }
-        }.getOrElse { "Search failed: ${it.message}" }
+        }.getOrElse { WebSearchOutcome.Message("Search failed: ${it.message}") }
     }
 
     private fun fetchUrl(url: String?): String {
@@ -2174,18 +2261,7 @@ class ByokChatService(
         }
     }
 
-    private fun anthropicUsage(root: JsonObject): Usage? {
-        val usage = root["usage"] as? JsonObject ?: return null
-        val prompt = usage["input_tokens"]?.jsonPrimitive?.intOrNull
-        val completion = usage["output_tokens"]?.jsonPrimitive?.intOrNull
-        if (prompt == null && completion == null) return null
-        return Usage(
-            promptTokens = prompt,
-            completionTokens = completion,
-            totalTokens = if (prompt != null && completion != null) prompt + completion else null,
-            cachedTokens = usage["cache_read_input_tokens"]?.jsonPrimitive?.intOrNull,
-        )
-    }
+    private fun anthropicUsage(root: JsonObject): Usage? = parseAnthropicUsage(root)
 
     private fun buildGeminiBody(
         provider: ByokProvider,
@@ -2228,8 +2304,8 @@ class ByokChatService(
         root["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull?.let {
             return listOf(StreamEvent.Failed(it))
         }
-        val candidates = root["candidates"] as? JsonArray ?: return emptyList()
-        return candidates.flatMap { candidateElement ->
+        val candidates = root["candidates"] as? JsonArray ?: JsonArray(emptyList())
+        return listOfNotNull(geminiUsage(root)?.let { StreamEvent.UsageUpdate(it) }) + candidates.flatMap { candidateElement ->
             val candidate = candidateElement as? JsonObject ?: return@flatMap emptyList()
             val content = candidate["content"] as? JsonObject
             val parts = content?.get("parts") as? JsonArray
@@ -2258,7 +2334,7 @@ class ByokChatService(
         if (prompt == null && completion == null && total == null && reasoning == null) return null
         return Usage(
             promptTokens = prompt,
-            completionTokens = completion,
+            completionTokens = completion?.let { it + (reasoning ?: 0) },
             totalTokens = total,
             reasoningTokens = reasoning,
             cachedTokens = usage["cachedContentTokenCount"]?.jsonPrimitive?.intOrNull,
@@ -2322,7 +2398,6 @@ class ByokChatService(
         val messages: List<JsonObject>,
         val completed: Boolean = false,
         /** 本轮的 token 用量。工具轮是非流式请求，usage 直接在响应体里。 */
-        val usage: Usage? = null,
     )
     private data class ToolSpec(
         val name: String,

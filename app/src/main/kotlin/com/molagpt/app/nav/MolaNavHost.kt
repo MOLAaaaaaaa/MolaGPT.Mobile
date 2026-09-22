@@ -361,6 +361,7 @@ fun MolaNavHost(
                 }
                 AgentControlScreen(
                     vm = vm,
+                    enterToSend = settings.enterToSend,
                     onVisibleSessionChanged = container::setForegroundAgentSession,
                     onExit = {
                         if (navController.currentDestination?.route == Routes.AGENT_CONTROL) {

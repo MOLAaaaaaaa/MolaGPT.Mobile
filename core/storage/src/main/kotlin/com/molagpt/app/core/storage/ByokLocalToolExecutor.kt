@@ -40,7 +40,16 @@ class ByokLocalToolExecutor(
         val args = runCatching { json.parseToJsonElement(argsJson).jsonObject }.getOrNull()
             ?: return "${ByokLocalToolHandler.MEMORY_FAILURE_PREFIX} arguments are not valid JSON"
         return when (name) {
-            ByokLocalToolHandler.SAVE_MEMORY -> saveMemory(args.str("text"), args.str("section"), args.str("source_quote"), args.str("profile_key"), sessionId)
+            ByokLocalToolHandler.SAVE_MEMORY -> saveMemory(
+                text = args.str("text"),
+                sectionWire = args.str("section"),
+                quote = args.str("source_quote"),
+                profileKeyWire = args.str("profile_key"),
+                topic = args.str("topic"),
+                group = args.str("group"),
+                summary = args.str("summary"),
+                sessionId = sessionId,
+            )
             ByokLocalToolHandler.FORGET_MEMORY -> forgetMemory(args.str("query"), args.str("source_quote"), sessionId)
             ByokLocalToolHandler.RECALL_CONVERSATIONS -> recall(args.str("queries"), args.int("limit"), args.str("conversation_id"), sessionId)
             else -> "${ByokLocalToolHandler.MEMORY_FAILURE_PREFIX} unsupported tool $name"
@@ -54,6 +63,9 @@ class ByokLocalToolExecutor(
         sectionWire: String?,
         quote: String?,
         profileKeyWire: String?,
+        topic: String?,
+        group: String?,
+        summary: String?,
         sessionId: String,
     ): String {
         val clean = text?.trim().orEmpty()
@@ -76,6 +88,7 @@ class ByokLocalToolExecutor(
         if (!allowSensitive && ByokMemoryGuards.looksSensitive(clean)) {
             return fail("refusing to store credentials or identity documents")
         }
+        val resolvedTopic = memoryRepository.resolveTopic(section, topic, group, summary)
         // 受保护特征不拒绝、也不直接写：排进待确认，由用户在记忆页拍板。
         // 这类事实可能正是用户要求记的，但不该在他不知情时进入一份会随每轮发出去的画像。
         if (!allowSensitive && ByokMemoryGuards.looksProtected(clean)) {
@@ -83,6 +96,7 @@ class ByokLocalToolExecutor(
                 text = clean,
                 section = section,
                 profileKey = profileKey,
+                topicId = resolvedTopic.id,
                 sessionId = sessionId,
                 messageId = userMessage.messageId,
                 quote = quoteText,
@@ -99,6 +113,7 @@ class ByokLocalToolExecutor(
             text = clean,
             section = section,
             profileKey = profileKey,
+            topicId = resolvedTopic.id,
             sessionId = sessionId,
             messageId = userMessage.messageId,
             quote = quoteText,

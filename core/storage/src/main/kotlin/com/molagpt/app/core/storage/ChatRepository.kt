@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.withContext
 
 /**
@@ -41,6 +43,7 @@ class ChatRepository(
     private val conversationDao: ConversationDao,
     private val streamTaskDao: StreamTaskDao,
     private val dispatchers: DispatcherProvider,
+    private val pricingResolver: suspend (String, String) -> com.molagpt.app.core.model.ModelPricing? = { _, _ -> null },
     /** 回答后处理（设置 → 后处理）。默认原样返回，测试与预览可以不接。 */
     private val postProcessor: ResponseTextProcessor = ResponseTextProcessor { it },
 ) {
@@ -122,7 +125,8 @@ class ChatRepository(
             val target = all.firstOrNull { it.messageId == messageId } ?: return@withContext null
             if (all.none { it.createdAt > target.createdAt }) return@withContext null
             val prior = MessageJson.decodeMeta(target.metadataJson)[EditSnapshots.KEY]
-            EditSnapshots.append(prior, EditSnapshots.timelineOf(all), target.createdAt)
+            val byok = conversationDao.getById(sessionId)?.providerKind == ProviderKind.BYOK.name
+            EditSnapshots.append(prior, EditSnapshots.timelineOf(all, includeLocalStats = byok), target.createdAt)
         }
 
     /**
@@ -146,7 +150,7 @@ class ChatRepository(
             val nav = EditSnapshots.navigate(
                 raw = MessageJson.decodeMeta(target.metadataJson)[EditSnapshots.KEY],
                 delta = delta,
-                liveTimeline = EditSnapshots.timelineOf(all),
+                liveTimeline = EditSnapshots.timelineOf(all, includeLocalStats = persistBack),
                 persistBack = persistBack,
             ) ?: return@withContext false
 
@@ -193,15 +197,20 @@ class ChatRepository(
         )
         emit(msg)
         var firstTokenAt: Long? = null
-        var usage: Usage? = null
+        var pricing: com.molagpt.app.core.model.ModelPricing? = null
+        val usage = AtomicReference<Usage?>(null)
         var processed = false
         try {
-            chatService.sendMessage(request).webTypingPaced().collect { event ->
-                controller.toCommands(event).forEach { cmd ->
-                    // usage 可能分两次到（先 finish_reason 后 usage-only chunk），后到的非空值覆盖。
-                    if (cmd is DeltaCommand.Complete) cmd.usage?.let { usage = it }
-                    msg = applyCommand(msg, cmd)
+            if (request.providerKind == ProviderKind.BYOK) pricing = pricingResolver(request.providerId, request.modelId)
+            chatService.sendMessage(request).onEach { event ->
+                // 在打字动画排队之前保存用量，停止显示时仍保留上游已完成请求的费用。
+                when (event) {
+                    is com.molagpt.app.core.model.StreamEvent.UsageUpdate -> usage.set(event.usage)
+                    is com.molagpt.app.core.model.StreamEvent.Finish -> event.usage?.let { usage.set(it) }
+                    else -> Unit
                 }
+            }.webTypingPaced().collect { event ->
+                controller.toCommands(event).forEach { cmd -> msg = applyCommand(msg, cmd) }
                 // 首个 fragment 落地 = 用户看到第一个字，作为 TTFT 的终点。
                 if (firstTokenAt == null && msg.fragments.isNotEmpty()) {
                     firstTokenAt = System.currentTimeMillis()
@@ -213,7 +222,7 @@ class ChatRepository(
             // 切回这一版时替换会凭空消失。
             msg = withContext(NonCancellable) { applyPostProcessing(msg) }
             processed = true
-            msg = msg.withRequestStats(request.providerKind, usage, start, firstTokenAt)
+            msg = msg.withRequestStats(request.providerKind, usage.get(), start, firstTokenAt, pricing)
             // 重生成：把本次答案追加为新版本，让 in-flight 帧立即带上版本信息(切换栏才会显示)。
             if (priorAttempts.isNotEmpty()) msg = msg.withAttempts(priorAttempts)
             emit(msg)
@@ -226,6 +235,7 @@ class ChatRepository(
                 updatedAt = System.currentTimeMillis(),
                 metadata = msg.metadata - "pending",
             )
+            if (!processed) finalMsg = finalMsg.withRequestStats(request.providerKind, usage.get(), start, firstTokenAt, pricing)
             // 用户停止时上面的 success 分支未跑到，这里兜底补版本，避免丢失旧版本。
             if (priorAttempts.isNotEmpty() && !finalMsg.metadata.containsKey(RetryAttempts.KEY_ATTEMPTS)) {
                 finalMsg = finalMsg.withAttempts(priorAttempts)
@@ -309,13 +319,7 @@ class ChatRepository(
 
     /** 把「当前消息内容」作为新版本追加到 [prior] 之后，写入 metadata（KEY_ATTEMPTS/KEY_CURRENT）。 */
     private fun ChatMessage.withAttempts(prior: List<RetryAttempt>): ChatMessage {
-        val all = prior + RetryAttempt(
-            fragments = fragments,
-            rawText = rawText ?: visibleText(this),
-            model = model,
-            modelDisplayName = metadata["modelDisplayName"],
-            status = status.name,
-        )
+        val all = prior + RetryAttempts.from(this.copy(rawText = rawText ?: visibleText(this)))
         return copy(
             metadata = metadata + mapOf(
                 RetryAttempts.KEY_ATTEMPTS to RetryAttempts.encode(all),
@@ -335,9 +339,19 @@ class ChatRepository(
         usage: Usage?,
         startedAt: Long,
         firstTokenAt: Long?,
+        pricing: com.molagpt.app.core.model.ModelPricing?,
     ): ChatMessage {
         if (providerKind != ProviderKind.BYOK) return this
         val stats = buildMap {
+            if (pricing == null) put(ChatMessageMetadataKeys.PRICING_MISSING, "true")
+            com.molagpt.app.core.model.calculateCostUsd(usage, pricing)?.let { cost ->
+                put(ChatMessageMetadataKeys.COST_ID, messageId)
+                put(ChatMessageMetadataKeys.COST_USD, cost.toString())
+                put(ChatMessageMetadataKeys.COST_MODEL, model.orEmpty())
+                pricing?.source?.let { put(ChatMessageMetadataKeys.PRICING_SOURCE, it) }
+            }
+            usage?.totalTokens?.let { put(ChatMessageMetadataKeys.TOTAL_TOKENS, it.toString()) }
+            usage?.reasoningTokens?.let { put(ChatMessageMetadataKeys.REASONING_TOKENS, it.toString()) }
             usage?.promptTokens?.let { put(ChatMessageMetadataKeys.PROMPT_TOKENS, it.toString()) }
             usage?.completionTokens?.let { put(ChatMessageMetadataKeys.COMPLETION_TOKENS, it.toString()) }
             usage?.cachedTokens?.let { put(ChatMessageMetadataKeys.CACHED_TOKENS, it.toString()) }
@@ -392,7 +406,8 @@ class ChatRepository(
                 val existing = frags.getOrNull(i) as? MessageFragment.SearchResult
                 val sr = MessageFragment.SearchResult(
                     id = existing?.id ?: Ids.newFragmentId(),
-                    query = existing?.query ?: "",
+                    // BYOK 自带搜索会带上搜索词；自家后端的来源表不带，保留已有的。
+                    query = cmd.query ?: existing?.query ?: "",
                     refs = cmd.refs,
                 )
                 if (i >= 0) frags[i] = sr else frags.add(sr)

@@ -45,6 +45,7 @@ class SettingsViewModel(
     private val accountStatus: AccountStatusCache,
     private val byokProviders: ByokProviderRepository,
     private val byokModelApi: ByokModelApi,
+    private val modelsDevCatalog: com.molagpt.app.core.network.ModelsDevCatalog,
     private val byokImageApi: ByokImageApi,
     private val mcpToolListApi: McpToolListApi,
     private val credentialStore: CredentialStore,
@@ -158,16 +159,133 @@ class SettingsViewModel(
         "连接失败：${e.message ?: "未知错误"}"
     }
 
-    /** 仅拉取模型列表（不落库），供「自动获取」选择页用。 */
+    /** 拉取候选模型，同时刷新已添加模型的接口价格。 */
     suspend fun fetchByokModels(provider: ByokProvider): List<com.molagpt.app.core.model.ProviderModel> =
-        withContext(dispatchers.io) { byokModelApi.fetchModels(provider) }
+        withContext(dispatchers.io) {
+            val fetched = byokModelApi.fetchModels(provider)
+            applyByokPrices(provider.id, fetched.mapNotNull { m -> m.pricing?.let { m.id to it } }.toMap())
+            fetched
+        }
+
+    private val _pricingRefresh = MutableStateFlow(PricingRefreshState(cachedAt = modelsDevCatalog.cachedAt))
+    val pricingRefresh: StateFlow<PricingRefreshState> = _pricingRefresh.asStateFlow()
+
+    suspend fun fetchModelPriceCandidates(modelIds: Collection<String>): Map<String, List<com.molagpt.app.core.model.ModelsDevPrice>> {
+        val providers = modelsDevCatalog.load().providers
+        return modelIds.associateWith { modelId ->
+            providers.mapNotNull { provider ->
+                provider.models[modelId.trim().lowercase()]?.let { pricing ->
+                    com.molagpt.app.core.model.ModelsDevPrice(provider.key, provider.name, pricing)
+                }
+            }
+        }
+    }
+
+    fun fetchAllModelPrices(force: Boolean = false) {
+        if (_pricingRefresh.value.busy) return
+        _pricingRefresh.value = _pricingRefresh.value.copy(busy = true, result = null)
+        viewModelScope.launch {
+            try {
+                val loaded = modelsDevCatalog.load(force)
+                val targets = byokProviders.list().filter { it.purpose == com.molagpt.app.core.model.ByokPurpose.CHAT }
+                val match = com.molagpt.app.core.model.ModelsDevPricing.match(loaded.providers,
+                    targets.flatMap { it.models }.filter { it.supportsChat }.map { it.id })
+                var written = 0
+                for (provider in targets) written += applyByokPrices(provider.id, match.agreed)
+                var resolved = 0
+                val reviews = targets.flatMap { provider ->
+                    provider.models.filter { it.supportsChat && it.pricing?.isManual != true }.mapNotNull { model ->
+                        val candidates = match.conflicts[model.id]
+                        if (candidates == null && model.id !in match.unmatched) return@mapNotNull null
+                        if (candidates?.any { candidate -> samePrice(model.pricing, candidate.pricing) } == true) {
+                            resolved++
+                            return@mapNotNull null
+                        }
+                        ModelPriceReview(provider.id, provider.name, model, candidates.orEmpty(),
+                            com.molagpt.app.core.model.ModelsDevPricing.guessProviderKey(provider.baseUrl))
+                    }
+                }
+                val manual = targets.sumOf { it.models.count { model -> model.supportsChat && model.pricing?.isManual == true } }
+                val conflicts = reviews.count { it.candidates.isNotEmpty() }
+                val unmatched = reviews.size - conflicts
+                val result = listOfNotNull(
+                    if (written > 0) "已保存 $written 项价格" else null,
+                    if (manual > 0) "保留 $manual 项手动价格" else null,
+                    if (conflicts > 0) "$conflicts 项价格不一致" else null,
+                    if (unmatched > 0) "$unmatched 项未匹配" else null,
+                    loaded.warning,
+                ).joinToString("；").ifEmpty {
+                    if (resolved > 0) "模型价格已是最新" else "没有可用的价格"
+                }
+                _pricingRefresh.value = PricingRefreshState(cachedAt = modelsDevCatalog.cachedAt, result = result, reviews = reviews)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                _pricingRefresh.value = _pricingRefresh.value.copy(result = "获取定价失败：${e.message}")
+            } finally {
+                _pricingRefresh.value = _pricingRefresh.value.copy(busy = false)
+            }
+        }
+    }
+
+    suspend fun applyByokPrices(providerId: String, prices: Map<String, com.molagpt.app.core.model.ModelPricing>): Int {
+        val current = byokProviders.get(providerId) ?: return 0
+        var written = 0
+        val models = current.models.map { model ->
+            val pricing = com.molagpt.app.core.model.mergeModelPricing(model.pricing, prices[model.id])
+            if (pricing != model.pricing) written++
+            model.copy(pricing = pricing)
+        }
+        if (models != current.models) byokProviders.upsert(current.copy(models = models))
+        return written
+    }
+
+    suspend fun saveReviewedPrice(
+        review: ModelPriceReview,
+        pricing: com.molagpt.app.core.model.ModelPricing,
+        sourceProviderKey: String?,
+        applyToMatchingModels: Boolean,
+    ) {
+        require(pricing.isValid)
+        val currentReviews = _pricingRefresh.value.reviews
+        val targets = if (applyToMatchingModels && sourceProviderKey != null) {
+            currentReviews.filter { item ->
+                item.providerId == review.providerId && item.candidates.any { it.providerKey == sourceProviderKey }
+            }
+        } else {
+            listOf(review)
+        }
+        val prices = targets.associate { item ->
+            val selected = sourceProviderKey?.let { key -> item.candidates.firstOrNull { it.providerKey == key }?.pricing }
+            item.model.id to (selected ?: pricing).copy(
+                source = sourceProviderKey?.let { "models.dev:$it" } ?: pricing.source,
+            )
+        }
+        applyByokPrices(review.providerId, prices)
+        val applied = targets.map { it.providerId to it.model.id }.toSet()
+        _pricingRefresh.value = _pricingRefresh.value.copy(
+            result = if (targets.size == 1) {
+                "已保存 ${review.providerName} / ${review.model.displayName} 的价格"
+            } else {
+                "已为 ${review.providerName} 的 ${targets.size} 个模型保存价格"
+            },
+            reviews = currentReviews.filterNot { (it.providerId to it.model.id) in applied },
+        )
+    }
+
+    private fun samePrice(
+        first: com.molagpt.app.core.model.ModelPricing?,
+        second: com.molagpt.app.core.model.ModelPricing,
+    ): Boolean = first != null &&
+        (first.source == "models.dev" || first.source?.startsWith("models.dev:") == true) &&
+        first.copy(source = null) == second.copy(source = null)
 
     /** 把用户选中的模型合并进 provider 落库（去重 by id）。 */
     fun addByokModels(provider: ByokProvider, models: List<com.molagpt.app.core.model.ProviderModel>) = viewModelScope.launch {
-        val merged = (models.associateBy { it.id } + provider.models.associateBy { it.id })
+        val current = byokProviders.get(provider.id) ?: return@launch
+        val merged = (models.associateBy { it.id } + current.models.associateBy { it.id })
             .values
             .sortedWith(compareByDescending<com.molagpt.app.core.model.ProviderModel> { it.supportsChat }.thenBy { it.id })
-        byokProviders.upsert(provider.copy(models = merged))
+        byokProviders.upsert(current.copy(models = merged))
         _byokStatus.value = "已添加 ${models.size} 个模型"
     }
 
@@ -288,12 +406,13 @@ class SettingsViewModel(
 
     fun refreshByokModels(provider: ByokProvider) = viewModelScope.launch {
         _byokStatus.value = "正在获取模型..."
-        runCatching { withContext(dispatchers.io) { byokModelApi.fetchModels(provider) } }
+        runCatching { fetchByokModels(provider) }
             .onSuccess { models ->
-                val merged = (models.associateBy { it.id } + provider.models.associateBy { it.id })
+                val current = byokProviders.get(provider.id) ?: return@onSuccess
+                val merged = (models.associateBy { it.id } + current.models.associateBy { it.id })
                     .values
                     .sortedWith(compareByDescending<com.molagpt.app.core.model.ProviderModel> { it.supportsChat }.thenBy { it.id })
-                byokProviders.upsert(provider.copy(models = merged))
+                byokProviders.upsert(current.copy(models = merged))
                 _byokStatus.value = if (models.isEmpty()) "未获取到可用模型" else "已添加 ${models.size} 个模型"
             }
             .onFailure { e ->

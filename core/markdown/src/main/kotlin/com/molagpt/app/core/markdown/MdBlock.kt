@@ -42,6 +42,15 @@ sealed interface MdInline {
 
     data class Code(val text: String) : MdInline
     data class Link(val text: String, val url: String) : MdInline
+
+    /**
+     * 联网回答里的引用角标（正文中的 `<ref source="1,3" />`）。
+     *
+     * 只带编号，不带标题与链接：编号对应的来源随消息单独下发（SSE 的 `molagpt_sources`），
+     * 且往往比正文晚到。把解析结果留成编号，渲染层再按当时手上的来源表去解，
+     * 来源补齐后同一份 block 不必重解析。
+     */
+    data class Citation(val ids: List<Int>) : MdInline
     /** 行内图片（Markdown `![alt](url)`；生成图片也走此路径，url 含 =imgtemp）。 */
     data class Image(val url: String, val alt: String = "") : MdInline
     data class Math(val expr: String) : MdInline

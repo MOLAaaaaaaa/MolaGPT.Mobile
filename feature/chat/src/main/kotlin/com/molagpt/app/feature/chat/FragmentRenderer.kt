@@ -6,6 +6,7 @@ import androidx.compose.ui.Modifier
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.ToolStatus
 import com.molagpt.app.core.render.CodeBlockView
+import com.molagpt.app.core.render.LocalFaviconRenderer
 import com.molagpt.app.core.render.LocalMarkdownImageRenderer
 import com.molagpt.app.core.render.FileCardView
 import com.molagpt.app.core.render.LatexView
@@ -30,6 +31,9 @@ fun FragmentRenderer(
     CompositionLocalProvider(
         LocalMarkdownImageRenderer provides { url, imgModifier ->
             com.molagpt.app.feature.file.RemoteImage(url, imgModifier)
+        },
+        LocalFaviconRenderer provides { url, imgModifier ->
+            com.molagpt.app.feature.file.RemoteFavicon(url, imgModifier)
         },
     ) {
     when (fragment) {

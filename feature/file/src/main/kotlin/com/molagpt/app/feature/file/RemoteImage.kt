@@ -35,6 +35,23 @@ import com.molagpt.app.core.render.shimmer
  * 两者用 key `img-$url` 配对，框架自动以非线性缓动在两端 bounds 间过渡。预览状态由顶层
  * [LocalImagePreviewUrl] 统一持有。
  */
+/**
+ * 图标尺寸的远程图片（引用胶囊上的 favicon）。
+ *
+ * 跟 [RemoteImage] 分开：那个是给正文配图的——撑满宽度、限高 360dp、点击进全屏预览、
+ * 还挂着共享元素转场。拿它画一枚 12dp 的站点图标，会先把整行撑开。
+ * 这里只要一张按调用方给的尺寸摆好的小图，失败就什么都不画（胶囊剩站点名照样成立）。
+ */
+@Composable
+fun RemoteFavicon(url: String, modifier: Modifier = Modifier) {
+    AsyncImage(
+        model = url,
+        contentDescription = null,
+        contentScale = ContentScale.Fit,
+        modifier = modifier,
+    )
+}
+
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun RemoteImage(url: String, modifier: Modifier = Modifier, contentDescription: String? = null) {

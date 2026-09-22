@@ -10,6 +10,7 @@ import com.molagpt.app.core.storage.entity.ByokMemoryCandidateEntity
 import com.molagpt.app.core.storage.entity.ByokMemoryEntryEntity
 import com.molagpt.app.core.storage.entity.ByokMemoryEvidenceEntity
 import com.molagpt.app.core.storage.entity.ByokMemorySuppressionEntity
+import com.molagpt.app.core.storage.entity.ByokMemoryTopicEntity
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -67,6 +68,61 @@ interface ByokMemoryDao {
         """,
     )
     suspend fun reinforceEntry(id: String, now: Long, delta: Double, ceiling: Double)
+
+    // ── 主题 ────────────────────────────────────────────────────────────────
+
+    @Query("SELECT * FROM byok_memory_topics WHERE scope = :scope ORDER BY updatedAt DESC")
+    fun observeTopics(scope: String): Flow<List<ByokMemoryTopicEntity>>
+
+    @Query("SELECT * FROM byok_memory_topics WHERE scope = :scope")
+    suspend fun topics(scope: String): List<ByokMemoryTopicEntity>
+
+    @Query("SELECT * FROM byok_memory_topics WHERE id = :id")
+    suspend fun topic(id: String): ByokMemoryTopicEntity?
+
+    @Query("SELECT * FROM byok_memory_topics WHERE scope = :scope AND normalizedKey = :key")
+    suspend fun topicByKey(scope: String, key: String): ByokMemoryTopicEntity?
+
+    @Upsert
+    suspend fun upsertTopic(entity: ByokMemoryTopicEntity)
+
+    @Query("UPDATE byok_memory_entries SET topicId = :topicId, updatedAt = :now WHERE id IN (:entryIds)")
+    suspend fun assignTopic(entryIds: List<String>, topicId: String, now: Long)
+
+    @Query("DELETE FROM byok_memory_topics WHERE scope = :scope")
+    suspend fun deleteAllTopics(scope: String)
+
+    @Query("SELECT * FROM byok_memory_entries WHERE scope = :scope AND topicId = :topicId")
+    suspend fun entriesByTopic(scope: String, topicId: String): List<ByokMemoryEntryEntity>
+
+    @Query("SELECT * FROM byok_memory_candidates WHERE scope = :scope AND topicId = :topicId")
+    suspend fun candidatesByTopic(scope: String, topicId: String): List<ByokMemoryCandidateEntity>
+
+    @Query("DELETE FROM byok_memory_entries WHERE scope = :scope AND topicId = :topicId")
+    suspend fun deleteEntriesByTopic(scope: String, topicId: String)
+
+    @Query("DELETE FROM byok_memory_candidates WHERE scope = :scope AND topicId = :topicId")
+    suspend fun deleteCandidatesByTopic(scope: String, topicId: String)
+
+    @Query("DELETE FROM byok_memory_topics WHERE scope = :scope AND id = :topicId")
+    suspend fun deleteTopic(scope: String, topicId: String)
+
+    @Transaction
+    suspend fun deleteTopicWithSuppressions(scope: String, topicId: String, reason: String, now: Long) {
+        entriesByTopic(scope, topicId).forEach { entry ->
+            upsertSuppression(
+                ByokMemorySuppressionEntity(scope, entry.normalizedKey, entry.text, reason, now),
+            )
+        }
+        candidatesByTopic(scope, topicId).forEach { candidate ->
+            upsertSuppression(
+                ByokMemorySuppressionEntity(scope, candidate.normalizedKey, candidate.text, reason, now),
+            )
+        }
+        deleteEntriesByTopic(scope, topicId)
+        deleteCandidatesByTopic(scope, topicId)
+        deleteTopic(scope, topicId)
+    }
 
     // ── 证据 ────────────────────────────────────────────────────────────────
 

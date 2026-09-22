@@ -16,6 +16,8 @@ import org.commonmark.node.Emphasis
 import org.commonmark.node.FencedCodeBlock
 import org.commonmark.node.HardLineBreak
 import org.commonmark.node.Heading
+import org.commonmark.node.HtmlBlock
+import org.commonmark.node.HtmlInline
 import org.commonmark.node.Image
 import org.commonmark.node.IndentedCodeBlock
 import org.commonmark.node.Link
@@ -46,7 +48,7 @@ object MarkdownParser {
         .build()
 
     fun parse(markdown: String): List<MdBlock> {
-        val visibleMarkdown = stripHiddenContext(markdown)
+        val visibleMarkdown = stripPartialRefTail(stripHiddenContext(markdown))
         if (visibleMarkdown.isBlank()) return emptyList()
         val out = ArrayList<MdBlock>()
         for (seg in splitDisplayMath(visibleMarkdown)) {
@@ -63,6 +65,16 @@ object MarkdownParser {
 
     private fun stripHiddenContext(input: String): String =
         HIDDEN_CONTEXT.fold(input) { acc, regex -> acc.replace(regex, "") }
+
+    /**
+     * 丢掉正文末尾那半截还没写完的 `<ref …`。
+     *
+     * 引用标签是分 token 流下来的，写到一半时既不是合法的 HTML 行内节点、也就不会被
+     * [citationOf] 认出来，CommonMark 会把它当普通文字渲染——于是每来一个联网回答，
+     * 句末都要闪一下 `<ref sour`。只认末尾、且至少要有 `<r`，所以正常行文里的 `<` 不受影响。
+     */
+    private fun stripPartialRefTail(input: String): String =
+        PARTIAL_REF_TAIL.find(input)?.let { input.substring(0, it.range.first) } ?: input
 
     /**
      * 正文改写（回答后处理）必须整段跳过的区间：代码围栏与行内代码、行内与块级公式，
@@ -152,8 +164,36 @@ object MarkdownParser {
         is BulletList -> MdBlock.BulletList(listItems(node, inlineMath))
         is OrderedList -> MdBlock.OrderedList(node.markerStartNumber, listItems(node, inlineMath))
         is TableBlock -> tableOf(node, inlineMath)
+        // 引用标签独占一行时 CommonMark 按块级 HTML 收走，不走 HtmlInline 那条路。
+        is HtmlBlock -> citationsOf(node.literal)
+            .takeIf { it.isNotEmpty() }
+            ?.let { MdBlock.Paragraph(it) }
         else -> null
     }
+
+    /**
+     * 从一段 HTML 里取出引用角标，非引用标签返回空列表（照旧丢弃）。
+     *
+     * `source` 允许写成 `1`、`1,3,5`，也允许写成 `1-3`：后端提示词里给的是逗号形式，
+     * 但模型时不时会自己发明区间，按字面渲染出 `1-3` 这样点不开的角标不如直接展开。
+     */
+    private fun citationsOf(html: String): List<MdInline.Citation> =
+        REF_TAG.findAll(html).mapNotNull { match ->
+            val ids = ArrayList<Int>()
+            for (part in match.groupValues[1].split(REF_ID_SEPARATOR)) {
+                val piece = part.trim()
+                if (piece.isEmpty()) continue
+                val range = REF_ID_RANGE.find(piece)
+                if (range != null) {
+                    val from = range.groupValues[1].toIntOrNull() ?: continue
+                    val to = range.groupValues[2].toIntOrNull() ?: continue
+                    for (id in minOf(from, to)..maxOf(from, to)) if (id !in ids) ids.add(id)
+                } else {
+                    piece.toIntOrNull()?.let { if (it !in ids) ids.add(it) }
+                }
+            }
+            ids.takeIf { it.isNotEmpty() }?.let(MdInline::Citation)
+        }.toList()
 
     private fun tableOf(table: TableBlock, inlineMath: InlineMathContext): MdBlock.Table {
         var header: List<List<MdInline>> = emptyList()
@@ -270,6 +310,9 @@ object MarkdownParser {
                 )
                 is SoftLineBreak -> out.add(MdInline.SoftBreak)
                 is HardLineBreak -> out.add(MdInline.HardBreak)
+                // 行内 HTML 依旧整体丢弃（正文里不该出现），唯独引用标签要留下来：
+                // 它是联网回答与来源列表之间唯一的对应关系。
+                is HtmlInline -> citationsOf(node.literal).forEach(out::add)
                 else -> collectInlines(node.firstChild, out, inlineMath, bold, italic, strike)
             }
             node = node.next
@@ -730,6 +773,15 @@ object MarkdownParser {
         Regex("""†[^†]*†"""),
         Regex("""⟦MEM[:：][\s\S]*?⟧"""),
     )
+
+    /** 联网回答的引用标签。后端只保证 `source` 属性存在，编号可以是 `1` 也可以是 `1,3,5`。 */
+    private val REF_TAG = Regex(
+        """<ref\b[^>]*?\bsource\s*=\s*["']?([^"'>]*)["']?[^>]*/?>""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val REF_ID_SEPARATOR = Regex("""[,，、|\s]+""")
+    private val REF_ID_RANGE = Regex("""^(\d+)\s*[-~—]\s*(\d+)$""")
+    private val PARTIAL_REF_TAIL = Regex("""<r(?:e(?:f[^>]*)?)?$""", RegexOption.IGNORE_CASE)
 
     private val MATH_FENCE_LANGUAGES = setOf("math", "latex", "tex", "katex")
     private val DISPLAY_MATH_ENVIRONMENTS = setOf(

@@ -70,6 +70,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.molagpt.app.core.model.Lorebook
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.PersonaProfile
+import com.molagpt.app.core.model.SystemPromptComposer
 import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.PersonaAvatar
 import com.molagpt.app.core.render.PersonaIcons
@@ -599,6 +600,14 @@ fun PersonaEditScreen(
                 val cur = prompt.orEmpty()
                 prompt = if (cur.isBlank()) token else cur.trimEnd() + " " + token
             })
+            if (SystemPromptComposer.breaksPrefixCache(prompt)) {
+                Text(
+                    text = SystemPromptComposer.PREFIX_CACHE_WARNING,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = cs.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
             // 人设与世界书默认不出现：普通助手角色用不到，摊开只会拉长页面。
             // 导入的卡自带 profile，直接展开；自建角色启用后同样是全套。
             Spacer(Modifier.height(10.dp))

@@ -13,6 +13,48 @@ object ByokMemoryScopes {
     const val GLOBAL = "global"
 }
 
+data class ByokMemoryTopic(
+    val id: String,
+    val scope: String = ByokMemoryScopes.GLOBAL,
+    val group: String,
+    val title: String,
+    val summary: String,
+    val createdAt: Long = 0L,
+    val updatedAt: Long = 0L,
+)
+
+object ByokMemoryTopics {
+    const val GROUP_PROFILE = "关于你"
+    const val GROUP_INTEREST = "兴趣与话题"
+    const val GROUP_PROJECT = "项目与领域"
+
+    val groups = listOf(GROUP_PROFILE, GROUP_INTEREST, GROUP_PROJECT)
+
+    val defaults = listOf(
+        ByokMemoryTopic("profile", group = GROUP_PROFILE, title = "个人背景", summary = "身份、生活背景与个人资料"),
+        ByokMemoryTopic("preferences", group = GROUP_PROFILE, title = "交流偏好", summary = "语言、表达习惯与协作方式"),
+        ByokMemoryTopic("projects", group = GROUP_PROJECT, title = "进行中的项目", summary = "正在推进的工作与长期目标"),
+        ByokMemoryTopic("recent", group = GROUP_INTEREST, title = "近期事项", summary = "近期有用的背景与安排"),
+    )
+
+    fun defaultId(section: MemorySection): String = when (section) {
+        MemorySection.IDENTITY -> "profile"
+        MemorySection.PREFERENCE, MemorySection.PROHIBITION -> "preferences"
+        MemorySection.PROJECT -> "projects"
+        MemorySection.CONTEXT -> "recent"
+    }
+
+    fun defaultSection(group: String): MemorySection = when (group) {
+        GROUP_PROJECT -> MemorySection.PROJECT
+        GROUP_INTEREST -> MemorySection.CONTEXT
+        else -> MemorySection.IDENTITY
+    }
+
+    fun topicId(entry: ByokMemoryEntry): String = entry.topicId ?: defaultId(entry.section)
+
+    fun isDefault(id: String): Boolean = defaults.any { it.id == id }
+}
+
 /** 条目是怎么进来的。决定排序优先级与「用户是否确认过」。 */
 enum class ByokMemoryOrigin(val wire: String) {
     /** 用户在记忆页手写。永不被自动学习覆盖。 */
@@ -58,6 +100,7 @@ data class ByokMemoryEntry(
     val section: MemorySection = MemorySection.CONTEXT,
     val category: InsightCategory? = null,
     val profileKey: ByokProfileKey? = null,
+    val topicId: String? = null,
     val confidence: Double = 0.6,
     /** null = 不衰减。 */
     val halfLifeDays: Double? = null,
@@ -124,6 +167,7 @@ data class ByokMemoryCandidate(
     val section: MemorySection = MemorySection.CONTEXT,
     val category: InsightCategory? = null,
     val profileKey: ByokProfileKey? = null,
+    val topicId: String? = null,
     val confidence: Double = 0.5,
     val sourceSessionId: String,
     val sourceMessageId: String,

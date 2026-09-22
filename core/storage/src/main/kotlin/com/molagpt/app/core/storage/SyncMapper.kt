@@ -552,9 +552,8 @@ object SyncMapper {
         var text = input
         text = stripHiddenContext(text)
         text = removeToolMarkup(text)
-        text = text.replace(Regex("""<ref\s+source=["']([^"']+)["']\s*/?>""", RegexOption.IGNORE_CASE)) {
-            "[${it.groupValues[1]}]"
-        }
+        // `<ref source="N" />` 原样留着：渲染层认得它并画成引用角标，降级成 `[N]` 纯文本
+        // 会让云端拉回来的历史跟本地流式出来的同一条消息长得不一样。
         text = text.replace(Regex("""</?fz[^>]*>""", RegexOption.IGNORE_CASE), "")
         text = text.replace(Regex("""<!--[\s\S]*?-->"""), "")
         return text.trim()

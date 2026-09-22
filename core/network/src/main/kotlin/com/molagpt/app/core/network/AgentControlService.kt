@@ -13,6 +13,14 @@ import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.RelaySessionMeta
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CompletableDeferred
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okhttp3.Response
+import java.io.File
+import java.security.MessageDigest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -49,8 +57,88 @@ class AgentControlService(
     private val jwtProvider: () -> String?,
     private val deviceIdProvider: () -> String? = { null },
     private val deviceNameProvider: () -> String? = { null },
+    private val pendingDirectory: () -> File? = { null },
 ) {
     private val base = MolaEndpoints.BASE_URL.trimEnd('/')
+    private val eventWake = Channel<Unit>(Channel.CONFLATED)
+    @Volatile private var realtimeConnected = false
+    fun wakeEvents() { eventWake.trySend(Unit) }
+
+    /** One foreground connection; durable HTTP cursors recover missed notices. */
+    fun realtimeUpdates(): Flow<String> = flow {
+        val notices = Channel<String>(Channel.CONFLATED)
+        while (true) {
+            var socket: WebSocket? = null
+            try {
+                val jwt = jwtProvider() ?: error("missing jwt")
+                val request = Request.Builder().url("$base/api/auth/agent_realtime.php")
+                    .header("Authorization", "Bearer $jwt").build()
+                val ticket = jsonHttp.newCall(request).execute().use { response ->
+                    check(response.isSuccessful)
+                    http.json.parseToJsonElement(response.body!!.string()).asObject()!!.string("ticket")!!
+                }
+                val closed = CompletableDeferred<Unit>()
+                socket = jsonHttp.newBuilder().pingInterval(20, java.util.concurrent.TimeUnit.SECONDS).build()
+                    .newWebSocket(Request.Builder().url(base.replaceFirst("https://", "wss://").replaceFirst("http://", "ws://") + "/agent-realtime")
+                        .header("Authorization", "Bearer $ticket").build(), object : WebSocketListener() {
+                        override fun onOpen(webSocket: WebSocket, response: Response) { realtimeConnected = true }
+                        override fun onMessage(webSocket: WebSocket, text: String) {
+                            val root = http.json.parseToJsonElement(text).asObject()!!
+                            val kind = root.string("kind").orEmpty()
+                            if (kind == "events" || kind == "connected") wakeEvents()
+                            if (kind == "sessions" || kind == "connected") notices.trySend(kind)
+                        }
+                        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { closed.complete(Unit) }
+                        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, reason); closed.complete(Unit) }
+                    })
+                while (!closed.isCompleted) {
+                    withTimeoutOrNull(1000) { notices.receive() }?.let { emit(it) }
+                }
+            } catch (c: CancellationException) { throw c }
+            catch (e: Exception) { Logger.w("AgentRelay", "realtime unavailable: ${e.message}") }
+            finally { realtimeConnected = false; socket?.cancel(); wakeEvents() }
+            delay(3000)
+        }
+    }.flowOn(dispatchers.io)
+
+    data class PendingSend(val commandId: String, val text: String, val machineId: String?)
+    private fun pendingFile(sessionId: String): File? = pendingDirectory()?.let { directory ->
+        val key = MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray()).joinToString("") { "%02x".format(it) }
+        File(directory, "$key.json")
+    }
+    suspend fun loadPendingSend(sessionId: String): PendingSend? = withContext(dispatchers.io) {
+        val file = pendingFile(sessionId) ?: return@withContext null
+        if (!file.exists()) return@withContext null
+        val root = http.json.parseToJsonElement(file.readText()).asObject()!!
+        PendingSend(root.string("commandId")!!, root.string("text")!!, root.string("machineId"))
+    }
+    suspend fun savePendingSend(sessionId: String, pending: PendingSend?) = withContext(dispatchers.io) {
+        val file = pendingFile(sessionId) ?: return@withContext
+        if (pending == null) { file.delete(); return@withContext }
+        file.parentFile!!.mkdirs()
+        val temporary = File(file.path + ".tmp")
+        temporary.outputStream().use { stream ->
+            stream.write(buildJsonObject {
+                put("commandId", pending.commandId); put("text", pending.text)
+                pending.machineId?.let { put("machineId", it) }
+            }.toString().toByteArray())
+            stream.fd.sync()
+        }
+        check(temporary.renameTo(file)) { "Cannot save pending agent message" }
+    }
+    suspend fun commandStatus(sessionId: String, cmdId: String): String? = withContext(dispatchers.io) {
+        val jwt = jwtProvider() ?: error("missing jwt")
+        val req = Request.Builder().url("$base/api/auth/agent_command.php?session=${URLEncoder.encode(sessionId, "UTF-8")}&cmdId=${URLEncoder.encode(cmdId, "UTF-8")}")
+            .header("Authorization", "Bearer $jwt").build()
+        jsonHttp.newCall(req).execute().use { response ->
+            check(response.isSuccessful) { "HTTP ${response.code}" }
+            http.json.parseToJsonElement(response.body!!.string()).asObject()!!.obj("command")?.string("status")
+        }
+    }
+    private suspend fun waitForEvents(timeoutMs: Long) {
+        withTimeoutOrNull(if (realtimeConnected) 30_000L else timeoutMs) { eventWake.receive() }
+    }
+
 
     /** Agent 的普通 JSON 调用专用客户端（共享连接池）。共享的 [MolaHttp.okHttp]
      *  为 SSE 把 read/call 超时都设成了 0——半开 socket 会让列表/历史/命令调用
@@ -125,9 +213,9 @@ class AgentControlService(
                 attempt = 0
                 if (fresh.isNotEmpty()) {
                     idleDelayMs = ACTIVE_POLL_IDLE_MS
-                    delay(ACTIVE_POLL_BUSY_MS)
+                    waitForEvents(ACTIVE_POLL_BUSY_MS)
                 } else {
-                    delay(idleDelayMs)
+                    waitForEvents(idleDelayMs)
                     idleDelayMs = (idleDelayMs + 1000L).coerceAtMost(MAX_POLL_IDLE_MS)
                 }
             } catch (c: CancellationException) {
@@ -206,7 +294,7 @@ class AgentControlService(
                 if (!resp.isSuccessful) {
                     Logger.w("AgentRelay", "command ${op.name} rejected: HTTP ${resp.code}")
                 }
-                resp.isSuccessful
+                resp.isSuccessful && http.json.parseToJsonElement(resp.body!!.string()).asObject()!!.bool("success") == true
             }
         }.getOrElse { ex ->
             Logger.w("AgentRelay", "command ${op.name} failed: ${ex.message}")
@@ -351,7 +439,7 @@ class AgentControlService(
         val k = kind("kind", "Kind")
         return when (k) {
             "historyReset" -> RelayEvent.HistoryReset
-            "userPrompt" -> RelayEvent.UserPrompt(text = string("text", "Text").orEmpty())
+            "userPrompt" -> RelayEvent.UserPrompt(text = string("text", "Text").orEmpty(), commandId = string("commandId"))
             "answerSnapshot" -> RelayEvent.AnswerSnapshot(
                 text = string("text", "Text").orEmpty(),
                 segmentId = string("segmentId", "segment_id", "SegmentId"),
@@ -399,6 +487,7 @@ class AgentControlService(
             ?: return null
         return RelaySessionMeta(
             conversationId = conversationId,
+            stateVersion = long("stateVersion") ?: 0L,
             backendId = string("backendId", "backend_id", "BackendId").orEmpty(),
             title = string("title", "Title").orEmpty(),
             workingDirectory = string("workingDirectory", "working_directory", "cwd", "WorkingDirectory").orEmpty(),

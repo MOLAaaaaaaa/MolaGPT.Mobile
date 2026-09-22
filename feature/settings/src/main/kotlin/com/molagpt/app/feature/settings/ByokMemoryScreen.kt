@@ -73,6 +73,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.ByokMemoryCandidate
 import com.molagpt.app.core.model.ByokMemoryEntry
 import com.molagpt.app.core.model.ByokMemoryOrigin
+import com.molagpt.app.core.model.ByokMemoryTopic
+import com.molagpt.app.core.model.ByokMemoryTopics
 import com.molagpt.app.core.model.ByokProfileKey
 import com.molagpt.app.core.model.ConfidenceTier
 import com.molagpt.app.core.model.MemorySection
@@ -94,7 +96,7 @@ fun ByokMemoryScreen(
     modifier: Modifier = Modifier,
 ) {
     val switches by viewModel.switches.collectAsStateWithLifecycle()
-    val sections by viewModel.entriesBySection.collectAsStateWithLifecycle()
+    val topicGroups by viewModel.topicGroups.collectAsStateWithLifecycle()
     val entries by viewModel.entries.collectAsStateWithLifecycle()
     val candidates by viewModel.candidates.collectAsStateWithLifecycle()
     val projection by viewModel.projection.collectAsStateWithLifecycle()
@@ -112,8 +114,12 @@ fun ByokMemoryScreen(
     val now = remember(entries) { System.currentTimeMillis() }
     var editing by remember { mutableStateOf<ByokMemoryEntry?>(null) }
     var adding by remember { mutableStateOf(false) }
+    var addingTopicId by remember { mutableStateOf<String?>(null) }
+    var editingTopic by remember { mutableStateOf<ByokMemoryTopic?>(null) }
+    var creatingTopic by remember { mutableStateOf(false) }
+    var deletingTopic by remember { mutableStateOf<ByokMemoryTopic?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
-    var entriesExpanded by rememberSaveable { mutableStateOf(false) }
+    var expandedTopicId by rememberSaveable { mutableStateOf<String?>(null) }
 
     ImeDismissBackHandler()
 
@@ -173,8 +179,8 @@ fun ByokMemoryScreen(
             }
 
             if (profile.isNotEmpty()) {
-                SectionHeader(title = "个人信息")
-                ProfileCard(fields = profile, onSetName = viewModel::setPreferredName)
+                SectionHeader(title = "个人资料")
+                ProfileCard(fields = profile, onSetField = viewModel::setProfileField)
             }
 
             if (candidates.isNotEmpty()) {
@@ -189,7 +195,16 @@ fun ByokMemoryScreen(
                 }
             }
 
-            SectionHeader(title = "记忆条目")
+            SectionHeader(
+                title = "记忆主题",
+                trailing = {
+                    TextButton(onClick = { creatingTopic = true }) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("添加主题")
+                    }
+                },
+            )
             BudgetCard(
                 budgetTokens = switches.budgetTokens,
                 onChange = viewModel::setBudgetTokens,
@@ -204,42 +219,34 @@ fun ByokMemoryScreen(
                 )
             }
 
-            if (sections.isEmpty()) {
+            if (entries.isEmpty()) {
                 EmptyMemory()
-            } else {
-                val visibleSections = if (entriesExpanded) {
-                    sections
-                } else {
-                    var budget = COLLAPSED_MEMORY_ENTRY_COUNT
-                    sections.mapNotNull { (section, list) ->
-                        if (budget <= 0) return@mapNotNull null
-                        val visible = list.take(budget)
-                        budget -= visible.size
-                        section to visible
-                    }
-                }
-                visibleSections.forEach { (section, list) ->
-                    SectionDivider(section.label, list.size)
-                    list.forEach { entry ->
-                        ByokMemoryEntryCard(
-                            entry = entry,
-                            now = now,
-                            onEdit = { editing = entry },
-                            onDelete = { viewModel.deleteEntry(entry.id) },
-                        )
-                    }
-                }
-                if (entries.size > COLLAPSED_MEMORY_ENTRY_COUNT) {
-                    TextButton(
-                        onClick = { entriesExpanded = !entriesExpanded },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(if (entriesExpanded) "收起记忆条目" else "查看全部 ${entries.size} 条记忆")
-                    }
+            }
+            topicGroups.forEach { group ->
+                SectionDivider(group.name, group.topics.size)
+                group.topics.forEach { row ->
+                    MemoryTopicCard(
+                        row = row,
+                        expanded = expandedTopicId == row.topic.id,
+                        now = now,
+                        onToggle = {
+                            expandedTopicId = if (expandedTopicId == row.topic.id) null else row.topic.id
+                        },
+                        onEditTopic = { editingTopic = row.topic },
+                        onAddEntry = {
+                            addingTopicId = row.topic.id
+                            adding = true
+                        },
+                        onEditEntry = { editing = it },
+                        onDeleteEntry = viewModel::deleteEntry,
+                    )
                 }
             }
 
-            AddMemoryRow(onClick = { adding = true })
+            AddMemoryRow(onClick = {
+                addingTopicId = null
+                adding = true
+            })
 
             ClearAllCard(onClearAll = { confirmClear = true })
 
@@ -254,7 +261,7 @@ fun ByokMemoryScreen(
             initialProfileKey = entry.profileKey,
             onDismiss = { editing = null },
             onSave = { text, section, key ->
-                viewModel.updateEntry(entry.id, text, section, key)
+                viewModel.updateEntry(entry.id, text, section, key, entry.topicId)
                 editing = null
             },
         )
@@ -263,13 +270,42 @@ fun ByokMemoryScreen(
     if (adding) {
         EditMemorySheet(
             initialText = "",
-            initialSection = MemorySection.IDENTITY,
+            initialSection = topicGroups.asSequence()
+                .flatMap { it.topics.asSequence() }
+                .firstOrNull { it.topic.id == addingTopicId }
+                ?.topic
+                ?.group
+                ?.let(ByokMemoryTopics::defaultSection)
+                ?: MemorySection.IDENTITY,
             initialProfileKey = null,
             onDismiss = { adding = false },
             onSave = { text, section, key ->
-                viewModel.addEntry(text, section, key)
+                viewModel.addEntry(text, section, key, addingTopicId)
                 adding = false
             },
+        )
+    }
+
+    if (creatingTopic || editingTopic != null) {
+        TopicEditSheet(
+            topic = editingTopic,
+            onDismiss = {
+                creatingTopic = false
+                editingTopic = null
+            },
+            onSave = { id, title, group, summary ->
+                viewModel.saveTopic(id, title, group, summary)
+                creatingTopic = false
+                editingTopic = null
+            },
+            onDelete = editingTopic
+                ?.takeUnless { ByokMemoryTopics.isDefault(it.id) }
+                ?.let { topic ->
+                    {
+                        deletingTopic = topic
+                        editingTopic = null
+                    }
+                },
         )
     }
 
@@ -284,6 +320,23 @@ fun ByokMemoryScreen(
                 }
             },
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("取消") } },
+        )
+    }
+
+    deletingTopic?.let { topic ->
+        AlertDialog(
+            onDismissRequest = { deletingTopic = null },
+            title = { Text("删除主题") },
+            text = { Text("“${topic.title}”及其中的记忆都将删除。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteTopic(topic.id)
+                    deletingTopic = null
+                }) {
+                    Text("删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { deletingTopic = null }) { Text("取消") } },
         )
     }
 }
@@ -543,9 +596,9 @@ private fun BudgetCard(budgetTokens: Int, onChange: (Int) -> Unit) {
 @Composable
 private fun ProfileCard(
     fields: List<ByokMemoryViewModel.ProfileField>,
-    onSetName: (String) -> Unit,
+    onSetField: (ByokProfileKey, String) -> Unit,
 ) {
-    var editingName by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<ByokMemoryViewModel.ProfileField?>(null) }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -559,7 +612,7 @@ private fun ProfileCard(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .then(if (field.editable) Modifier.clickable { editingName = true } else Modifier)
+                        .then(if (field.editable) Modifier.clickable { editing = field } else Modifier)
                         .padding(vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -583,15 +636,89 @@ private fun ProfileCard(
         }
     }
 
-    if (editingName) {
-        val current = fields.firstOrNull { it.editable }?.value.orEmpty()
+    editing?.let { field ->
+        val key = field.key ?: return@let
         SingleLineSheet(
-            title = "称呼",
-            initial = current,
-            placeholder = "例如：阿罗",
-            onDismiss = { editingName = false },
-            onSave = { onSetName(it); editingName = false },
+            title = field.label,
+            initial = field.value,
+            placeholder = when (key) {
+                ByokProfileKey.PREFERRED_NAME -> "例如：阿罗"
+                ByokProfileKey.OCCUPATION -> "例如：产品设计师"
+                ByokProfileKey.LOCATION -> "例如：杭州"
+            },
+            onDismiss = { editing = null },
+            onSave = { onSetField(key, it); editing = null },
         )
+    }
+}
+
+@Composable
+private fun MemoryTopicCard(
+    row: ByokMemoryViewModel.TopicRow,
+    expanded: Boolean,
+    now: Long,
+    onToggle: () -> Unit,
+    onEditTopic: () -> Unit,
+    onAddEntry: () -> Unit,
+    onEditEntry: (ByokMemoryEntry) -> Unit,
+    onDeleteEntry: (String) -> Unit,
+) {
+    val topic = row.topic
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(topic.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        topic.summary.ifBlank { "${row.entries.size} 条记忆" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                Text(
+                    "${row.entries.size} 条",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = onEditTopic) { Text("编辑") }
+                TextButton(onClick = onToggle) { Text(if (expanded) "收起" else "查看") }
+            }
+            if (expanded) {
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+                if (row.entries.isEmpty()) {
+                    Text(
+                        "暂无记忆",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                } else {
+                    row.entries.forEach { entry ->
+                        ByokMemoryEntryCard(
+                            entry = entry,
+                            now = now,
+                            onEdit = { onEditEntry(entry) },
+                            onDelete = { onDeleteEntry(entry.id) },
+                        )
+                    }
+                }
+                TextButton(onClick = onAddEntry, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("添加记忆")
+                }
+            }
+        }
     }
 }
 
@@ -757,6 +884,74 @@ private fun EditMemorySheet(
                 TextButton(onClick = onDismiss) { Text("取消") }
                 Spacer(Modifier.width(8.dp))
                 Button(onClick = { onSave(text, section, profileKey) }, enabled = text.isNotBlank()) { Text("保存") }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TopicEditSheet(
+    topic: ByokMemoryTopic?,
+    onDismiss: () -> Unit,
+    onSave: (String?, String, String, String) -> Unit,
+    onDelete: (() -> Unit)?,
+) {
+    var title by remember(topic?.id) { mutableStateOf(topic?.title.orEmpty()) }
+    var summary by remember(topic?.id) { mutableStateOf(topic?.summary.orEmpty()) }
+    var group by remember(topic?.id) { mutableStateOf(topic?.group ?: ByokMemoryTopics.groups.first()) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+        ) {
+            Text(
+                if (topic == null) "添加主题" else "编辑主题",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 12.dp),
+            )
+            Text("分组", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(bottom = 6.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ByokMemoryTopics.groups.forEach { option ->
+                    SelectPill(label = option, selected = group == option, onClick = { group = option })
+                }
+            }
+            OutlinedTextField(
+                value = title,
+                onValueChange = { title = it.take(60) },
+                label = { Text("主题名称") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+            )
+            OutlinedTextField(
+                value = summary,
+                onValueChange = { summary = it.take(240) },
+                label = { Text("摘要") },
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                supportingText = { Text("${summary.length}/240") },
+            )
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 20.dp)) {
+                onDelete?.let {
+                    TextButton(onClick = it) {
+                        Text("删除主题", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) { Text("取消") }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = { onSave(topic?.id, title, group, summary) },
+                    enabled = title.isNotBlank(),
+                ) {
+                    Text("保存")
+                }
             }
         }
     }

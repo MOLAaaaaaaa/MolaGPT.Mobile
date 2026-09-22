@@ -8,6 +8,17 @@ object SystemPromptComposer {
 
     private val PLACEHOLDER = Regex("""\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}""")
 
+    const val PREFIX_CACHE_WARNING =
+        "使用 {{time}} 或 {{datetime}} 会使前缀缓存每分钟失效，可能增加输入成本；仅需日期时请使用 {{date}}。"
+
+    fun breaksPrefixCache(template: String?): Boolean {
+        if (template.isNullOrEmpty() || !template.contains("{{")) return false
+        return PLACEHOLDER.findAll(template).any { match ->
+            val name = match.groupValues[1]
+            name.equals("time", ignoreCase = true) || name.equals("datetime", ignoreCase = true)
+        }
+    }
+
     /**
      * 替换 `{{var}}` 占位符。支持：date/time/datetime/model/model_id/provider/username。
      * 未识别的占位符原样保留（用户可能写了 JSON 样式的花括号文本）。

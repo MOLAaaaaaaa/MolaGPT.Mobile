@@ -52,9 +52,9 @@ class AgentTranscriptReducer {
         }
         if (env.seq > lastSeq) lastSeq = env.seq
         val ev = env.event
-        // 任何"智能体继续"的事件到达，意味着此前待决的权限请求已被处理（批准/拒绝/超时）——
-        // 把仍为 pending 的权限卡折叠掉。覆盖历史重放与他处批准（relay 不回"已解析"事件）。
-        val permFolded = if (ev !is RelayEvent.Unknown) resolveOpenPermissions() else false
+        // Streaming output and parallel permission requests do not confirm a choice.
+        val permFolded = if (ev is RelayEvent.TurnDone || ev is RelayEvent.TurnFailed || ev is RelayEvent.UserPrompt)
+            resolveOpenPermissions() else false
         val changed = when (ev) {
             is RelayEvent.UserPrompt -> {
                 if (optimisticUserText == ev.text) {
@@ -64,7 +64,7 @@ class AgentTranscriptReducer {
                     clearPending()
                     optimisticUserText = null
                     turnIndex++
-                    blocks.add(AgentBlock.User("$turnIndex-user", ev.text))
+                    blocks.add(AgentBlock.User("$turnIndex-user", ev.text, ev.commandId))
                     true
                 }
             }

@@ -175,6 +175,7 @@ class AppContainer(
     val modelApi = ModelApi(http, modelRegistry, shortTokenManager, authApi)
     private val molaModelLoadMutex = Mutex()
     val byokModelApi = ByokModelApi(http)
+    val modelsDevCatalog = com.molagpt.app.core.network.ModelsDevCatalog(http, java.io.File(context.cacheDir, "models-dev.json"))
     val byokImageApi = ByokImageApi(http)
     val mcpToolListApi = McpToolListApi(http)
 
@@ -358,6 +359,7 @@ class AppContainer(
         streamTaskDao = database.streamTaskDao(),
         dispatchers = dispatchers,
         postProcessor = responseTextProcessor,
+        pricingResolver = { providerId, modelId -> byokProviderRepository.get(providerId)?.models?.firstOrNull { it.id == modelId }?.pricing },
     )
 
     /** 云同步底层调用（会话同步 / 用户设置写入 update_setting）。 */
@@ -383,6 +385,12 @@ class AppContainer(
         jwtProvider = { credentialStore.jwt },
         deviceIdProvider = { agentDeviceId },
         deviceNameProvider = { agentDeviceName },
+        pendingDirectory = {
+            credentialStore.username?.let { user ->
+                val key = java.security.MessageDigest.getInstance("SHA-256").digest(user.toByteArray()).joinToString("") { "%02x".format(it) }
+                java.io.File(appContext.noBackupFilesDir, "agent-pending/$key")
+            }
+        },
     )
 
     /** 云同步引擎（个人中心“立即同步”、登录、每轮完成均触发）。 */
@@ -408,6 +416,7 @@ class AppContainer(
     val byokMemoryConsolidator = ByokMemoryConsolidator(
         chatRepository = chatRepository,
         sessionRepository = sessionRepository,
+        personaRepository = personaRepository,
         memoryRepository = byokMemoryRepository,
         analyzer = ByokMemoryAnalyzer(
             completeText = { providerId, modelId, prompt, maxTokens ->

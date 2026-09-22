@@ -19,6 +19,7 @@ import com.molagpt.app.core.model.ProviderModel
 data class ChatUiState(
     val sessionId: String,
     val title: String = "新对话",
+    val spend: com.molagpt.app.core.storage.ConversationSpend = com.molagpt.app.core.storage.ConversationSpend(),
     val messages: List<ChatMessage> = emptyList(),
     val models: List<ProviderModel> = emptyList(),
     /** 全量模型按阵营分组（MolaGPT 一组；每个 BYOK provider 一组），供选择器分组展示与跨阵营切换。 */

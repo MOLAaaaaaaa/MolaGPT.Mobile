@@ -12,8 +12,11 @@ sealed interface StreamEvent {
     /** 联网搜索状态/搜索词。 */
     data class Pending(val label: String, val detail: String? = null, val routes: Boolean = false) : StreamEvent
 
-    /** 引用来源。 */
-    data class Sources(val refs: List<SourceReference>) : StreamEvent
+    /**
+     * 引用来源。[query] 是这批来源搜的词，只有 BYOK 端给得出——自家后端的 `molagpt_sources`
+     * 不带搜索词，那条路上搜索词走 [Pending]。
+     */
+    data class Sources(val refs: List<SourceReference>, val query: String? = null) : StreamEvent
 
     /** 工具调用（运行中/成功/失败）。 */
     data class Tool(
@@ -34,6 +37,9 @@ sealed interface StreamEvent {
         val json: String,
         val metadataKey: String = ChatMessageMetadataKeys.OPENAI_WIRE_HISTORY,
     ) : StreamEvent
+
+    /** 当前请求或工具多轮的累计用量，不结束正文流。 */
+    data class UsageUpdate(val usage: Usage) : StreamEvent
 
     /** 正常结束。 */
     data class Finish(val reason: String? = null, val usage: Usage? = null) : StreamEvent

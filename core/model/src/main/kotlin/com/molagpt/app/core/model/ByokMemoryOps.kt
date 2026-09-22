@@ -11,6 +11,9 @@ data class ByokMemoryOp(
     val text: String? = null,
     val section: MemorySection? = null,
     val profileKey: ByokProfileKey? = null,
+    val topic: String? = null,
+    val group: String? = null,
+    val summary: String? = null,
     /** 用户逐字原话。缺失或对不上本轮用户消息的一律丢弃。 */
     val quote: String? = null,
     val confidence: Double = 0.0,
@@ -56,4 +59,11 @@ data class ByokMemoryDigestEntry(
     val id: String,
     val section: MemorySection,
     val text: String,
+)
+
+data class ByokMemoryTopicAssignment(
+    val title: String,
+    val group: String,
+    val summary: String,
+    val entryIds: List<String>,
 )

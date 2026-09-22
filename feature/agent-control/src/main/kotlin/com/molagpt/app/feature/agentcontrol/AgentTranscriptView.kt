@@ -1,42 +1,74 @@
 package com.molagpt.app.feature.agentcontrol
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.TextButton
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import kotlinx.coroutines.delay
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.AgentToolStatus
 import com.molagpt.app.core.model.ToolStatus
+import com.molagpt.app.core.render.MolaMotion
+import com.molagpt.app.core.render.PulsingDots
 import com.molagpt.app.core.render.StreamingMarkdownView
 import com.molagpt.app.core.render.ThinkingView
 import com.molagpt.app.core.render.ToolCallView
-import com.molagpt.app.core.render.PulsingDots
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 渲染折叠后的 transcript：复用 `:core:render` 的 [StreamingMarkdownView] / [ThinkingView] /
@@ -46,50 +78,164 @@ import com.molagpt.app.core.render.PulsingDots
 fun AgentTranscriptView(
     blocks: List<AgentBlock>,
     modifier: Modifier = Modifier,
+    pendingCommandId: String? = null,
+    pendingText: String? = null,
+    deliveryStatus: String? = null,
+    canRetrySend: Boolean = false,
+    onRetrySend: () -> Unit = {},
     onPermissionChoice: (permissionId: String, choice: String) -> Unit = { _, _ -> },
 ) {
     val listState = rememberLazyListState()
-    // 加载/新内容到达时落到**真正的底部**。scrollToItem(last) 只把最后一块的顶部对到视口顶部，
-    // 末块若很高（长回答/工具卡）其底部仍在屏外，所以用超大 offset 钳到最末；再重复几次，等
-    // markdown / 工具卡异步测量后撑高了也能稳稳停在底。
-    LaunchedEffect(blocks.size) {
-        if (blocks.isEmpty()) return@LaunchedEffect
+    val scope = rememberCoroutineScope()
+    val bottomThresholdPx = with(LocalDensity.current) { 32.dp.roundToPx() }
+    var autoFollow by remember { mutableStateOf(true) }
+    var userScrolling by remember { mutableStateOf(false) }
+
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { interaction ->
+            when (interaction) {
+                is DragInteraction.Start -> userScrolling = true
+                is DragInteraction.Stop, is DragInteraction.Cancel ->
+                    if (!listState.isScrollInProgress) userScrolling = false
+            }
+        }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.isAtBottom(bottomThresholdPx) }
+            .collect { (scrolling, atBottom) ->
+                if (!userScrolling) return@collect
+                autoFollow = atBottom
+                if (!scrolling) userScrolling = false
+            }
+    }
+
+    val pendingUser = pendingText?.let { text ->
+        blocks.asReversed().filterIsInstance<AgentBlock.User>().firstOrNull { block ->
+            if (pendingCommandId != null) block.commandId == pendingCommandId
+            else block.commandId == null && block.text == text
+        }
+    }
+    val appendPendingUser = pendingText != null && pendingUser == null
+    val contentVersion = transcriptContentVersion(blocks, pendingCommandId, pendingText, deliveryStatus)
+    val itemCount = blocks.size + if (appendPendingUser) 1 else 0
+
+    // Markdown 在后台解析后会再次长高；重复校准几帧，确保跟随时最后一行仍在视口内。
+    LaunchedEffect(contentVersion, autoFollow) {
+        if (!autoFollow || itemCount == 0) return@LaunchedEffect
         repeat(4) {
-            listState.scrollToItem(blocks.size - 1, Int.MAX_VALUE)
+            listState.scrollToBottom()
             delay(50)
         }
     }
-    LazyColumn(
-        modifier = modifier.fillMaxWidth(),
-        state = listState,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-    ) {
-        items(blocks, key = { it.key }) { block ->
-            Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-                when (block) {
-                    is AgentBlock.User -> UserBubble(block.text)
-                    is AgentBlock.AssistantText -> StreamingMarkdownView(markdown = block.text)
-                    is AgentBlock.Thinking -> ThinkingView(text = block.text)
-                    is AgentBlock.Pending -> PendingBlock()
-                    is AgentBlock.Tool ->
-                        if (isAgentTodoTool(block.name)) {
-                            AgentTodoCard(block.argumentsJson)
-                        } else {
-                            ToolCallView(
-                                name = block.name,
-                                status = block.status.toRenderStatus(),
-                                // Friendly title: "编辑 Foo.kt" / "读取 bar.cs" / "终端 · npm test".
-                                // Falls back to the desktop-provided title, then the raw name.
-                                label = agentToolLabel(block.name, block.argumentsJson) ?: block.title,
-                                resultPreview = block.resultPreview,
-                                argsJson = block.argumentsJson,
-                            )
+
+    val showJumpToBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            if (info.visibleItemsInfo.isEmpty()) return@derivedStateOf false
+            val viewport = (info.viewportEndOffset - info.viewportStartOffset).coerceAtLeast(1)
+            listState.distanceToBottomPx() > viewport / 3
+        }
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            state = listState,
+            contentPadding = PaddingValues(12.dp),
+            verticalArrangement = Arrangement.Top,
+        ) {
+            items(blocks, key = { it.key }) { block ->
+                Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                    when (block) {
+                        is AgentBlock.User -> UserMessageBlock(
+                            text = block.text,
+                            deliveryStatus = deliveryStatus.takeIf { block.key == pendingUser?.key },
+                            canRetrySend = canRetrySend && block.key == pendingUser?.key,
+                            onRetrySend = onRetrySend,
+                        )
+                        is AgentBlock.AssistantText -> AssistantTextBlock(block.text)
+                        is AgentBlock.Thinking -> SelectionContainer { ThinkingView(text = block.text) }
+                        is AgentBlock.Pending -> PendingBlock()
+                        is AgentBlock.Tool -> SelectionContainer {
+                            if (isAgentTodoTool(block.name)) {
+                                AgentTodoCard(block.argumentsJson)
+                            } else {
+                                ToolCallView(
+                                    name = block.name,
+                                    status = block.status.toRenderStatus(),
+                                    label = agentToolLabel(block.name, block.argumentsJson) ?: block.title,
+                                    resultPreview = block.resultPreview,
+                                    argsJson = block.argumentsJson,
+                                )
+                            }
                         }
-                    is AgentBlock.Permission -> PermissionCard(block, onPermissionChoice)
-                    is AgentBlock.Error -> ErrorBubble(block.message)
-                    is AgentBlock.Usage -> UsageBar(block)
+                        is AgentBlock.Permission -> PermissionCard(block, onPermissionChoice)
+                        is AgentBlock.Error -> ErrorBlock(block.message)
+                        is AgentBlock.Usage -> SelectionContainer { UsageBar(block) }
+                    }
                 }
             }
+            if (appendPendingUser) {
+                item(key = "pending-user-${pendingCommandId ?: pendingText.hashCode()}") {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+                        UserMessageBlock(
+                            text = checkNotNull(pendingText),
+                            deliveryStatus = deliveryStatus,
+                            canRetrySend = canRetrySend,
+                            onRetrySend = onRetrySend,
+                        )
+                    }
+                }
+            }
+        }
+        JumpToLatestButton(
+            visible = showJumpToBottom,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+            onClick = {
+                autoFollow = true
+                scope.launch { listState.scrollToBottom(animated = true) }
+            },
+        )
+    }
+}
+
+@Composable
+private fun AssistantTextBlock(text: String) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+        SelectionContainer { StreamingMarkdownView(markdown = text) }
+        CopyAction(text)
+    }
+}
+
+@Composable
+private fun UserMessageBlock(
+    text: String,
+    deliveryStatus: String?,
+    canRetrySend: Boolean,
+    onRetrySend: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        UserBubble(text)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            deliveryStatus?.let {
+                Text(
+                    it,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (canRetrySend) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.End,
+                )
+                if (canRetrySend) {
+                    TextAction("重试", onRetrySend)
+                }
+            }
+            CopyAction(text)
         }
     }
 }
@@ -107,29 +253,62 @@ private fun PendingBlock() {
 @Composable
 private fun UserBubble(text: String) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+        val bubbleShape = RoundedCornerShape(
+            topStart = 16.dp,
+            topEnd = 4.dp,
+            bottomEnd = 16.dp,
+            bottomStart = 16.dp,
+        )
         Box(
             Modifier
                 .widthIn(max = 320.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer)
+                .clip(bubbleShape)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+                .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.22f), bubbleShape)
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            Text(text, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onPrimaryContainer)
+            SelectionContainer {
+                Text(text, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
+            }
         }
     }
 }
 
 @Composable
-private fun ErrorBubble(message: String) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.errorContainer)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-    ) {
-        Text(message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onErrorContainer)
+private fun ErrorBlock(message: String) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.errorContainer)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+        ) {
+            SelectionContainer {
+                Text(message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onErrorContainer)
+            }
+        }
+        CopyAction(message)
     }
+}
+
+@Composable
+private fun CopyAction(text: String) {
+    val clipboard = LocalClipboardManager.current
+    TextAction("复制") { clipboard.setText(AnnotatedString(text)) }
+}
+
+@Composable
+private fun TextAction(label: String, onClick: () -> Unit) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    )
 }
 
 /**
@@ -175,7 +354,9 @@ private fun PermissionCard(
             color = MaterialTheme.colorScheme.onTertiaryContainer,
         )
         block.description?.takeIf { it.isNotBlank() }?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            SelectionContainer {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer)
+            }
         }
         // 决策依据：完整命令/参数。此前只显示 toolName + 描述，argumentsJson 到了手机
         // 却没渲染，等于让用户盲批。默认收起为 8 行，点击展开全文。
@@ -184,30 +365,47 @@ private fun PermissionCard(
         }
         if (detail != null) {
             var expanded by remember(block.permissionId) { mutableStateOf(false) }
-            Text(
-                detail,
-                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.92f),
-                maxLines = if (expanded) Int.MAX_VALUE else 8,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.45f))
-                    .clickable { expanded = !expanded }
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-            )
+            val expandable = detail.length > 480 || detail.count { it == '\n' } >= 8
+            SelectionContainer {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.92f),
+                    maxLines = if (expanded || !expandable) Int.MAX_VALUE else 8,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.45f))
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                )
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                if (expandable) {
+                    TextAction(if (expanded) "收起" else "展开") { expanded = !expanded }
+                }
+                CopyAction(detail)
+            }
         }
-        Row(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-            TextButton(onClick = { onPermissionChoice(block.permissionId, "Once") }) {
+        Row(
+            Modifier.fillMaxWidth().padding(top = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Button(
+                onClick = { onPermissionChoice(block.permissionId, "Once") },
+                modifier = Modifier.weight(1f),
+            ) {
                 Text("批准一次")
             }
-            Spacer(Modifier.width(4.dp))
-            TextButton(onClick = { onPermissionChoice(block.permissionId, "Always") }) {
+            FilledTonalButton(
+                onClick = { onPermissionChoice(block.permissionId, "Always") },
+                modifier = Modifier.weight(1f),
+            ) {
                 Text("本会话批准")
             }
-            Spacer(Modifier.width(4.dp))
+        }
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
             TextButton(onClick = { onPermissionChoice(block.permissionId, "Deny") }) {
                 Text("拒绝")
             }
@@ -230,7 +428,7 @@ private fun UsageBar(block: AgentBlock.Usage) {
         block.inputTokens != null || block.outputTokens != null -> buildString {
             append("Tokens: in=${block.inputTokens ?: "?"} out=${block.outputTokens ?: "?"}")
         }
-        else -> "Tokens: —"
+        else -> "Tokens: -"
     }
     Box(
         Modifier
@@ -251,4 +449,72 @@ private fun AgentToolStatus.toRenderStatus(): ToolStatus = when (this) {
     AgentToolStatus.Started, AgentToolStatus.Running -> ToolStatus.RUNNING
     AgentToolStatus.Completed -> ToolStatus.SUCCESS
     AgentToolStatus.Failed -> ToolStatus.FAILED
+}
+
+private fun transcriptContentVersion(
+    blocks: List<AgentBlock>,
+    pendingCommandId: String?,
+    pendingText: String?,
+    deliveryStatus: String?,
+): String = buildString {
+    append(blocks.size)
+    blocks.takeLast(3).forEach { block ->
+        append(':').append(block.key).append(':').append(block.hashCode())
+    }
+    append(':').append(pendingCommandId)
+    append(':').append(pendingText?.hashCode())
+    append(':').append(deliveryStatus)
+}
+
+@Composable
+private fun JumpToLatestButton(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = modifier,
+        enter = fadeIn(MolaMotion.standard()) + scaleIn(MolaMotion.emphasized(), initialScale = 0.8f),
+        exit = fadeOut(MolaMotion.standard()) + scaleOut(MolaMotion.standard(), targetScale = 0.8f),
+    ) {
+        Surface(
+            onClick = onClick,
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.28f)),
+            shadowElevation = 4.dp,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.KeyboardArrowDown,
+                contentDescription = "回到最新消息",
+                modifier = Modifier.padding(6.dp).size(22.dp),
+            )
+        }
+    }
+}
+
+private fun androidx.compose.foundation.lazy.LazyListState.isAtBottom(thresholdPx: Int): Boolean {
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return true
+    if (last.index < info.totalItemsCount - 1) return false
+    return last.offset + last.size <= info.viewportEndOffset + thresholdPx
+}
+
+private fun androidx.compose.foundation.lazy.LazyListState.distanceToBottomPx(): Int {
+    val info = layoutInfo
+    val last = info.visibleItemsInfo.lastOrNull() ?: return 0
+    if (last.index < info.totalItemsCount - 1) return Int.MAX_VALUE
+    return (last.offset + last.size - info.viewportEndOffset).coerceAtLeast(0)
+}
+
+private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToBottom(animated: Boolean = false) {
+    val lastIndex = (layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+    if (animated) animateScrollToItem(lastIndex) else scrollToItem(lastIndex)
+    val last = layoutInfo.visibleItemsInfo.lastOrNull { it.index == lastIndex } ?: return
+    val overshoot = last.offset + last.size - layoutInfo.viewportEndOffset
+    if (overshoot > 0) {
+        if (animated) animateScrollBy(overshoot.toFloat()) else scrollBy(overshoot.toFloat())
+    }
 }

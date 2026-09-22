@@ -15,4 +15,16 @@ data class RetryAttempt(
     val modelDisplayName: String? = null,
     /** [MessageStatus] 的 name；读回用 valueOf 容错(默认 COMPLETE)。 */
     val status: String = "COMPLETE",
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+    val cachedTokens: Int? = null,
+    val totalTokens: Int? = null,
+    val reasoningTokens: Int? = null,
+    val durationMs: Long? = null,
+    val ttftMs: Long? = null,
+    val costId: String? = null,
+    val costUsd: Double? = null,
+    val costModel: String? = null,
+    val pricingSource: String? = null,
+    val pricingMissing: Boolean = false,
 )

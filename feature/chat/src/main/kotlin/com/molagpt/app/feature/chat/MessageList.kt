@@ -55,13 +55,17 @@ import com.molagpt.app.core.model.MessageStats
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.Role
+import com.molagpt.app.core.model.SourceReference
 import com.molagpt.app.core.model.ToolStatus
 import com.molagpt.app.core.storage.EditSnapshots
+import com.molagpt.app.core.render.LocalCitationSources
+import com.molagpt.app.core.render.LocalFaviconRenderer
 import com.molagpt.app.core.render.LocalMarkdownImageRenderer
 import com.molagpt.app.core.render.MarkdownRenderScheduler
 import com.molagpt.app.core.render.MarkdownBlockView
 import com.molagpt.app.core.render.RenderCache
 import com.molagpt.app.core.storage.RetryAttempts
+import com.molagpt.app.feature.file.RemoteFavicon
 import com.molagpt.app.feature.file.RemoteImage
 import com.molagpt.app.feature.webview.MermaidWebView
 import kotlinx.coroutines.channels.Channel
@@ -70,6 +74,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun MessageList(
     messages: List<ChatMessage>,
+    spend: com.molagpt.app.core.storage.ConversationSpend? = null,
     modifier: Modifier = Modifier,
     onRegenerate: () -> Unit = {},
     onRegenerateWithModel: (String) -> Unit = {},
@@ -193,6 +198,9 @@ fun MessageList(
         LocalMarkdownImageRenderer provides { url, imgModifier ->
             RemoteImage(url, imgModifier)
         },
+        LocalFaviconRenderer provides { url, imgModifier ->
+            RemoteFavicon(url, imgModifier)
+        },
     ) {
         Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
@@ -213,32 +221,40 @@ fun MessageList(
                     is MessageListRow.User -> MessageBubble(message = row.message, modifier = rowModifier)
                     is MessageListRow.Pending -> AssistantPendingText(row.text, rowModifier)
                     is MessageListRow.ToolGroup -> ToolCallGroupRenderer(row.fragments, rowModifier)
-                    is MessageListRow.Fragment -> FragmentRenderer(
-                        fragment = row.fragment,
-                        modifier = rowModifier,
-                        streamingTail = row.streamingTail,
-                    )
-                    is MessageListRow.AssistantText -> SelectionContainer(modifier = rowModifier) {
-                        Column {
-                            row.blocks.forEachIndexed { index, block ->
-                                // 渐隐只加在最后一个 block 上：整段套会把每个段落的行尾都淡掉。
-                                val tail = row.streamingTail && index == row.blocks.lastIndex
-                                when (block) {
-                                    is MdBlock.Mermaid -> MermaidWebView(
-                                        block.source,
-                                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                    )
-                                    else -> MarkdownBlockView(
-                                        block = block,
-                                        modifier = Modifier.fillMaxWidth(),
-                                        tailFade = tail,
-                                    )
+                    is MessageListRow.Fragment -> CompositionLocalProvider(
+                        LocalCitationSources provides row.citationSources,
+                    ) {
+                        FragmentRenderer(
+                            fragment = row.fragment,
+                            modifier = rowModifier,
+                            streamingTail = row.streamingTail,
+                        )
+                    }
+                    is MessageListRow.AssistantText -> CompositionLocalProvider(
+                        LocalCitationSources provides row.citationSources,
+                    ) {
+                        SelectionContainer(modifier = rowModifier) {
+                            Column {
+                                row.blocks.forEachIndexed { index, block ->
+                                    // 渐隐只加在最后一个 block 上：整段套会把每个段落的行尾都淡掉。
+                                    val tail = row.streamingTail && index == row.blocks.lastIndex
+                                    when (block) {
+                                        is MdBlock.Mermaid -> MermaidWebView(
+                                            block.source,
+                                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                        )
+                                        else -> MarkdownBlockView(
+                                            block = block,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            tailFade = tail,
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                     is MessageListRow.StreamingPlaceholder -> AssistantStreamingPlaceholder(rowModifier)
-                    is MessageListRow.Stats -> MessageStatsRow(row.stats, rowModifier)
+                    is MessageListRow.Stats -> MessageStatsRow(row.stats, rowModifier, spend)
                     is MessageListRow.Actions -> Box(
                         modifier = rowModifier,
                         contentAlignment = if (row.alignEnd) Alignment.CenterEnd else Alignment.CenterStart,
@@ -358,7 +374,7 @@ private data class MessageRenderRequest(
     val canEditAssistant: Boolean,
 )
 
-private sealed interface MessageListRow {
+internal sealed interface MessageListRow {
     val key: String
     val topPaddingDp: Int
     val contentType: String
@@ -384,6 +400,8 @@ private sealed interface MessageListRow {
         val messageId: String,
         val fragment: MessageFragment,
         val streamingTail: Boolean,
+        /** 同条消息的联网来源，供正文里的引用角标解编号。 */
+        val citationSources: List<SourceReference> = emptyList(),
         override val topPaddingDp: Int,
     ) : MessageListRow {
         override val key = "$messageId:fragment:${fragment.id}"
@@ -407,6 +425,8 @@ private sealed interface MessageListRow {
         val blocks: List<MdBlock>,
         /** 是否是流式中消息的最后一个正文片段（尾部渐隐只作用于它）。 */
         val streamingTail: Boolean,
+        /** 同条消息的联网来源，供正文里的引用角标解编号。 */
+        val citationSources: List<SourceReference> = emptyList(),
         override val topPaddingDp: Int,
     ) : MessageListRow {
         override val key = "$messageId:text:$fragmentId"
@@ -469,7 +489,7 @@ private sealed interface MessageListRow {
     }
 }
 
-private fun List<ChatMessage>.toMessageRows(
+internal fun List<ChatMessage>.toMessageRows(
     parseMarkdown: Boolean,
     modelDisplayNameOf: (String) -> String,
     canEditUser: Boolean = true,
@@ -544,10 +564,18 @@ private fun List<ChatMessage>.toMessageRows(
         // 工具已经返回成功、但模型尚未开始下一步输出时，不另加「分析工具结果」提示；
         // 仅把当前最后一张成功工具卡在展示层继续保持为「进行中」。真实 fragment 状态不变。
         val heldToolId = message.heldToolProgressId()
+        // 来源列表整条消息共用：正文里的 <ref source="N" /> 要靠它把编号解成链接，
+        // 而它往往比正文晚到（后端在 [DONE] 前才发 molagpt_sources）。
+        val searchResults = message.fragments.filterIsInstance<MessageFragment.SearchResult>()
+        val citationSources = searchResults.flatMap { it.refs }
+        // 来源片段不按到达位置渲染，一律挪到消息末尾。它是整条回答的汇总，不是发生在某个
+        // 时刻的事件——BYOK 自带搜索一搜完就发来源，照原位画会夹在两张搜索卡中间，还会把
+        // 「连续搜索合成一张卡」的判定切断（那个判定看的是相邻片段）。
+        val bodyFragments = message.fragments.filter { it !is MessageFragment.SearchResult }
         var fragmentIndex = 0
-        while (fragmentIndex < message.fragments.size) {
-            val fragment = message.fragments[fragmentIndex]
-            val searchTools = consecutiveWebSearchTools(message.fragments, fragmentIndex)
+        while (fragmentIndex < bodyFragments.size) {
+            val fragment = bodyFragments[fragmentIndex]
+            val searchTools = consecutiveWebSearchTools(bodyFragments, fragmentIndex)
             if (searchTools.isNotEmpty()) {
                 val displayTools = searchTools.map { tool ->
                     if (tool.id == heldToolId) tool.copy(status = ToolStatus.RUNNING) else tool
@@ -569,6 +597,7 @@ private fun List<ChatMessage>.toMessageRows(
                         fragmentId = fragment.id,
                         blocks = blocks,
                         streamingTail = streamingTail,
+                        citationSources = citationSources,
                         topPaddingDp = top,
                     )
                 }
@@ -583,11 +612,38 @@ private fun List<ChatMessage>.toMessageRows(
                         messageId = message.messageId,
                         fragment = displayFragment,
                         streamingTail = streamingTail,
+                        citationSources = citationSources,
                         topPaddingDp = top,
                     )
                 }
             }
             fragmentIndex += 1
+        }
+
+        // 来源胶囊要等这条回答写完才出现。BYOK 一搜完就把来源发下来，此时正文还在往下长，
+        // 提前画出来就成了「正文中间插了一条汇总」，还会在后续搜索里跳着改数字。等写完再画，
+        // 它和底下的统计行、操作栏是同一批出现的收尾信息。正文里的 <ref> 角标不受影响——
+        // 那条通道靠 citationSources 解编号，来源一到就能点开。
+        val sourcesSettled = message.status != MessageStatus.STREAMING &&
+            message.status != MessageStatus.PENDING
+        if (sourcesSettled && searchResults.isNotEmpty() && citationSources.isNotEmpty()) {
+            // 多个来源片段合成一枚胶囊。同一条消息里通常只有一个（SetSources 是就地更新），
+            // 合并只是为了两条链路真出现两个时不画成两枚。
+            val merged = searchResults.first().copy(
+                query = searchResults.mapNotNull { it.query.takeIf(String::isNotBlank) }
+                    .distinct()
+                    .joinToString(" / "),
+                refs = citationSources,
+            )
+            addMessageRow { top ->
+                MessageListRow.Fragment(
+                    messageId = message.messageId,
+                    fragment = merged,
+                    streamingTail = false,
+                    citationSources = citationSources,
+                    topPaddingDp = top,
+                )
+            }
         }
 
         if (message.status == MessageStatus.STREAMING && message.fragments.isEmpty()) {
@@ -642,9 +698,13 @@ private fun List<ChatMessage>.toMessageRows(
     return rows
 }
 
+/**
+ * 渐隐只给「正在写的那一段」。末尾的来源片段不算——它渲染时被挪到了最后，而且它从来不是
+ * 正在写的东西；拿它当末尾会让真正在写的正文失去渐隐。
+ */
 internal fun ChatMessage.isStreamingTail(fragment: MessageFragment): Boolean =
     status == MessageStatus.STREAMING &&
-        fragment.id == fragments.lastOrNull()?.id &&
+        fragment.id == fragments.lastOrNull { it !is MessageFragment.SearchResult }?.id &&
         (fragment is MessageFragment.Text || fragment is MessageFragment.Thinking)
 
 /**

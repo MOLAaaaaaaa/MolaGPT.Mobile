@@ -4,6 +4,8 @@ import com.molagpt.app.core.storage.entity.MessageEntity
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
@@ -147,14 +149,33 @@ object EditSnapshots {
     }
 
     /** 会话消息 → 快照用的时间线（去掉 system；内层不再嵌套快照，避免指数膨胀）。 */
-    fun timelineOf(messages: List<MessageEntity>): JsonArray = buildJsonArray {
+    fun timelineOf(messages: List<MessageEntity>, includeLocalStats: Boolean = false): JsonArray = buildJsonArray {
         messages.asSequence()
             .filterNot { it.role.equals(com.molagpt.app.core.model.Role.SYSTEM.name, ignoreCase = true) }
-            .forEach { add(SyncMapper.messageToJson(it, includeSnapshots = false)) }
+            .forEach { message ->
+                val local = if (!includeLocalStats) emptyMap() else MessageJson.decodeMeta(message.metadataJson).filterKeys {
+                    it in RetryAttempts.statsKeys || it == RetryAttempts.KEY_ATTEMPTS || it == RetryAttempts.KEY_CURRENT
+                }
+                add(JsonObject(SyncMapper.messageToJson(message, includeSnapshots = false) +
+                    (if (local.isEmpty()) emptyMap() else mapOf("localStats" to JsonObject(local.mapValues { JsonPrimitive(it.value) })))))
+            }
     }
 
     /** 快照时间线 → 可落库的消息实体（id 由时间戳+序号确定性生成）。 */
     fun messagesOf(sessionId: String, timeline: JsonArray): List<MessageEntity> =
         timeline.filterIsInstance<JsonObject>()
-            .mapIndexed { i, obj -> SyncMapper.jsonToMessage(sessionId, obj, i) }
+            .mapIndexed { i, obj ->
+                val message = SyncMapper.jsonToMessage(sessionId, obj, i)
+                val local = (obj["localStats"] as? JsonObject)?.mapNotNull { (key, value) ->
+                    (value as? JsonPrimitive)?.contentOrNull?.let { key to it }
+                }?.toMap().orEmpty()
+                message.copy(metadataJson = MessageJson.encodeMeta(MessageJson.decodeMeta(message.metadataJson) + local))
+            }
+
+    fun archivedMessages(sessionId: String, raw: String?): List<com.molagpt.app.core.model.ChatMessage> {
+        val obj = decode(raw) ?: return emptyList()
+        val timelines = snapshotsOf(obj).mapNotNull { it[F_HISTORY] as? JsonArray } +
+            listOfNotNull(obj[F_CURRENT_VERSION] as? JsonArray)
+        return timelines.flatMap { messagesOf(sessionId, it) }.map { it.toDomain() }
+    }
 }

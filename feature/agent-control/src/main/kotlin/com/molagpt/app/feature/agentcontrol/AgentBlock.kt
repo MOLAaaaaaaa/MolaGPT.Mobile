@@ -9,7 +9,11 @@ import com.molagpt.app.core.model.AgentToolStatus
 sealed interface AgentBlock {
     val key: String
 
-    data class User(override val key: String, val text: String) : AgentBlock
+    data class User(
+        override val key: String,
+        val text: String,
+        val commandId: String? = null,
+    ) : AgentBlock
     data class AssistantText(override val key: String, val text: String) : AgentBlock
     data class Thinking(override val key: String, val text: String) : AgentBlock
     data class Pending(override val key: String, val text: String) : AgentBlock

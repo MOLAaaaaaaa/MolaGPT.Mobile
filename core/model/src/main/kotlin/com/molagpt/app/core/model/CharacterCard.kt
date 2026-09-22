@@ -32,6 +32,8 @@ data class PersonaProfile(
     val scenario: String = "",
     /** 用户在这段关系里的称呼与身份（卡片里的 `{{user}}` / persona）。 */
     val userName: String = "",
+    /** 仅沿用本地个人资料中的称呼，不把长期记忆带入角色扮演。 */
+    val useProfileName: Boolean = false,
     val userDescription: String = "",
     val greeting: String = "",
     val alternateGreetings: List<String> = emptyList(),
@@ -69,7 +71,7 @@ data class PersonaProfile(
     @Transient
     val defaultMode: ConversationMode = mode ?: if (
         description.isNotBlank() || personality.isNotBlank() || scenario.isNotBlank() ||
-        userName.isNotBlank() || userDescription.isNotBlank() || greeting.isNotBlank() ||
+        userName.isNotBlank() || useProfileName || userDescription.isNotBlank() || greeting.isNotBlank() ||
         exampleDialogue.isNotBlank() || postHistoryInstructions.isNotBlank() ||
         alternateGreetings.isNotEmpty() || lorebooks.isNotEmpty()
     ) {
@@ -85,7 +87,7 @@ data class PersonaProfile(
      * 两者并不等价——只引用了共享世界书、或只写了角色补充的角色，形态上仍是助手，但必须参与组装。
      */
     val isEmpty: Boolean get() = description.isBlank() && personality.isBlank() && scenario.isBlank() &&
-        nickname.isBlank() && userName.isBlank() && userDescription.isBlank() &&
+        nickname.isBlank() && userName.isBlank() && !useProfileName && userDescription.isBlank() &&
         greeting.isBlank() && alternateGreetings.isEmpty() && exampleDialogue.isBlank() &&
         postHistoryInstructions.isBlank() && characterNote.isBlank() &&
         lorebooks.isEmpty() && sharedLorebookIds.isEmpty()

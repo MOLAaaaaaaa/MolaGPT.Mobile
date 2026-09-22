@@ -239,6 +239,7 @@ fun SegmentedControl(
     selected: String,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     if (options.isEmpty()) return
     val count = options.size
@@ -259,7 +260,10 @@ fun SegmentedControl(
                 .fillMaxHeight()
                 .padding(3.dp)
                 .clip(shape)
-                .background(MaterialTheme.colorScheme.primary),
+                .background(
+                    if (enabled) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
+                ),
         )
         Row(modifier = Modifier.fillMaxSize()) {
             options.forEach { (value, label) ->
@@ -269,12 +273,16 @@ fun SegmentedControl(
                         .weight(1f)
                         .fillMaxHeight()
                         .clip(shape)
-                        .clickable { onSelect(value) },
+                        .clickable(enabled = enabled) { onSelect(value) },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = label,
-                        color = if (sel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = when {
+                            !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.48f)
+                            sel -> MaterialTheme.colorScheme.onPrimary
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Medium,
                     )

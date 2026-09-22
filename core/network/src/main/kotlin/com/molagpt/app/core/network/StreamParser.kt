@@ -197,15 +197,16 @@ class StreamParser(
             ?: (root["sources"] as? JsonArray)
             ?: (root["citations"] as? JsonArray)
             ?: return null
-        return arr.mapNotNull { el ->
-            val o = el as? JsonObject ?: return@mapNotNull null
-            val url = o["url"]?.prim()?.contentOrNull ?: return@mapNotNull null
+        return arr.mapIndexedNotNull { position, el ->
+            val o = el as? JsonObject ?: return@mapIndexedNotNull null
+            val url = o["url"]?.prim()?.contentOrNull ?: return@mapIndexedNotNull null
             SourceReference(
                 title = o["title"]?.prim()?.contentOrNull ?: url,
                 url = url,
                 snippet = o["snippet"]?.prim()?.contentOrNull ?: o["content"]?.prim()?.contentOrNull,
-                // 来源序号兼容 index 与 id。
-                index = o["index"]?.prim()?.intOrNull ?: o["id"]?.prim()?.intOrNull,
+                // 来源序号兼容 index 与 id；都没有就按下发顺序补，正文里的 <ref source="N" />
+                // 角标要靠它才解得到链接。
+                index = o["index"]?.prim()?.intOrNull ?: o["id"]?.prim()?.intOrNull ?: (position + 1),
             )
         }
     }
@@ -264,5 +265,22 @@ internal fun Usage?.accumulate(next: Usage?): Usage? {
         totalTokens = add(totalTokens, next.totalTokens),
         reasoningTokens = add(reasoningTokens, next.reasoningTokens),
         cachedTokens = add(cachedTokens, next.cachedTokens),
+        cacheWriteTokens = add(cacheWriteTokens, next.cacheWriteTokens),
+        costComplete = costComplete && next.costComplete && promptTokens != null && completionTokens != null &&
+            next.promptTokens != null && next.completionTokens != null,
     )
+}
+
+internal fun parseAnthropicUsage(root: JsonObject): Usage? {
+    val u = root["usage"] as? JsonObject ?: return null
+    fun int(key: String) = (u[key] as? JsonPrimitive)?.intOrNull
+    val input = int("input_tokens")
+    val read = int("cache_read_input_tokens")
+    val write = int("cache_creation_input_tokens")
+    val output = int("output_tokens")
+    if (input == null && output == null) return null
+    val prompt = input?.let { it + (read ?: 0) + (write ?: 0) }
+    return Usage(promptTokens = prompt, completionTokens = output,
+        totalTokens = if (prompt != null && output != null) prompt + output else null,
+        cachedTokens = read, cacheWriteTokens = write)
 }

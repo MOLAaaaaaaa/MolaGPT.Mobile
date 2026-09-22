@@ -43,6 +43,7 @@ object ViewModelFactories {
             accountStatus = container.accountStatusCache,
             byokProviders = container.byokProviderRepository,
             byokModelApi = container.byokModelApi,
+            modelsDevCatalog = container.modelsDevCatalog,
             byokImageApi = container.byokImageApi,
             mcpToolListApi = container.mcpToolListApi,
             credentialStore = container.credentialStore,

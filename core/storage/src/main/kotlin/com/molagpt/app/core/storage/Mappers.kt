@@ -7,6 +7,7 @@ import com.molagpt.app.core.model.ByokMemoryCandidate
 import com.molagpt.app.core.model.ByokMemoryEntry
 import com.molagpt.app.core.model.ByokMemoryEvidence
 import com.molagpt.app.core.model.ByokMemoryOrigin
+import com.molagpt.app.core.model.ByokMemoryTopic
 import com.molagpt.app.core.model.ByokProfileKey
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
@@ -21,9 +22,11 @@ import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.Role
+import com.molagpt.app.core.model.normalizeMemoryKey
 import com.molagpt.app.core.storage.entity.ByokMemoryCandidateEntity
 import com.molagpt.app.core.storage.entity.ByokMemoryEntryEntity
 import com.molagpt.app.core.storage.entity.ByokMemoryEvidenceEntity
+import com.molagpt.app.core.storage.entity.ByokMemoryTopicEntity
 import com.molagpt.app.core.storage.entity.ByokProviderEntity
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
@@ -155,6 +158,7 @@ internal fun ByokMemoryEntryEntity.toDomain(
     section = MemorySection.fromWire(section),
     category = InsightCategory.fromWire(category),
     profileKey = ByokProfileKey.fromWire(profileKey),
+    topicId = topicId,
     confidence = confidence,
     halfLifeDays = halfLifeDays,
     expiresAt = expiresAt,
@@ -176,6 +180,7 @@ internal fun ByokMemoryEntry.toEntity(): ByokMemoryEntryEntity = ByokMemoryEntry
     section = section.wire,
     category = category?.wire,
     profileKey = profileKey?.wire,
+    topicId = topicId,
     confidence = confidence,
     halfLifeDays = halfLifeDays,
     expiresAt = expiresAt,
@@ -204,6 +209,7 @@ internal fun ByokMemoryCandidateEntity.toDomain(): ByokMemoryCandidate = ByokMem
     section = MemorySection.fromWire(section),
     category = InsightCategory.fromWire(category),
     profileKey = ByokProfileKey.fromWire(profileKey),
+    topicId = topicId,
     confidence = confidence,
     sourceSessionId = sourceSessionId,
     sourceMessageId = sourceMessageId,
@@ -219,11 +225,33 @@ internal fun ByokMemoryCandidate.toEntity(): ByokMemoryCandidateEntity = ByokMem
     section = section.wire,
     category = category?.wire,
     profileKey = profileKey?.wire,
+    topicId = topicId,
     confidence = confidence,
     sourceSessionId = sourceSessionId,
     sourceMessageId = sourceMessageId,
     quote = quote,
     createdAt = createdAt,
+)
+
+internal fun ByokMemoryTopicEntity.toDomain(): ByokMemoryTopic = ByokMemoryTopic(
+    id = id,
+    scope = scope,
+    group = groupName,
+    title = title,
+    summary = summary,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
+)
+
+internal fun ByokMemoryTopic.toEntity(): ByokMemoryTopicEntity = ByokMemoryTopicEntity(
+    id = id,
+    scope = scope,
+    normalizedKey = normalizeMemoryKey(title),
+    groupName = group,
+    title = title,
+    summary = summary,
+    createdAt = createdAt,
+    updatedAt = updatedAt,
 )
 
 internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvider {

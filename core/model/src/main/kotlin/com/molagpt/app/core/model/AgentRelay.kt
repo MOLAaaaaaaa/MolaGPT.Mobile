@@ -14,6 +14,7 @@ import kotlinx.serialization.Serializable
 /** 一个 agent 会话的元信息（`GET agent_sessions.php` 列表项；也由 meta 事件推送）。 */
 @Serializable
 data class RelaySessionMeta(
+    val stateVersion: Long = 0L,
     val conversationId: String,
     val backendId: String = "",
     val title: String = "",
@@ -206,7 +207,7 @@ val RelayMachine.displayName: String
  */
 sealed interface RelayEvent {
     /** 本回合用户输入（乐观本地回显）。 */
-    data class UserPrompt(val text: String) : RelayEvent
+    data class UserPrompt(val text: String, val commandId: String? = null) : RelayEvent
 
     /** 工具调用进展（运行中/成功/失败）。 */
     data class ToolProgress(

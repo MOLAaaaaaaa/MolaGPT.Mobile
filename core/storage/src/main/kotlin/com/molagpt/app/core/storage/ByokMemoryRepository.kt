@@ -7,6 +7,8 @@ import com.molagpt.app.core.model.ByokMemoryEvidence
 import com.molagpt.app.core.model.ByokMemoryOrigin
 import com.molagpt.app.core.model.ByokMemoryProjection
 import com.molagpt.app.core.model.ByokMemoryScopes
+import com.molagpt.app.core.model.ByokMemoryTopic
+import com.molagpt.app.core.model.ByokMemoryTopics
 import com.molagpt.app.core.model.ByokProfileKey
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.InsightCategory
@@ -46,8 +48,18 @@ class ByokMemoryRepository(
     fun observeCandidates(): Flow<List<ByokMemoryCandidate>> =
         dao.observeCandidates(scope).map { rows -> rows.map { it.toDomain() } }
 
+    fun observeTopics(): Flow<List<ByokMemoryTopic>> =
+        dao.observeTopics(scope).map { rows -> mergeTopics(rows.map { it.toDomain() }) }
+
     suspend fun entries(): List<ByokMemoryEntry> =
         withContext(dispatchers.io) { dao.entries(scope).map { it.toDomain() } }
+
+    suspend fun topics(): List<ByokMemoryTopic> =
+        withContext(dispatchers.io) { mergeTopics(dao.topics(scope).map { it.toDomain() }) }
+
+    suspend fun profileValue(key: ByokProfileKey): String? = withContext(dispatchers.io) {
+        dao.entryByProfileKey(scope, key.wire)?.text?.trim()?.takeIf { it.isNotEmpty() }
+    }
 
     suspend fun evidenceFor(entryId: String, limit: Int = MAX_EVIDENCE_SHOWN): List<ByokMemoryEvidence> =
         withContext(dispatchers.io) { dao.evidenceFor(entryId, limit).map { it.toDomain() } }
@@ -83,6 +95,7 @@ class ByokMemoryRepository(
         text: String,
         section: MemorySection,
         profileKey: ByokProfileKey? = null,
+        topicId: String? = null,
     ): ByokMemoryEntry? = withContext(dispatchers.io) {
         val clean = text.trim().take(ByokMemoryEntry.MAX_TEXT_CHARS)
         if (clean.isEmpty()) return@withContext null
@@ -102,6 +115,7 @@ class ByokMemoryRepository(
             section = section,
             category = existing?.category?.let { InsightCategory.fromWire(it) },
             profileKey = profileKey,
+            topicId = topicId ?: existing?.topicId ?: ByokMemoryTopics.defaultId(section),
             confidence = ByokMemoryEntry.MAX_CONFIDENCE,
             halfLifeDays = null,
             expiresAt = null,
@@ -129,6 +143,7 @@ class ByokMemoryRepository(
         text: String,
         section: MemorySection,
         profileKey: ByokProfileKey?,
+        topicId: String?,
     ): Boolean = withContext(dispatchers.io) {
         val current = dao.entry(id) ?: return@withContext false
         val clean = text.trim().take(ByokMemoryEntry.MAX_TEXT_CHARS)
@@ -143,6 +158,7 @@ class ByokMemoryRepository(
                 normalizedKey = key,
                 section = section.wire,
                 profileKey = profileKey?.wire,
+                topicId = topicId,
                 updatedAt = System.currentTimeMillis(),
             ),
             replacedIds = listOfNotNull(keyCollision?.id, profileCollision?.id),
@@ -188,6 +204,7 @@ class ByokMemoryRepository(
             section = candidate.section,
             category = candidate.category,
             profileKey = candidate.profileKey,
+            topicId = candidate.topicId,
             // 用户确认过，可信度等同手动写入：`permanent = true` 已经保证不衰减、排序置顶。
             // 但来源仍标 CONFIRMED 而不是 MANUAL——这条是模型提取、用户点头，
             // 标成「手动添加」等于告诉用户这句话是他自己写的。
@@ -257,6 +274,7 @@ class ByokMemoryRepository(
         text: String,
         section: MemorySection,
         profileKey: ByokProfileKey?,
+        topicId: String?,
         sessionId: String,
         messageId: String,
         quote: String,
@@ -281,8 +299,15 @@ class ByokMemoryRepository(
         val replacements = (replaceEntryIds + listOfNotNull(profileExisting?.id)).toList()
         val existing = dao.entryByKey(scope, key)
         if (existing != null) {
-            val reclassified = if (profileKey != null && existing.profileKey != profileKey.wire) {
-                existing.copy(section = section.wire, profileKey = profileKey.wire)
+            val reclassified = if (
+                (profileKey != null && existing.profileKey != profileKey.wire) ||
+                (topicId != null && existing.topicId != topicId)
+            ) {
+                existing.copy(
+                    section = section.wire,
+                    profileKey = profileKey?.wire ?: existing.profileKey,
+                    topicId = topicId ?: existing.topicId,
+                )
             } else {
                 null
             }
@@ -313,6 +338,7 @@ class ByokMemoryRepository(
             normalizedKey = key,
             section = section,
             profileKey = profileKey,
+            topicId = topicId,
             confidence = confidence.coerceIn(0.0, ByokMemoryEntry.MAX_CONFIDENCE),
             halfLifeDays = section.defaultHalfLifeDays(),
             permanent = false,
@@ -343,6 +369,7 @@ class ByokMemoryRepository(
         text: String,
         section: MemorySection,
         profileKey: ByokProfileKey?,
+        topicId: String?,
         sessionId: String,
         messageId: String,
         quote: String,
@@ -363,6 +390,7 @@ class ByokMemoryRepository(
             normalizedKey = key,
             section = section,
             profileKey = profileKey,
+            topicId = topicId,
             confidence = confidence.coerceIn(0.0, 1.0),
             sourceSessionId = sessionId,
             sourceMessageId = messageId,
@@ -371,6 +399,79 @@ class ByokMemoryRepository(
         )
         dao.upsertCandidate(candidate.toEntity())
         candidate
+    }
+
+    suspend fun saveTopic(
+        id: String?,
+        title: String,
+        group: String,
+        summary: String,
+    ): ByokMemoryTopic? = withContext(dispatchers.io) {
+        val cleanTitle = title.trim()
+        val cleanSummary = summary.trim()
+        if (cleanTitle.isEmpty() || cleanTitle.length > 60 || cleanSummary.length > 240) return@withContext null
+        if (group !in ByokMemoryTopics.groups) return@withContext null
+        val key = normalizeMemoryKey(cleanTitle)
+        if (key.isEmpty()) return@withContext null
+        val matchingDefault = ByokMemoryTopics.defaults.firstOrNull { normalizeMemoryKey(it.title) == key }
+        if (id == null && matchingDefault != null) return@withContext null
+        if (matchingDefault != null && id != null && matchingDefault.id != id) return@withContext null
+        val existingByKey = dao.topicByKey(scope, key)?.toDomain()
+        if (id == null && existingByKey != null) return@withContext null
+        if (existingByKey != null && id != null && existingByKey.id != id) return@withContext null
+        val now = System.currentTimeMillis()
+        val existing = id?.let { dao.topic(it)?.toDomain() }
+        val topic = ByokMemoryTopic(
+            id = existing?.id ?: id ?: existingByKey?.id ?: matchingDefault?.id ?: Ids.newMemoryTopicId(),
+            scope = scope,
+            group = group,
+            title = cleanTitle,
+            summary = cleanSummary,
+            createdAt = existing?.createdAt ?: existingByKey?.createdAt ?: now,
+            updatedAt = now,
+        )
+        dao.upsertTopic(topic.toEntity())
+        topic
+    }
+
+    suspend fun resolveTopic(
+        section: MemorySection,
+        title: String?,
+        group: String?,
+        summary: String?,
+    ): ByokMemoryTopic = withContext(dispatchers.io) {
+        val cleanTitle = title?.trim()?.take(60).orEmpty()
+        if (cleanTitle.isEmpty()) {
+            return@withContext mergeTopics(dao.topics(scope).map { it.toDomain() })
+                .first { it.id == ByokMemoryTopics.defaultId(section) }
+        }
+        val key = normalizeMemoryKey(cleanTitle)
+        dao.topicByKey(scope, key)?.toDomain()?.let { return@withContext it }
+        ByokMemoryTopics.defaults.firstOrNull { normalizeMemoryKey(it.title) == key }?.let { return@withContext it }
+        val validGroup = group?.takeIf { it in ByokMemoryTopics.groups }
+            ?: ByokMemoryTopics.defaults.first { it.id == ByokMemoryTopics.defaultId(section) }.group
+        val now = System.currentTimeMillis()
+        val topic = ByokMemoryTopic(
+            id = Ids.newMemoryTopicId(),
+            scope = scope,
+            group = validGroup,
+            title = cleanTitle,
+            summary = summary?.trim()?.take(240).orEmpty(),
+            createdAt = now,
+            updatedAt = now,
+        )
+        dao.upsertTopic(topic.toEntity())
+        topic
+    }
+
+    suspend fun assignTopic(entryIds: List<String>, topicId: String) = withContext(dispatchers.io) {
+        if (entryIds.isNotEmpty()) dao.assignTopic(entryIds.distinct(), topicId, System.currentTimeMillis())
+    }
+
+    suspend fun deleteTopic(id: String): Boolean = withContext(dispatchers.io) {
+        if (ByokMemoryTopics.isDefault(id) || dao.topic(id) == null) return@withContext false
+        dao.deleteTopicWithSuppressions(scope, id, REASON_DELETED, System.currentTimeMillis())
+        true
     }
 
     /**
@@ -400,6 +501,7 @@ class ByokMemoryRepository(
         dao.deleteAllEvidence()
         dao.deleteAllCandidates(scope)
         dao.deleteAllSuppressions(scope)
+        dao.deleteAllTopics(scope)
         val now = System.currentTimeMillis()
         settingsStore.setByokMemoryResetAt(now)
         onCleared(now)
@@ -423,6 +525,12 @@ class ByokMemoryRepository(
 
         private const val MAX_EVIDENCE_SHOWN = 3
         private const val MAX_SUPPRESSIONS_IN_DIGEST = 30
+    }
+
+    private fun mergeTopics(saved: List<ByokMemoryTopic>): List<ByokMemoryTopic> {
+        val savedById = saved.associateBy { it.id }
+        return ByokMemoryTopics.defaults.map { savedById[it.id] ?: it } +
+            saved.filterNot { ByokMemoryTopics.isDefault(it.id) }
     }
 }
 

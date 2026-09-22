@@ -76,6 +76,11 @@ object ChatMessageMetadataKeys {
     const val REASONING_TOKENS = "reasoningTokens"
     const val DURATION_MS = "durationMs"
     const val TTFT_MS = "ttftMs"
+    const val COST_ID = "costId"
+    const val COST_USD = "costUsd"
+    const val COST_MODEL = "costModel"
+    const val PRICING_SOURCE = "pricingSource"
+    const val PRICING_MISSING = "pricingMissing"
 }
 
 enum class MessageStatus {

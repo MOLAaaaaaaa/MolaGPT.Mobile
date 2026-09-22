@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -27,6 +28,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +54,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.AgentBackendIds
 import com.molagpt.app.core.model.RelayMachine
 import com.molagpt.app.core.model.displayWorkspace
+import com.molagpt.app.core.model.wasInterrupted
 import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.MolaMotion
 
@@ -65,6 +68,7 @@ import com.molagpt.app.core.render.MolaMotion
 fun AgentControlScreen(
     vm: AgentControlViewModel,
     onExit: () -> Unit,
+    enterToSend: Boolean = false,
     onVisibleSessionChanged: (String?) -> Unit = {},
 ) {
     val sessions by vm.sessions.collectAsStateWithLifecycle()
@@ -88,17 +92,17 @@ fun AgentControlScreen(
         onDispose { onVisibleSessionChanged(null) }
     }
 
-    DisposableEffect(lifecycleOwner, inSession) {
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> vm.setHubActive(!inSession)
+                Lifecycle.Event.ON_START -> vm.setHubActive(true)
                 Lifecycle.Event.ON_STOP -> vm.setHubActive(false)
                 else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-            vm.setHubActive(!inSession)
+            vm.setHubActive(true)
         }
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
@@ -133,6 +137,7 @@ fun AgentControlScreen(
                 onBack = { vm.deselect() },
                 onOpenModel = { showModel = true },
                 onOpenMode = { showMode = true },
+                enterToSend = enterToSend,
             )
         } else {
             HubScaffold(
@@ -257,6 +262,7 @@ private fun SessionScaffold(
     onBack: () -> Unit,
     onOpenModel: () -> Unit,
     onOpenMode: () -> Unit,
+    enterToSend: Boolean,
 ) {
     val meta = state.meta
     Scaffold(
@@ -282,7 +288,15 @@ private fun SessionScaffold(
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
                 },
                 actions = {
-                    if (state.busy) TextButton(onClick = { vm.interrupt() }) { Text("停止") }
+                    meta?.let {
+                        Box(Modifier.padding(end = 12.dp)) {
+                            PhasePill(
+                                phase = state.phase,
+                                stalled = state.stalled,
+                                interrupted = it.wasInterrupted,
+                            )
+                        }
+                    }
                 },
             )
         },
@@ -292,6 +306,7 @@ private fun SessionScaffold(
             state = state,
             onOpenModel = onOpenModel,
             onOpenMode = onOpenMode,
+            enterToSend = enterToSend,
             modifier = Modifier.padding(inner),
         )
     }
@@ -303,27 +318,46 @@ private fun SessionPane(
     state: AgentSessionUiState,
     onOpenModel: () -> Unit,
     onOpenMode: () -> Unit,
+    enterToSend: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val meta = state.meta
     Column(modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
-                state.loading && state.blocks.isEmpty() ->
+                state.loading && state.blocks.isEmpty() && state.pendingSend == null ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                state.blocks.isEmpty() ->
+                state.blocks.isEmpty() && state.pendingSend == null ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("暂无可显示的历史", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("还没有消息", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "在下方输入消息开始远程控制",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
-                else -> AgentTranscriptView(blocks = state.blocks, onPermissionChoice = vm::approvePermission)
+                else -> AgentTranscriptView(
+                    blocks = state.blocks,
+                    pendingCommandId = state.pendingSend?.commandId,
+                    pendingText = state.pendingSend?.text,
+                    deliveryStatus = state.deliveryStatus,
+                    canRetrySend = state.canRetrySend,
+                    onRetrySend = vm::retrySend,
+                    onPermissionChoice = vm::approvePermission,
+                )
             }
         }
         // 输入区跟随键盘 + 浮在导航栏上方（与对话页同一 insets 处理）。
         Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             AgentComposer(
                 value = state.input,
                 busy = state.busy,
                 stalled = state.stalled,
+                deliveryPending = state.pendingSend != null,
+                enterToSend = enterToSend,
                 meta = meta,
                 onValueChange = vm::updateInput,
                 onSend = vm::send,

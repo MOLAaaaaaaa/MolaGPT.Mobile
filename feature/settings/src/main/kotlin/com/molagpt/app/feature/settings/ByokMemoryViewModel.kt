@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.molagpt.app.core.model.ByokMemoryCandidate
 import com.molagpt.app.core.model.ByokMemoryEntry
 import com.molagpt.app.core.model.ByokMemoryProjection
+import com.molagpt.app.core.model.ByokMemoryTopic
+import com.molagpt.app.core.model.ByokMemoryTopics
 import com.molagpt.app.core.model.ByokProfileKey
 import com.molagpt.app.core.model.MemorySection
 import com.molagpt.app.core.storage.ByokMemoryConsolidator
@@ -51,9 +53,20 @@ class ByokMemoryViewModel(
 
     /** `<user_profile>` 的展示行。[editable] 为 false 的是设备直接给出的值，用户改不了也不需要改。 */
     data class ProfileField(
+        val key: ByokProfileKey?,
         val label: String,
         val value: String,
         val editable: Boolean,
+    )
+
+    data class TopicRow(
+        val topic: ByokMemoryTopic,
+        val entries: List<ByokMemoryEntry>,
+    )
+
+    data class TopicGroup(
+        val name: String,
+        val topics: List<TopicRow>,
     )
 
     val switches: StateFlow<Switches> = store.settings
@@ -75,13 +88,19 @@ class ByokMemoryViewModel(
     val entries: StateFlow<List<ByokMemoryEntry>> = repository.observeEntries()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /** 按固定分节顺序分组，空分节不出现。 */
-    val entriesBySection: StateFlow<List<Pair<MemorySection, List<ByokMemoryEntry>>>> = entries
-        .map { list ->
-            MemorySection.entries.mapNotNull { section ->
-                list.filter { it.section == section }.takeIf { it.isNotEmpty() }?.let { section to it }
+    val topics: StateFlow<List<ByokMemoryTopic>> = repository.observeTopics()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ByokMemoryTopics.defaults)
+
+    val topicGroups: StateFlow<List<TopicGroup>> = combine(entries, topics) { list, allTopics ->
+        ByokMemoryTopics.groups.mapNotNull { group ->
+            allTopics.filter { it.group == group }
+                .map { topic ->
+                    TopicRow(topic, list.filter { ByokMemoryTopics.topicId(it) == topic.id })
+                }
+                .takeIf { it.isNotEmpty() }
+                ?.let { TopicGroup(group, it) }
             }
-        }
+    }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val candidates: StateFlow<List<ByokMemoryCandidate>> = repository.observeCandidates()
@@ -100,12 +119,10 @@ class ByokMemoryViewModel(
                     val value = list.filter { it.profileKey == key }
                         .maxByOrNull { it.effectiveConfidence(System.currentTimeMillis()) }
                         ?.text
-                    if (key == ByokProfileKey.PREFERRED_NAME || value != null) {
-                        add(ProfileField(key.label, value.orEmpty(), editable = key == ByokProfileKey.PREFERRED_NAME))
-                    }
+                    add(ProfileField(key, key.label, value.orEmpty(), editable = true))
                 }
-                device.language?.let { add(ProfileField("语言", it, editable = false)) }
-                device.timezone?.let { add(ProfileField("时区", it, editable = false)) }
+                device.language?.let { add(ProfileField(null, "语言", it, editable = false)) }
+                device.timezone?.let { add(ProfileField(null, "时区", it, editable = false)) }
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -161,8 +178,13 @@ class ByokMemoryViewModel(
         _message.value = result.fold(
             onSuccess = { r ->
                 val head = when {
-                    r.failed > 0 && (r.written > 0 || r.pending > 0) -> "已更新部分记忆，部分内容整理失败"
+                    r.failed > 0 && (r.written > 0 || r.pending > 0 || r.organized > 0) -> "已更新部分记忆，部分内容整理失败"
                     r.failed > 0 -> "整理失败，请检查网络或模型设置"
+                    r.organized > 0 && r.written > 0 && r.pending > 0 ->
+                        "已更新 ${r.written} 条，${r.pending} 条待确认，整理 ${r.organized} 个主题"
+                    r.organized > 0 && r.written > 0 -> "已更新 ${r.written} 条，整理 ${r.organized} 个主题"
+                    r.organized > 0 && r.pending > 0 -> "${r.pending} 条待确认，整理 ${r.organized} 个主题"
+                    r.organized > 0 -> "已整理 ${r.organized} 个主题"
                     r.written > 0 && r.pending > 0 -> "已更新 ${r.written} 条，${r.pending} 条待确认"
                     r.written > 0 -> "已更新 ${r.written} 条记忆"
                     r.pending > 0 -> "${r.pending} 条待确认"
@@ -178,14 +200,25 @@ class ByokMemoryViewModel(
 
     // ── 条目 ────────────────────────────────────────────────────────────────
 
-    fun addEntry(text: String, section: MemorySection, profileKey: ByokProfileKey? = null) = viewModelScope.launch {
-        val added = repository.addManual(text, section, profileKey)
+    fun addEntry(
+        text: String,
+        section: MemorySection,
+        profileKey: ByokProfileKey? = null,
+        topicId: String? = null,
+    ) = viewModelScope.launch {
+        val added = repository.addManual(text, section, profileKey, topicId)
         _message.value = if (added == null) "请输入记忆内容" else "记忆已添加"
     }
 
-    fun updateEntry(id: String, text: String, section: MemorySection, profileKey: ByokProfileKey?) =
+    fun updateEntry(
+        id: String,
+        text: String,
+        section: MemorySection,
+        profileKey: ByokProfileKey?,
+        topicId: String?,
+    ) =
         viewModelScope.launch {
-            if (!repository.updateEntry(id, text, section, profileKey)) _message.value = "请输入记忆内容"
+            if (!repository.updateEntry(id, text, section, profileKey, topicId)) _message.value = "请输入记忆内容"
         }
 
     fun deleteEntry(id: String) = viewModelScope.launch {
@@ -196,17 +229,34 @@ class ByokMemoryViewModel(
     /**
      * 改称呼。空值等于删掉这条——用户清空输入框就是不想让模型称呼自己。
      */
-    fun setPreferredName(name: String) = viewModelScope.launch {
-        val clean = name.trim()
-        val existing = entries.value.firstOrNull { it.profileKey == ByokProfileKey.PREFERRED_NAME }
+    fun setProfileField(key: ByokProfileKey, value: String) = viewModelScope.launch {
+        val clean = value.trim()
+        val existing = entries.value.firstOrNull { it.profileKey == key }
         when {
             clean.isEmpty() && existing != null -> repository.deleteEntry(existing.id, suppress = false)
             clean.isEmpty() -> Unit
             existing != null ->
-                repository.updateEntry(existing.id, clean, existing.section, ByokProfileKey.PREFERRED_NAME)
+                repository.updateEntry(existing.id, clean, existing.section, key, existing.topicId)
             else ->
-                repository.addManual(clean, MemorySection.IDENTITY, ByokProfileKey.PREFERRED_NAME)
+                repository.addManual(
+                    clean,
+                    MemorySection.IDENTITY,
+                    key,
+                    ByokMemoryTopics.defaultId(MemorySection.IDENTITY),
+                )
         }
+    }
+
+    fun saveTopic(id: String?, title: String, group: String, summary: String) = viewModelScope.launch {
+        _message.value = if (repository.saveTopic(id, title, group, summary) == null) {
+            "主题名称已存在或内容无效"
+        } else {
+            "主题已保存"
+        }
+    }
+
+    fun deleteTopic(id: String) = viewModelScope.launch {
+        _message.value = if (repository.deleteTopic(id)) "主题已删除" else "默认主题不能删除"
     }
 
     // ── 候选 ────────────────────────────────────────────────────────────────

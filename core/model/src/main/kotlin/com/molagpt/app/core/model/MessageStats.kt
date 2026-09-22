@@ -17,10 +17,13 @@ data class MessageStats(
     val durationMs: Long? = null,
     /** 请求发出到第一个可见字的耗时（time to first token）。 */
     val ttftMs: Long? = null,
+    val costUsd: Double? = null,
+    val costModel: String? = null,
+    val pricingMissing: Boolean = false,
 ) {
     val hasAny: Boolean
         get() = promptTokens != null || completionTokens != null || totalTokens != null ||
-            durationMs != null
+            durationMs != null || costUsd != null
 
     /**
      * 生成速度（token/秒）。
@@ -50,6 +53,9 @@ data class MessageStats(
                 reasoningTokens = int(ChatMessageMetadataKeys.REASONING_TOKENS),
                 durationMs = long(ChatMessageMetadataKeys.DURATION_MS),
                 ttftMs = long(ChatMessageMetadataKeys.TTFT_MS),
+                costUsd = metadata[ChatMessageMetadataKeys.COST_USD]?.toDoubleOrNull(),
+                costModel = metadata[ChatMessageMetadataKeys.COST_MODEL],
+                pricingMissing = metadata[ChatMessageMetadataKeys.PRICING_MISSING] == "true",
             )
             return stats.takeIf { it.hasAny }
         }

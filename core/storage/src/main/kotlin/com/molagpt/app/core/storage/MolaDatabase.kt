@@ -17,6 +17,7 @@ import com.molagpt.app.core.storage.entity.ByokMemoryCandidateEntity
 import com.molagpt.app.core.storage.entity.ByokMemoryEntryEntity
 import com.molagpt.app.core.storage.entity.ByokMemoryEvidenceEntity
 import com.molagpt.app.core.storage.entity.ByokMemorySuppressionEntity
+import com.molagpt.app.core.storage.entity.ByokMemoryTopicEntity
 import com.molagpt.app.core.storage.entity.ByokProviderEntity
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import com.molagpt.app.core.storage.entity.LorebookEntity
@@ -35,9 +36,10 @@ import com.molagpt.app.core.storage.entity.StreamTaskEntity
         ByokMemoryEvidenceEntity::class,
         ByokMemoryCandidateEntity::class,
         ByokMemorySuppressionEntity::class,
+        ByokMemoryTopicEntity::class,
         LorebookEntity::class,
     ],
-    version = 15,
+    version = 16,
     exportSchema = false,
 )
 abstract class MolaDatabase : RoomDatabase() {
@@ -52,7 +54,7 @@ abstract class MolaDatabase : RoomDatabase() {
     companion object {
         fun build(context: Context): MolaDatabase =
             Room.databaseBuilder(context.applicationContext, MolaDatabase::class.java, "mola.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
                 .build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -406,6 +408,40 @@ abstract class MolaDatabase : RoomDatabase() {
                     """.trimIndent(),
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_lorebooks_deletedAt_updatedAt ON lorebooks(deletedAt, updatedAt)")
+            }
+        }
+
+        private val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE byok_memory_entries ADD COLUMN topicId TEXT")
+                db.execSQL("ALTER TABLE byok_memory_candidates ADD COLUMN topicId TEXT")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_byok_memory_entries_scope_topicId " +
+                        "ON byok_memory_entries(scope, topicId)",
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS byok_memory_topics (
+                        id TEXT NOT NULL,
+                        scope TEXT NOT NULL,
+                        normalizedKey TEXT NOT NULL,
+                        groupName TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_byok_memory_topics_scope_normalizedKey " +
+                        "ON byok_memory_topics(scope, normalizedKey)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_byok_memory_topics_scope_groupName " +
+                        "ON byok_memory_topics(scope, groupName)",
+                )
             }
         }
     }

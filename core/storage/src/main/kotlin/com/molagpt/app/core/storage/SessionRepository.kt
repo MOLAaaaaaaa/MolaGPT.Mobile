@@ -141,8 +141,8 @@ class SessionRepository(
     suspend fun resetAllByokMemoryWatermarks(at: Long) =
         withContext(dispatchers.io) { conversationDao.resetAllByokMemoryWatermarks(at) }
 
-    suspend fun sessionsPendingMemory(limit: Int): List<String> =
-        withContext(dispatchers.io) { conversationDao.sessionsPendingMemory(limit) }
+    suspend fun sessionsPendingMemory(limit: Int, allowedPersonaIds: Set<String>): List<String> =
+        withContext(dispatchers.io) { conversationDao.sessionsPendingMemory(limit, allowedPersonaIds.toList()) }
 
     suspend fun setPinned(sessionId: String, pinned: Boolean) =
         withContext(dispatchers.io) { conversationDao.setPinned(sessionId, pinned) }

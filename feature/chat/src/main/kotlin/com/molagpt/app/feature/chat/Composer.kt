@@ -77,8 +77,7 @@ import com.molagpt.app.core.render.PersonaIcons
  * 打字不触发列表重组，流式刷新也不重置输入框。
  *
  * 工具行（可横向滚动）：
- *  - MolaGPT 的「联网搜索」同时启用搜索与网页读取；BYOK 仍分为「联网搜索」「网页拉取」，
- *    且需所选模型支持工具调用；
+ *  - 网络访问同时启用搜索与网页读取；BYOK 需所选模型支持工具调用；
  *  - 「推理」胶囊：所选模型支持推理开关或思考强度时显示。有档位且可关闭时主体=开/关，
  *    常开模型点击主体打开 [ReasoningSheet]；无档位 kind（Kimi）退化为纯开关；
  *  - BYOK 专属「MCP / 视觉 / 图像」：MCP 按服务器配置门控；视觉作为外挂视觉工具，
@@ -109,8 +108,6 @@ fun Composer(
     memoryEnabled: Boolean,
     onSetMemory: (Boolean) -> Unit,
     onSetWebAccess: (Boolean) -> Unit,
-    onSetNetwork: (Boolean) -> Unit,
-    onSetSteel: (Boolean) -> Unit,
     onToggleThinking: (Boolean) -> Unit,
     onSetReasoningEffort: (String) -> Unit,
     onOpenPersonaPicker: () -> Unit,
@@ -240,27 +237,12 @@ fun Composer(
                         onCheckedChange = onSetMemory,
                     )
                 }
-                if (isByok) {
-                    ToolChip(
-                        label = "联网搜索",
-                        checked = enabledTools.network,
-                        enabled = networkEnabled,
-                        onCheckedChange = onSetNetwork,
-                    )
-                    ToolChip(
-                        label = "网页拉取",
-                        checked = enabledTools.steelBrowser,
-                        enabled = networkEnabled,
-                        onCheckedChange = onSetSteel,
-                    )
-                } else {
-                    ToolChip(
-                        label = "联网搜索",
-                        checked = enabledTools.network || enabledTools.steelBrowser,
-                        enabled = networkEnabled,
-                        onCheckedChange = onSetWebAccess,
-                    )
-                }
+                ToolChip(
+                    label = if (isByok) "网络访问" else "联网搜索",
+                    checked = enabledTools.network || enabledTools.steelBrowser,
+                    enabled = networkEnabled,
+                    onCheckedChange = onSetWebAccess,
+                )
                 if (showThinking) {
                     val toggleOnly = effortLevels.isEmpty()
                     val alwaysOn = thinkingConfig?.alwaysOn == true

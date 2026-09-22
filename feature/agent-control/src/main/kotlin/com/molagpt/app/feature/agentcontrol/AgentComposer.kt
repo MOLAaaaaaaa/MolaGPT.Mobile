@@ -23,6 +23,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -42,12 +44,14 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.remember
 import com.molagpt.app.core.model.AgentBackendIds
 import com.molagpt.app.core.model.AgentPhase
 import com.molagpt.app.core.model.RelaySessionMeta
 import com.molagpt.app.core.model.phaseEnum
+import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.render.SegmentedControl
 
 /**
@@ -60,6 +64,8 @@ fun AgentComposer(
     value: String,
     busy: Boolean,
     stalled: Boolean,
+    deliveryPending: Boolean,
+    enterToSend: Boolean,
     meta: RelaySessionMeta?,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -69,11 +75,12 @@ fun AgentComposer(
     onSetReasoningEffort: (String) -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
-    // 活动中（思考/执行/等待审批）隐藏模型·模式·思考强度切换：这些只能在下一轮的新进程生效，
-    // 跑到一半切还会重建进程；只在会话空闲时显示。空闲时才允许发送。
+    // 活动中（思考/执行/等待审批）保留当前模型、模式和思考强度，但禁用切换：这些设置只对
+    // 下一轮的新进程生效，跑到一半切换还会重建进程。稳定保留这一行也能避免输入区上下跳动。
     // 桌面已离线的会话不算活动中——那个"等待审批"永远等不到人来批。
     val active = busy || (meta?.phaseEnum == AgentPhase.Waiting && !stalled)
-    val canSend = value.isNotBlank() && !active
+    val controlsEnabled = !active && !deliveryPending
+    val canSend = value.isNotBlank() && controlsEnabled
 
     val efforts = remember(meta?.backendId) {
         when (meta?.backendId) {
@@ -88,34 +95,27 @@ fun AgentComposer(
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
         shape = RoundedCornerShape(22.dp),
-        color = cs.surface.copy(alpha = 0.96f),
-        tonalElevation = 3.dp,
-        shadowElevation = 10.dp,
-        border = BorderStroke(1.dp, cs.outline.copy(alpha = 0.14f)),
+        color = cs.surface,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp,
+        border = BorderStroke(1.dp, cs.outline.copy(alpha = 0.34f)),
     ) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (stalled) {
-                Text(
-                    "桌面端已离线，未完成对话",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = cs.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 4.dp, top = 2.dp),
-                )
-            }
-            if (meta != null && !active) {
+            if (meta != null) {
                 Row(
                     Modifier.fillMaxWidth().height(40.dp).horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TriggerChip(modelText, onOpenModel)
-                    TriggerChip(posture, onOpenMode)
+                    TriggerChip(modelText, enabled = controlsEnabled, onClick = onOpenModel)
+                    TriggerChip(posture, enabled = controlsEnabled, onClick = onOpenMode)
                     if (efforts.isNotEmpty()) {
                         SegmentedControl(
                             options = efforts,
                             selected = meta.reasoningEffort ?: "medium",
                             onSelect = onSetReasoningEffort,
                             modifier = Modifier.width((efforts.size * 46).dp),
+                            enabled = controlsEnabled,
                         )
                     }
                 }
@@ -124,14 +124,19 @@ fun AgentComposer(
             BasicTextField(
                 value = value,
                 onValueChange = onValueChange,
+                enabled = controlsEnabled,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp, max = 126.dp).padding(horizontal = 4.dp, vertical = 2.dp),
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = cs.onSurface),
                 cursorBrush = SolidColor(cs.primary),
+                keyboardOptions = KeyboardOptions(
+                    imeAction = if (enterToSend) ImeAction.Send else ImeAction.Default,
+                ),
+                keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
                 maxLines = 6,
                 decorationBox = { inner ->
                     Box(Modifier.fillMaxWidth()) {
                         if (value.isEmpty()) {
-                            Text("输入消息…", color = cs.onSurfaceVariant.copy(alpha = 0.68f), style = MaterialTheme.typography.bodyLarge)
+                            Text("输入消息...", color = cs.onSurfaceVariant.copy(alpha = 0.68f), style = MaterialTheme.typography.bodyLarge)
                         }
                         inner()
                     }
@@ -139,9 +144,22 @@ fun AgentComposer(
             )
 
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(" ", color = cs.onSurfaceVariant.copy(alpha = 0.74f), style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.weight(1f))
-                Crossfade(targetState = active, label = "agentSendStop") { streaming ->
+                if (stalled) {
+                    Text(
+                        "桌面端已离线，未完成对话",
+                        modifier = Modifier.weight(1f).padding(start = 4.dp),
+                        color = cs.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+                Crossfade(
+                    targetState = active,
+                    animationSpec = MolaMotion.standard(MolaMotion.Medium),
+                    label = "agentSendStop",
+                ) { streaming ->
                     if (streaming) {
                         RoundIconButton(Icons.Filled.Stop, "停止", containerColor = cs.error, contentColor = cs.onError, onClick = onStop)
                     } else {
@@ -160,7 +178,7 @@ fun AgentComposer(
 
 /** 触发 chip：仿 chat ToolChip 的中性态 + 下拉箭头，点开模型/模式选择。 */
 @Composable
-private fun TriggerChip(label: String, onClick: () -> Unit) {
+private fun TriggerChip(label: String, enabled: Boolean, onClick: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(50)
     Row(
@@ -169,12 +187,13 @@ private fun TriggerChip(label: String, onClick: () -> Unit) {
             .clip(shape)
             .background(cs.surfaceVariant.copy(alpha = 0.72f))
             .border(1.dp, cs.outline.copy(alpha = 0.12f), shape)
-            .clickable(role = Role.Button, interactionSource = remember { MutableInteractionSource() }, indication = ripple(), onClick = onClick)
+            .clickable(enabled = enabled, role = Role.Button, interactionSource = remember { MutableInteractionSource() }, indication = ripple(), onClick = onClick)
             .padding(start = 11.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = cs.onSurfaceVariant, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium, maxLines = 1)
-        Icon(Icons.Filled.ArrowDropDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = cs.onSurfaceVariant)
+        val contentColor = cs.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.48f)
+        Text(label, color = contentColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium, maxLines = 1)
+        Icon(Icons.Filled.ArrowDropDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = contentColor)
     }
 }
 

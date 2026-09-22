@@ -588,8 +588,6 @@ fun ChatScreen(
                     memoryEnabled = memoryEnabled,
                     onSetMemory = viewModel::setMemoryEnabled,
                     onSetWebAccess = viewModel::setWebAccessTools,
-                    onSetNetwork = viewModel::setNetworkTool,
-                    onSetSteel = viewModel::setSteelTool,
                     onToggleThinking = viewModel::setUseThinking,
                     onSetReasoningEffort = viewModel::setReasoningEffort,
                     onOpenPersonaPicker = { personaSheetOpen = true },
@@ -648,6 +646,7 @@ fun ChatScreen(
             } else {
                 MessageList(
                     messages = state.messages,
+                    spend = state.spend.takeIf { state.providerKind == ProviderKind.BYOK },
                     models = state.models,
                     onRegenerate = { viewModel.regenerateLast() },
                     onRegenerateWithModel = { viewModel.regenerateLast(it) },

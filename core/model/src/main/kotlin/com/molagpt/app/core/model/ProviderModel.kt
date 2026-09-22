@@ -41,6 +41,7 @@ data class ProviderModel(
     val quotaMessage: String? = null,
     /** 点数档位符号：`""`=免费，`"$"`..`"$$$$"`，null=未定价或不适用（BYOK）。 */
     val creditSymbol: String? = null,
+    val pricing: ModelPricing? = null,
 )
 
 /** 用户自定义请求体覆写项。[type] ∈ string|number|boolean|json，决定 [value] 如何解析成 JSON 值。 */

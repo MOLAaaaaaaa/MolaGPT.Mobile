@@ -24,6 +24,7 @@ import androidx.room.PrimaryKey
         // SQLite 的 UNIQUE 允许多行 NULL，因此普通记忆不受影响；画像字段每种只能保留一个当前值。
         Index(value = ["scope", "profileKey"], unique = true),
         Index(value = ["scope", "section"]),
+        Index(value = ["scope", "topicId"]),
     ],
 )
 data class ByokMemoryEntryEntity(
@@ -34,6 +35,7 @@ data class ByokMemoryEntryEntity(
     val section: String,
     val category: String?,
     val profileKey: String?,
+    val topicId: String?,
     val confidence: Double,
     /** null = 不衰减。 */
     val halfLifeDays: Double?,
@@ -44,6 +46,24 @@ data class ByokMemoryEntryEntity(
     val recurrence: Int,
     val firstObservedAt: Long,
     val lastReinforcedAt: Long,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
+@Entity(
+    tableName = "byok_memory_topics",
+    indices = [
+        Index(value = ["scope", "normalizedKey"], unique = true),
+        Index(value = ["scope", "groupName"]),
+    ],
+)
+data class ByokMemoryTopicEntity(
+    @PrimaryKey val id: String,
+    val scope: String,
+    val normalizedKey: String,
+    val groupName: String,
+    val title: String,
+    val summary: String,
     val createdAt: Long,
     val updatedAt: Long,
 )
@@ -89,6 +109,7 @@ data class ByokMemoryCandidateEntity(
     val section: String,
     val category: String?,
     val profileKey: String?,
+    val topicId: String?,
     val confidence: Double,
     val sourceSessionId: String,
     val sourceMessageId: String,

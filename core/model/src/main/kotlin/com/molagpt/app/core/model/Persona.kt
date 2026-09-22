@@ -7,7 +7,7 @@ package com.molagpt.app.core.model
  * 不暴露角色配置，避免双重 system。镜像桌面端 `personas` 表设计，便于未来云同步对齐。
  *
  * [icon] 是图标 key（映射到 `core:render` 的 PersonaIcons 矢量图标），不存 emoji。
- * [systemPrompt] 支持 `{{date}}/{{time}}/{{model}}/{{provider}}/{{username}}` 变量，发送时插值。
+ * [systemPrompt] 支持 `{{date}}/{{time}}/{{datetime}}/{{model}}/{{provider}}/{{username}}` 变量，发送时插值。
  */
 data class Persona(
     val id: String,

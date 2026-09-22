@@ -76,6 +76,7 @@ class ByokModelApi(private val http: MolaHttp) {
                 providerName = provider.name,
                 providerKind = ProviderKind.BYOK,
                 thinkingConfig = thinkingConfig,
+                pricing = com.molagpt.app.core.model.readEndpointPricing(obj),
             )
         }.sortedWith(compareByDescending<ProviderModel> { it.supportsToolCalling }.thenBy { it.id })
     }
@@ -110,6 +111,7 @@ class ByokModelApi(private val http: MolaHttp) {
                 providerName = provider.name,
                 providerKind = ProviderKind.BYOK,
                 thinkingConfig = thinkingConfig,
+                pricing = com.molagpt.app.core.model.readEndpointPricing(obj),
             )
         }
     }
@@ -148,6 +150,7 @@ class ByokModelApi(private val http: MolaHttp) {
                 providerName = provider.name,
                 providerKind = ProviderKind.BYOK,
                 thinkingConfig = thinkingConfig,
+                pricing = com.molagpt.app.core.model.readEndpointPricing(obj),
             )
         }
     }

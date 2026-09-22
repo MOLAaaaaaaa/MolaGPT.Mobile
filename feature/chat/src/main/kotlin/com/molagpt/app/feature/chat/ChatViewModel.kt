@@ -9,6 +9,7 @@ import com.molagpt.app.core.model.Attachment
 import com.molagpt.app.core.model.AttachmentKind
 import com.molagpt.app.core.model.AttachmentMime
 import com.molagpt.app.core.model.ByokMemoryProjection
+import com.molagpt.app.core.model.ByokProfileKey
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatMessageMetadataKeys
 import com.molagpt.app.core.model.ChatRequest
@@ -262,7 +263,7 @@ class ChatViewModel(
     /** 应用级角色列表（包含内置 + 用户自定义），供选择器展示。 */
     val personas: StateFlow<List<Persona>> = personaRepository
         .observeAll()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /** 当前会话绑定的角色（仅 BYOK 生效）。personaId 为空时回退内置「通用助手」；随角色编辑/删除自动刷新。 */
     val activePersona: StateFlow<Persona?> = combine(
@@ -270,7 +271,7 @@ class ChatViewModel(
     ) { id, all ->
         val target = id ?: Persona.BUILTIN_DEFAULT_ID
         all.firstOrNull { it.id == target } ?: all.firstOrNull { it.id == Persona.BUILTIN_DEFAULT_ID }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /** 切换当前会话角色：更新内存态并写本地会话 personaId（仅 BYOK 会话使用）。 */
     fun selectPersona(personaId: String?) {
@@ -295,9 +296,10 @@ class ChatViewModel(
         if (greetings.isEmpty()) return
         if (chatRepository.messageCount(sessionId) > 0) return
 
-        val vars = buildPromptVariables(null, "").copy(
+        val baseVars = buildPromptVariables(null, "", persona)
+        val vars = baseVars.copy(
             characterName = profile.nickname.ifBlank { persona.name },
-            username = profile.userName.takeIf { it.isNotBlank() },
+            username = baseVars.username ?: profile.userName.takeIf { it.isNotBlank() },
         )
         val texts = greetings.map { SystemPromptComposer.interpolate(it, vars) }
         val now = System.currentTimeMillis()
@@ -341,22 +343,34 @@ class ChatViewModel(
     private fun memoryMasterEnabled(): Boolean =
         settingsFlow.value?.byokMemoryMasterEnabled == true
 
-    private fun effectiveMemoryEnabled(): Boolean = memoryMasterEnabled() &&
+    private fun memoryAppliesTo(persona: Persona?, selectedPersonaId: String?): Boolean {
+        if (selectedPersonaId != null && persona?.id != selectedPersonaId) return false
+        return persona?.isRolePlay != true
+    }
+
+    private fun memoryAppliesHere(): Boolean = memoryAppliesTo(activePersona.value, _conversationPersonaId.value)
+
+    private fun effectiveMemoryEnabled(): Boolean = memoryAppliesHere() && memoryMasterEnabled() &&
         (_conversationMemoryOverride.value ?: (settingsFlow.value?.byokMemoryEnabled == true))
 
-    private fun effectiveRecallEnabled(): Boolean = memoryMasterEnabled() &&
+    private fun effectiveRecallEnabled(): Boolean = memoryAppliesHere() && memoryMasterEnabled() &&
         (_conversationRecallOverride.value ?: (settingsFlow.value?.byokConversationRecallEnabled == true))
 
     /** 记忆总开关是否打开。关着时 composer 上那个 chip 不出现——它此刻什么也控制不了。 */
-    val memoryAvailable: StateFlow<Boolean> = settingsFlow
-        .map { it?.byokMemoryMasterEnabled == true }
+    val memoryAvailable: StateFlow<Boolean> = combine(
+        settingsFlow, activePersona, _conversationPersonaId,
+    ) { settings, persona, personaId ->
+        settings?.byokMemoryMasterEnabled == true && memoryAppliesTo(persona, personaId)
+    }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /** 本会话是否使用长期记忆。仅供 UI 订阅。 */
     val memoryEnabled: StateFlow<Boolean> = combine(
-        _conversationMemoryOverride, settingsFlow,
-    ) { override, settings ->
-        settings?.byokMemoryMasterEnabled == true && (override ?: (settings.byokMemoryEnabled))
+        _conversationMemoryOverride, settingsFlow, activePersona, _conversationPersonaId,
+    ) { override, settings, persona, personaId ->
+        memoryAppliesTo(persona, personaId) &&
+            settings?.byokMemoryMasterEnabled == true &&
+            (override ?: settings.byokMemoryEnabled)
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
@@ -427,26 +441,32 @@ class ChatViewModel(
         )
     }
 
+    private val historyWithSpend = combine(chatRepository.observeMessages(sessionId), _conversationProviderKind) { history, kind ->
+        history to com.molagpt.app.core.storage.ConversationSpendCalculator.from(history, kind)
+    }
+
     val uiState: StateFlow<ChatUiState> = combine(
-        chatRepository.observeMessages(sessionId),
+        historyWithSpend,
         backgroundStreams.observe(sessionId),
         _selectedModel,
         uiMeta,
         modelsFlow,
-    ) { history, streamState, model, meta, models ->
+    ) { historyState, streamState, model, meta, models ->
+        val (history, spend) = historyState
         val controls = meta.controls
         val pending = meta.pendingAttachments
         val visibleModels = models.filter { it.providerKind == meta.providerKind && it.supportsChat }
         val selectedModel = selectedModelFor(model, meta.providerId, visibleModels)
         val selectedModelId = selectedModel?.id ?: normalizeSavedModelId(model)
         val inFlight = streamState.inFlight
-        // 合并历史与 in-flight：若 in-flight 的 id 已在历史里（已落库），以 in-flight 为准覆盖。
-        val merged = if (inFlight == null) history
+        // 生成中覆盖历史；结束落库后以 Room 为准，包含停止/失败时补写的统计。
+        val merged = if (inFlight == null || (!streamState.isStreaming && history.any { it.messageId == inFlight.messageId })) history
         else (history.filterNot { it.messageId == inFlight.messageId } + inFlight)
         ChatUiState(
             sessionId = sessionId,
             title = meta.title,
             messages = merged,
+            spend = spend,
             models = visibleModels,
             modelGroups = buildModelGroups(models),
             selectedModelId = selectedModelId,
@@ -576,16 +596,8 @@ class ChatViewModel(
         }
     }
 
-    fun setNetworkTool(enabled: Boolean) {
-        _enabledTools.value = _enabledTools.value.copy(network = enabled)
-    }
-
     fun setWebAccessTools(enabled: Boolean) {
         _enabledTools.value = _enabledTools.value.copy(network = enabled, steelBrowser = enabled)
-    }
-
-    fun setSteelTool(enabled: Boolean) {
-        _enabledTools.value = _enabledTools.value.copy(steelBrowser = enabled)
     }
 
     fun setCodeTool(enabled: Boolean) {
@@ -1110,7 +1122,7 @@ class ChatViewModel(
             rawText = body,
             status = MessageStatus.COMPLETE,
             updatedAt = System.currentTimeMillis(),
-            metadata = msg.metadata + mapOf(
+            metadata = (msg.metadata - RetryAttempts.statsKeys) + mapOf(
                 RetryAttempts.KEY_ATTEMPTS to RetryAttempts.encode(all),
                 RetryAttempts.KEY_CURRENT to all.lastIndex.toString(),
             ) - ChatMessageMetadataKeys.WIRE_HISTORY,
@@ -1159,6 +1171,8 @@ class ChatViewModel(
         val v = attempts[next]
         val modelDisplayName = v.modelDisplayName
         val meta = msg.metadata.toMutableMap().apply {
+            keys.removeAll(RetryAttempts.statsKeys)
+            putAll(RetryAttempts.statsMetadata(v))
             put(RetryAttempts.KEY_CURRENT, next.toString())
             if (modelDisplayName != null) put("modelDisplayName", modelDisplayName) else remove("modelDisplayName")
             // 线格式快照只对写下它的那一版成立。切到别的版本还留着它，下一轮发出去的就会是
@@ -1179,13 +1193,7 @@ class ChatViewModel(
         }
     }
 
-    private fun attemptOf(m: ChatMessage): RetryAttempt = RetryAttempt(
-        fragments = m.fragments,
-        rawText = m.rawText,
-        model = m.model,
-        modelDisplayName = m.metadata["modelDisplayName"],
-        status = m.status.name,
-    )
+    private fun attemptOf(m: ChatMessage): RetryAttempt = RetryAttempts.from(m)
 
     fun stop() {
         backgroundStreams.stop(sessionId)
@@ -1305,7 +1313,14 @@ class ChatViewModel(
             memoryTools = requestTools.memory,
             recallTool = requestTools.conversationRecall,
         )
-        return listOf(block, rules).filter { it.isNotBlank() }.joinToString("\n\n").takeIf { it.isNotBlank() }
+        val topics = if (requestTools.memory) {
+            byokMemoryRepository.topics().joinToString(separator = "；", limit = 16, truncated = "") {
+                "${it.group} / ${it.title}"
+            }.takeIf { it.isNotBlank() }?.let { "已有记忆主题：$it。保存时优先沿用最匹配的主题。" }.orEmpty()
+        } else {
+            ""
+        }
+        return listOf(block, rules, topics).filter { it.isNotBlank() }.joinToString("\n\n").takeIf { it.isNotBlank() }
     }
 
     /**
@@ -1409,11 +1424,20 @@ class ChatViewModel(
         rawText = text,
     )
 
-    /** 组装 {{var}} 插值上下文：本地日期/时间 + 当前模型/服务商。username 首版暂不接（→「用户」）。 */
-    private fun buildPromptVariables(providerModel: ProviderModel?, modelDisplayName: String): PromptVariables {
+    /** 组装 {{var}} 插值上下文：本地日期/时间、当前模型/服务商，以及角色卡显式选择的称呼。 */
+    private suspend fun buildPromptVariables(
+        providerModel: ProviderModel?,
+        modelDisplayName: String,
+        persona: Persona? = activePersona.value,
+    ): PromptVariables {
         val now = java.util.Date()
         val date = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(now)
         val time = java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(now)
+        val username = if (persona?.profile?.useProfileName == true) {
+            byokMemoryRepository.profileValue(ByokProfileKey.PREFERRED_NAME)
+        } else {
+            null
+        }
         return PromptVariables(
             date = date,
             time = time,
@@ -1421,7 +1445,7 @@ class ChatViewModel(
             modelDisplayName = modelDisplayName,
             modelId = providerModel?.id,
             providerName = providerModel?.providerName,
-            username = null,
+            username = username,
         )
     }
 
@@ -1430,7 +1454,7 @@ class ChatViewModel(
      * 杜绝「设置里开了但当前阵营/模型不支持」造成的静默失效。
      * - MolaGPT：清零 mcp/vision/imageGeneration（wire 层本就不传，避免脏状态）。
      * - BYOK：清零 codeExecution（无执行路径）；工具类需模型 supportsToolCalling；
-     *   network/网页拉取沿用 composer 开关；mcp/vision/imageGeneration **已无 composer 开关**，
+     *   network/网页拉取共用 composer 的网络访问开关；mcp/vision/imageGeneration **已无 composer 开关**，
      *   改由 BYOK 工具设置页实时驱动（visionProxyEnabled / imageGenEnabled / 已启用的 MCP 服务器），
      *   实时读 [settingsFlow] 而非创建时的 [_enabledTools] 快照——避免对话存在期间去设置页开启后不生效。
      */
@@ -1450,11 +1474,12 @@ class ChatViewModel(
             }
             ProviderKind.BYOK -> {
                 val canTool = providerModel?.supportsToolCalling == true
+                val webAccess = (enabled.network || enabled.steelBrowser) && canTool
                 val settings = settingsFlow.value ?: AppSettings()
                 enabled.copy(
                     codeExecution = false,
-                    network = enabled.network && canTool,
-                    steelBrowser = enabled.steelBrowser && canTool,
+                    network = webAccess,
+                    steelBrowser = webAccess,
                     mcp = canTool && hasMcpServersFlow.value,
                     vision = settings.visionProxyEnabled && canTool,
                     imageGeneration = settings.imageGenEnabled && canTool,

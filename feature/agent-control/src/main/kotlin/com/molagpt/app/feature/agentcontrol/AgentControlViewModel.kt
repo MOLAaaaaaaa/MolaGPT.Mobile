@@ -32,6 +32,9 @@ data class AgentSessionUiState(
     val blocks: List<AgentBlock> = emptyList(),
     val loading: Boolean = false,
     val input: String = "",
+    val pendingSend: AgentControlService.PendingSend? = null,
+    val deliveryStatus: String? = null,
+    val canRetrySend: Boolean = false,
     /** 桌面端在回合中途离开了：meta 还写着忙态，但没人会再把它跑完。 */
     val stalled: Boolean = false,
 ) {
@@ -113,6 +116,7 @@ class AgentControlViewModel(
     private val _machines = MutableStateFlow<List<RelayMachine>>(emptyList())
     val machines: StateFlow<List<RelayMachine>> = _machines.asStateFlow()
 
+    private var refreshAgain = false
     private val _refreshing = MutableStateFlow(false)
     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
 
@@ -134,6 +138,10 @@ class AgentControlViewModel(
     private val reducer = AgentTranscriptReducer()
     private var streamJob: Job? = null
     private var hubRefreshJob: Job? = null
+    private var realtimeJob: Job? = null
+    private var deliveryJob: Job? = null
+    private var deliveryMonitorJob: Job? = null
+    private val approvalCommands = mutableMapOf<String, String>()
     private val pendingOptions = mutableMapOf<String, PendingOptions>()
     private val surfacedCommandFailures = mutableSetOf<String>()
 
@@ -173,11 +181,15 @@ class AgentControlViewModel(
     /** Hub 处于前台时轮询机器快照，避免已离线桌面长期显示为连接状态。 */
     fun setHubActive(active: Boolean) {
         if (!active) {
+            realtimeJob?.cancel()
+            realtimeJob = null
             hubRefreshJob?.cancel()
             hubRefreshJob = null
             return
         }
         if (hubRefreshJob?.isActive == true) return
+        realtimeJob = viewModelScope.launch { service.realtimeUpdates().collect { refresh() } }
+        service.wakeEvents()
         hubRefreshJob = viewModelScope.launch {
             // 立即刷一次：重进 agent 页面时列表里还是退出前的旧 meta（旧逻辑先睡
             // 15s 才首刷），这期间点进会话会拿到过期 phase。
@@ -202,7 +214,7 @@ class AgentControlViewModel(
 
     /** 重新拉取会话列表（下拉刷新 / 进入页面 / 重连）。 */
     fun refresh() {
-        if (_refreshing.value) return
+        if (_refreshing.value) { refreshAgain = true; return }
         Logger.d("AgentControlVM", "refresh() called")
         viewModelScope.launch {
             _refreshing.value = true
@@ -234,6 +246,8 @@ class AgentControlViewModel(
                 }
             }
             _refreshing.value = false
+            _selectedId.value?.let(::refreshActivityIndicator)
+            if (refreshAgain) { refreshAgain = false; refresh() }
 
             // 更新连接状态：根据桌面端最近的 snapshot / machines 心跳判断
             when {
@@ -259,6 +273,7 @@ class AgentControlViewModel(
     private fun subscribe(meta: RelaySessionMeta) {
         val mergedMeta = applyPendingOptions(meta)
         streamJob?.cancel()
+        deliveryMonitorJob?.cancel()
         reducer.reset()
         derivedPhase = null
         derivedPhaseSession = null
@@ -277,6 +292,14 @@ class AgentControlViewModel(
                 emptyList()
             }
             applyRelaySnapshot(mergedMeta.conversationId, snapshot)
+            service.loadPendingSend(mergedMeta.conversationId)?.let { pending ->
+                if (snapshot.any { (it.event as? RelayEvent.UserPrompt)?.commandId == pending.commandId }) {
+                    service.savePendingSend(mergedMeta.conversationId, null)
+                } else {
+                    _selected.update { it.copy(pendingSend = pending, deliveryStatus = "正在确认发送状态") }
+                    monitorDelivery(mergedMeta.conversationId, pending)
+                }
+            }
 
             // 始终跟随增量（轮询自带空闲退避）。以前只有 busy/waiting 才跟随——
             // 但桌面 UI / 外部终端驱动的会话在 relay 上恒为 Idle，进入后画面
@@ -301,6 +324,16 @@ class AgentControlViewModel(
         var changed = false
         for (env in batch) {
             if (reducer.apply(env)) changed = true
+        }
+        val pending = _selected.value.pendingSend
+        if (pending != null && batch.any { (it.event as? RelayEvent.UserPrompt)?.commandId == pending.commandId }) {
+            deliveryMonitorJob?.cancel()
+            viewModelScope.launch {
+                service.savePendingSend(sessionId, null)
+                if (_selectedId.value == sessionId && _selected.value.pendingSend?.commandId == pending.commandId) {
+                    _selected.update { it.copy(pendingSend = null, deliveryStatus = null, canRetrySend = false) }
+                }
+            }
         }
         derivePhaseFromEvents(batch)?.let { applyPhase(sessionId, it) }
         if (syncActivityIndicator(sessionId)) changed = true
@@ -356,61 +389,114 @@ class AgentControlViewModel(
         _selected.update { it.copy(input = text) }
     }
 
-    /** 发送一条用户提示。乐观清空输入框；答复由 relay 增量事件流回。 */
     fun send() {
         val id = _selectedId.value ?: return
-        val text = _selected.value.input.trim()
+        val state = _selected.value
+        if (state.pendingSend != null) return
+        val text = state.input.trim()
         if (text.isEmpty()) return
-        val notificationMeta = _selected.value.meta
-        val busyMeta = _selected.value.meta?.copy(phase = AgentPhase.Running.ordinal, needsAttention = false)
-        val optimisticBlocks = reducer.beginOptimisticTurn(text)
-        _selected.update {
-            it.copy(
-                input = "",
-                meta = busyMeta ?: it.meta,
-                blocks = optimisticBlocks,
-                loading = false,
-            )
-        }
-        // 桌面要过一会儿才把 phase 发布成 Running，这期间 refreshSelectedMeta 会拉回
-        // 服务器的 Idle 并抹掉忙态（连带指示器）。把乐观发送也登记为 derived phase。
-        markDerivedPhase(id, AgentPhase.Running)
-        busyMeta?.let { patched -> patchSessionMeta(id) { patched } }
+        val pending = AgentControlService.PendingSend(newCmdId(), text, selectedMachineId())
+        _selected.update { it.copy(input = "", pendingSend = pending, deliveryStatus = "正在发送", canRetrySend = false) }
+        state.meta?.let(onTurnSubmitted)
         ensureLiveSubscription(id)
-        // User-initiated foreground work must be registered before the network
-        // round-trip, otherwise an immediate Home press can make Android reject
-        // the later foreground-service launch.
-        notificationMeta?.let(onTurnSubmitted)
-        viewModelScope.launch {
-            val accepted = service.sendPrompt(id, newCmdId(), text, machineId = selectedMachineId())
-            if (accepted) {
-                refreshSelectedMetaSoon(id)
-            } else {
-                refreshSelectedMeta(id)
+        deliveryJob = viewModelScope.launch {
+            try {
+                service.savePendingSend(id, pending)
+                submitPending(id, pending)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (_selectedId.value == id) _selected.update { it.copy(deliveryStatus = "发送未确认，消息已保留", canRetrySend = true) }
             }
         }
     }
 
-    /** 打断当前回合。 */
+    fun retrySend() {
+        val id = _selectedId.value ?: return
+        val pending = _selected.value.pendingSend ?: return
+        if (!_selected.value.canRetrySend) return
+        _selected.update { it.copy(canRetrySend = false, deliveryStatus = "正在确认发送状态") }
+        deliveryJob?.cancel()
+        deliveryJob = viewModelScope.launch {
+            try { service.savePendingSend(id, pending); submitPending(id, pending) }
+            catch (c: kotlinx.coroutines.CancellationException) { throw c }
+            catch (_: Exception) { if (_selectedId.value == id) _selected.update { it.copy(canRetrySend = true, deliveryStatus = "发送未确认，消息已保留") } }
+        }
+    }
+
+    private suspend fun submitPending(id: String, pending: AgentControlService.PendingSend) {
+        val accepted = service.sendPrompt(id, pending.commandId, pending.text, pending.machineId)
+        service.wakeEvents()
+        if (_selectedId.value != id) return
+        _selected.update { it.copy(deliveryStatus = if (accepted) "已发送，等待桌面接收" else "发送未确认，消息已保留", canRetrySend = !accepted) }
+        monitorDelivery(id, pending)
+    }
+
+    private fun monitorDelivery(id: String, pending: AgentControlService.PendingSend) {
+        deliveryMonitorJob?.cancel()
+        deliveryMonitorJob = viewModelScope.launch {
+            while (_selectedId.value == id && _selected.value.pendingSend?.commandId == pending.commandId) {
+                val status = try { service.commandStatus(id, pending.commandId) }
+                    catch (c: kotlinx.coroutines.CancellationException) { throw c }
+                    catch (_: Exception) { null }
+                if (_selectedId.value != id) return@launch
+                when (status) {
+                    "leased", "done" -> {
+                        service.savePendingSend(id, null)
+                        _selected.update { it.copy(pendingSend = null, deliveryStatus = null, canRetrySend = false) }
+                        service.wakeEvents()
+                        refresh()
+                        return@launch
+                    }
+                    "failed" -> {
+                        service.savePendingSend(id, null)
+                        _selected.update { it.copy(pendingSend = null, deliveryStatus = null, canRetrySend = false, input = it.input.ifBlank { pending.text }) }
+                        refresh()
+                        return@launch
+                    }
+                    "queued" -> _selected.update { it.copy(deliveryStatus = "已发送，等待桌面接收", canRetrySend = false) }
+                    else -> _selected.update { it.copy(deliveryStatus = "发送未确认，消息已保留", canRetrySend = true) }
+                }
+                delay(2000)
+            }
+        }
+    }
+
     fun interrupt() {
         val id = _selectedId.value ?: return
         viewModelScope.launch {
-            service.interrupt(id, newCmdId(), machineId = selectedMachineId())
+            val commandId = newCmdId()
+            if (!service.interrupt(id, commandId, machineId = selectedMachineId())) {
+                _commandFailure.value = AgentCommandFailure(commandId, "停止", "停止请求未确认，请检查会话状态。")
+            }
+            service.wakeEvents()
+            refresh()
         }
     }
 
     fun approvePermission(permissionId: String, choice: String) {
         val id = _selectedId.value ?: return
         if (permissionId.isBlank()) return
-        // Optimistic local feedback: collapse the card's buttons immediately. The
-        // relay sends no "resolved" event, so without this the card looks dead even
-        // though the choice was delivered to the desktop.
-        reducer.resolvePermission(permissionId, choice)?.let { blocks ->
-            _selected.update { it.copy(blocks = blocks) }
-        }
-        ensureLiveSubscription(id) // keep streaming so the post-approval tool output flows back
+        val key = "$id:$permissionId:$choice"
+        val commandId = approvalCommands.getOrPut(key) { newCmdId() }
+        val machine = selectedMachineId()
         viewModelScope.launch {
-            service.approve(id, newCmdId(), permissionId, choice, machineId = selectedMachineId())
+            if (!service.approve(id, commandId, permissionId, choice, machineId = machine)) {
+                _commandFailure.value = AgentCommandFailure(commandId, "审批", "审批发送未确认，可以再次点击重试。")
+                return@launch
+            }
+            repeat(30) {
+                val status = runCatching { service.commandStatus(id, commandId) }.getOrNull()
+                if (status == "done") {
+                    if (_selectedId.value == id) reducer.resolvePermission(permissionId, choice)?.let { blocks ->
+                        _selected.update { it.copy(blocks = blocks) }
+                    }
+                    service.wakeEvents()
+                    refresh()
+                    return@launch
+                }
+                if (status == "failed") { refresh(); return@launch }
+                delay(1000)
+            }
         }
     }
 
@@ -840,6 +926,7 @@ class AgentControlViewModel(
 
     /** 服务器 meta 合并进选中会话前，套用仍在保鲜期内的忙态推导。 */
     private fun mergeDerivedPhase(fresh: RelaySessionMeta): RelaySessionMeta {
+        if (fresh.stateVersion > 0L) return fresh
         val phase = derivedPhase ?: return fresh
         if (derivedPhaseSession != fresh.conversationId) return fresh
         if (phase != AgentPhase.Running && phase != AgentPhase.Waiting) return fresh
@@ -851,6 +938,9 @@ class AgentControlViewModel(
 
     override fun onCleared() {
         streamJob?.cancel()
+        deliveryJob?.cancel()
+        deliveryMonitorJob?.cancel()
+        realtimeJob?.cancel()
         hubRefreshJob?.cancel()
         super.onCleared()
     }

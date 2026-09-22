@@ -43,6 +43,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.molagpt.app.core.model.formatCost
+import com.molagpt.app.core.storage.ConversationSpend
 import com.molagpt.app.core.model.MessageStats
 import com.molagpt.app.core.render.MolaMotion
 import kotlin.math.roundToInt
@@ -51,13 +53,13 @@ import kotlin.math.roundToInt
  * BYOK 助手消息下方的统计行：常态只有一个极简摘要 chip，点开才展开明细。
  *
  * 之所以不把六项指标全铺在正文下面：那是一条比正文还长的小字，每条消息都来一遍会淹没内容。
- * 摘要给「花了多少」这一个最常看的数，剩下的按需展开。
+ * 摘要显示输入/输出 token 与本条费用，剩下的按需展开。
  *
  * 明细用就地展开而不是 Popup：这行挂在 LazyColumn 的 item 上，浮层要自己处理锚点、翻转和
  * 滚动跟随；就地展开只是多几行高度，列表本来就会跟着长。
  */
 @Composable
-fun MessageStatsRow(stats: MessageStats, modifier: Modifier = Modifier) {
+fun MessageStatsRow(stats: MessageStats, modifier: Modifier = Modifier, spend: ConversationSpend? = null) {
     var expanded by remember { mutableStateOf(false) }
     val muted = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f)
     val bringIntoView = remember { BringIntoViewRequester() }
@@ -125,27 +127,22 @@ fun MessageStatsRow(stats: MessageStats, modifier: Modifier = Modifier) {
             enter = fadeIn(MolaMotion.standard()) + expandVertically(MolaMotion.emphasized()),
             exit = fadeOut(MolaMotion.standard()) + shrinkVertically(MolaMotion.emphasized()),
         ) {
-            StatsDetailCard(stats)
+            StatsDetailCard(stats, spend)
         }
     }
 }
 
-/** 摘要只给总量：总 token 缺失时退回「输入+输出」相加，两者都没有就只报耗时。 */
+/** 与桌面一致，输入/输出分别展示；缺失的字段不补零。 */
 private fun summaryLabel(stats: MessageStats): String {
-    val total = stats.totalTokens
-        ?: listOfNotNull(stats.promptTokens, stats.completionTokens)
-            .takeIf { it.isNotEmpty() }
-            ?.sum()
-    val duration = stats.durationMs
-    return when {
-        total != null -> "${formatTokens(total)} tokens"
-        duration != null -> formatDuration(duration)
-        else -> "统计"
-    }
+    val tokens = listOfNotNull(stats.promptTokens?.let { "↑$it" }, stats.completionTokens?.let { "↓$it" })
+        .joinToString(" ")
+        .ifEmpty { stats.totalTokens?.toString().orEmpty() }
+    val parts = listOfNotNull(tokens.takeIf { it.isNotEmpty() }?.let { "Tokens: $it" }, stats.costUsd?.let(::formatCost))
+    return parts.joinToString(" · ").ifEmpty { stats.durationMs?.let(::formatDuration) ?: "统计" }
 }
 
 @Composable
-private fun StatsDetailCard(stats: MessageStats, modifier: Modifier = Modifier) {
+private fun StatsDetailCard(stats: MessageStats, spend: ConversationSpend?, modifier: Modifier = Modifier) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         // 无阴影、无 tonal elevation：这张卡是就地展开的正文附属物，不是浮在内容之上的层。
@@ -160,18 +157,22 @@ private fun StatsDetailCard(stats: MessageStats, modifier: Modifier = Modifier) 
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            stats.promptTokens?.let { prompt ->
-                val cached = stats.cachedTokens?.takeIf { it > 0 }
-                StatsDetailLine(
-                    icon = Icons.Filled.ArrowUpward,
-                    label = "输入",
-                    // 缓存命中含在输入内，写成括号补充而不是单列一行，免得被读成额外消耗。
-                    value = if (cached != null) {
-                        "${formatExact(prompt)} tokens（${formatExact(cached)} 命中缓存）"
-                    } else {
-                        "${formatExact(prompt)} tokens"
-                    },
-                )
+            stats.costUsd?.let {
+                StatsDetailLine(Icons.Filled.Bolt, "花费", formatCost(it))
+                stats.costModel?.let { model -> Text(model, style = MaterialTheme.typography.labelSmall) }
+            }
+            spend?.let {
+                StatsDetailLine(Icons.Filled.Bolt, "当前对话累计花费", if (it.byModel.isEmpty()) "未统计" else formatCost(it.costUsd))
+            }
+            if (stats.pricingMissing) {
+                Text("该模型未配置价格", style = MaterialTheme.typography.labelSmall)
+            }
+            stats.promptTokens?.let {
+                StatsDetailLine(Icons.Filled.ArrowUpward, "输入", "${formatExact(it)} tokens")
+            }
+            stats.cachedTokens?.let { cached ->
+                val rate = stats.promptTokens?.takeIf { it > 0 }?.let { " · ${formatOneDecimal(cached * 100.0 / it)}%" }.orEmpty()
+                StatsDetailLine(Icons.Filled.Bolt, "缓存命中", "${formatExact(cached)} tokens$rate")
             }
             stats.completionTokens?.let {
                 StatsDetailLine(Icons.Filled.ArrowDownward, "输出", "${formatExact(it)} tokens")
@@ -226,12 +227,6 @@ private fun StatsDetailLine(icon: ImageVector, label: String, value: String) {
             color = MaterialTheme.colorScheme.onSurface,
         )
     }
-}
-
-/** 摘要 chip 用：1000 以下原样，之后用 k（1.2k / 12.3k）——那一行是扫一眼的量级，不是账单。 */
-private fun formatTokens(value: Int): String = when {
-    value < 1000 -> value.toString()
-    else -> "${formatOneDecimal(value / 1000.0)}k"
 }
 
 /**

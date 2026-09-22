@@ -116,6 +116,7 @@ fun ByokProvidersScreen(
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            ByokPricingActions(viewModel, snackbar)
             SectionTitle("已添加的服务")
             if (providers.isEmpty()) {
                 EmptyProvidersHint()

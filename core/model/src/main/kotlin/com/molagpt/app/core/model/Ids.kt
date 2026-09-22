@@ -21,6 +21,8 @@ object Ids {
     /** BYOK 本地记忆条目 / 候选 / 证据。短前缀便于在整理提示词里回传给模型时省 token。 */
     fun newMemoryId(): String = "mem_${randomSuffix()}"
 
+    fun newMemoryTopicId(): String = "topic_${randomSuffix()}"
+
     private fun randomSuffix(): String =
         UUID.randomUUID().toString().replace("-", "").take(9)
 }

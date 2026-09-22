@@ -136,6 +136,7 @@ interface ConversationDao {
         WHERE c.deletedAt IS NULL
           AND c.placeholder = 0
           AND c.providerKind = 'BYOK'
+          AND (c.personaId IS NULL OR c.personaId IN (:allowedPersonaIds))
           AND EXISTS (
               SELECT 1 FROM messages AS m
               WHERE m.sessionId = c.sessionId
@@ -145,7 +146,7 @@ interface ConversationDao {
         LIMIT :limit
         """,
     )
-    suspend fun sessionsPendingMemory(limit: Int): List<String>
+    suspend fun sessionsPendingMemory(limit: Int, allowedPersonaIds: List<String>): List<String>
 
     @Query("UPDATE conversations SET pinned = :pinned, dirty = 1 WHERE sessionId = :sessionId")
     suspend fun setPinned(sessionId: String, pinned: Boolean)

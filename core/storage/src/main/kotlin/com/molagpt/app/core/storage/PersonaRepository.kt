@@ -88,26 +88,57 @@ class PersonaRepository(
         updatedAt = 0L,
     )
 
-    /** 首次播种内置角色；幂等：表非空则跳过。App 启动时调用。 */
+    /** 首次播种内置角色，并迁移未修改过的默认提示词。App 启动时调用。 */
     suspend fun ensureSeeded() = withContext(dispatchers.io) {
+        val now = System.currentTimeMillis()
+        val seeds = builtinSeeds(now)
         if (personaDao.count() == 0) {
-            personaDao.insertAll(builtinSeeds(System.currentTimeMillis()))
+            personaDao.insertAll(seeds)
+            return@withContext
         }
+
+        val existing = personaDao.getById(Persona.BUILTIN_DEFAULT_ID)
+        if (existing == null) {
+            personaDao.upsert(seeds.first())
+            return@withContext
+        }
+        if (!shouldUpdateDefaultPrompt(existing.systemPrompt)) return@withContext
+        personaDao.upsert(existing.copy(systemPrompt = BUILTIN_DEFAULT_PROMPT, updatedAt = now))
     }
 
     private fun newId(): String = "persona-" + UUID.randomUUID().toString().replace("-", "")
 
     companion object {
         // 内置角色文案对齐桌面端，图标用 PersonaIcons 的 key（非 emoji）。
+        private const val LEGACY_BUILTIN_DEFAULT_PROMPT =
+            "你是 MolaGPT 的默认助手。请用简洁、准确、友好的中文回答用户。\n\n" +
+                "如果问题信息不足，先提出必要的澄清问题；如果可以直接解决，就给出清晰可执行的答案。"
+
+        private const val TIMESTAMPED_BUILTIN_DEFAULT_PROMPT =
+            "你是 MolaGPT 的默认助手。请用简洁、准确、友好的中文回答用户。\n\n" +
+                "当前背景：\n" +
+                "- 日期：{{date}}\n" +
+                "- 时间：{{time}}\n" +
+                "- 用户：{{username}}\n" +
+                "- 当前模型：{{model}}\n" +
+                "- 服务商：{{provider}}\n\n" +
+                "如果问题信息不足，先提出必要的澄清问题；如果可以直接解决，就给出清晰可执行的答案。"
+
+        private const val BUILTIN_DEFAULT_PROMPT =
+            "你是 MolaGPT 的默认助手。请用简洁、准确、友好的中文回答用户。\n\n" +
+                "当前背景：\n" +
+                "- 日期：{{date}}\n" +
+                "- 用户：{{username}}\n" +
+                "- 当前模型：{{model}}\n" +
+                "- 服务商：{{provider}}\n\n" +
+                "如果问题信息不足，先提出必要的澄清问题；如果可以直接解决，就给出清晰可执行的答案。"
+
         private fun builtinSeeds(now: Long): List<PersonaEntity> = listOf(
             PersonaEntity(
                 id = Persona.BUILTIN_DEFAULT_ID,
                 name = "通用助手",
                 icon = "assistant",
-                systemPrompt = "你是 MolaGPT 的默认助手。请用简洁、准确、友好的中文回答用户。\n\n" +
-                    "当前背景：\n- 日期：{{date}}\n- 时间：{{time}}\n- 用户：{{username}}\n" +
-                    "- 当前模型：{{model}}\n- 服务商：{{provider}}\n\n" +
-                    "如果问题信息不足，先提出必要的澄清问题；如果可以直接解决，就给出清晰可执行的答案。",
+                systemPrompt = BUILTIN_DEFAULT_PROMPT,
                 isBuiltin = true,
                 pinned = true,
                 sortOrder = 0,
@@ -170,6 +201,11 @@ class PersonaRepository(
                 updatedAt = now,
             ),
         )
+
+        private fun shouldUpdateDefaultPrompt(currentPrompt: String?): Boolean =
+            currentPrompt.isNullOrBlank() ||
+                currentPrompt.trim() == LEGACY_BUILTIN_DEFAULT_PROMPT ||
+                currentPrompt.trim() == TIMESTAMPED_BUILTIN_DEFAULT_PROMPT
     }
 }
 

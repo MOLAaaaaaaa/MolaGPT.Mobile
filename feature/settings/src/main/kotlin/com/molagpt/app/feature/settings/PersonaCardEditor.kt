@@ -84,7 +84,12 @@ fun PersonaCardSections(
     }
 
     CardGroup(title = "我的身份") {
-        CardField("你的称呼", profile.userName, singleLine = true) { onChange(profile.copy(userName = it)) }
+        SheetToggle("沿用个人资料称呼", profile.useProfileName) {
+            onChange(profile.copy(useProfileName = it))
+        }
+        if (!profile.useProfileName) {
+            CardField("你的称呼", profile.userName, singleLine = true) { onChange(profile.copy(userName = it)) }
+        }
         CardField("你的身份", profile.userDescription, minLines = 2) { onChange(profile.copy(userDescription = it)) }
     }
 

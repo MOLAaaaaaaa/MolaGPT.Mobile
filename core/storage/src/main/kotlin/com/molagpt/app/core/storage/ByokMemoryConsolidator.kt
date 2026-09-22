@@ -29,6 +29,7 @@ import kotlinx.coroutines.withContext
 class ByokMemoryConsolidator(
     private val chatRepository: ChatRepository,
     private val sessionRepository: SessionRepository,
+    private val personaRepository: PersonaRepository,
     private val memoryRepository: ByokMemoryRepository,
     private val analyzer: ByokMemoryAnalyzer,
     private val settingsStore: SettingsStore,
@@ -52,9 +53,10 @@ class ByokMemoryConsolidator(
         val failed: Int = 0,
         /** 记忆开关关着而跳过的会话数。 */
         val disabled: Int = 0,
+        val organized: Int = 0,
     ) {
         /** 只看有没有写进东西：会话内那条轻量提示读它。 */
-        val isEmpty: Boolean get() = written == 0 && pending == 0
+        val isEmpty: Boolean get() = written == 0 && pending == 0 && organized == 0
 
         operator fun plus(other: Result) = Result(
             written = written + other.written,
@@ -62,6 +64,7 @@ class ByokMemoryConsolidator(
             examined = examined + other.examined,
             failed = failed + other.failed,
             disabled = disabled + other.disabled,
+            organized = organized + other.organized,
         )
     }
 
@@ -116,7 +119,8 @@ class ByokMemoryConsolidator(
             var total = Result()
             var attemptedOrAdvanced = false
             val limit = if (exhaustive) Int.MAX_VALUE else MAX_SESSIONS_PER_SWEEP
-            val sessions = sessionRepository.sessionsPendingMemory(limit)
+            val memoryPersonaIds = personaRepository.list().filterNot { it.isRolePlay }.mapTo(mutableSetOf()) { it.id }
+            val sessions = sessionRepository.sessionsPendingMemory(limit, memoryPersonaIds)
             for (sessionId in sessions) {
                 do {
                     val step = run(sessionId = sessionId, ignoreTurnThreshold = ignoreTurnThreshold, manual = manual)
@@ -127,9 +131,12 @@ class ByokMemoryConsolidator(
                     if (!exhaustive || !step.advanced) break
                 } while (true)
             }
-            if (attemptedOrAdvanced) {
-                settingsStore.setByokMemoryLastConsolidatedAt(System.currentTimeMillis())
+            if (manual) {
+                val topicResult = organizeExistingTopics()
+                total += topicResult
+                attemptedOrAdvanced = attemptedOrAdvanced || topicResult.organized > 0 || topicResult.failed > 0
             }
+            if (attemptedOrAdvanced) settingsStore.setByokMemoryLastConsolidatedAt(System.currentTimeMillis())
             total
         }
 
@@ -145,6 +152,11 @@ class ByokMemoryConsolidator(
 
         val conversation = sessionRepository.get(sessionId) ?: return Step(Result(), advanced = false)
         if (conversation.providerKind != ProviderKind.BYOK) return Step(Result(), advanced = false)
+        conversation.personaId?.let { personaId ->
+            val persona = personaRepository.get(personaId)
+                ?: return Step(Result(disabled = 1), advanced = false)
+            if (persona.isRolePlay) return Step(Result(disabled = 1), advanced = false)
+        }
         // 只有显式关掉这个会话的记忆才不学。会话级覆盖为 null 时跟随的是自动学习开关本身，
         // 不是「记忆注入」——三项子功能现在是平级的，注入关着不代表不该继续攒记忆。
         if (conversation.byokMemoryEnabled == false) return Step(Result(disabled = 1), advanced = false)
@@ -190,6 +202,7 @@ class ByokMemoryConsolidator(
                 .sortedByDescending { it.effectiveConfidence(System.currentTimeMillis()) }
                 .take(MAX_DIGEST_ENTRIES)
                 .map { ByokMemoryDigestEntry(id = it.id, section = it.section, text = it.text) },
+            topics = memoryRepository.topics(),
             suppressed = memoryRepository.suppressedTexts(),
         )
 
@@ -240,6 +253,7 @@ class ByokMemoryConsolidator(
                     // 都不在窗口的用户消息里，因此它们里面的「请记住…」永远过不了这一关。
                     val source = window.sourceOf(quote) ?: return@forEach
                     if (!allowSensitive && ByokMemoryGuards.looksSensitive(text)) return@forEach
+                    val topic = memoryRepository.resolveTopic(section, op.topic, op.group, op.summary)
 
                     // 纠正必须指向一条真实存在的旧记忆，否则它只是一次伪装成纠正的新增。
                     // 用户亲手写下或亲自确认过的条目不接受自动纠正——记忆页写着它们不会被自动学习改写。
@@ -262,6 +276,7 @@ class ByokMemoryConsolidator(
                             text = text,
                             section = section,
                             profileKey = op.profileKey,
+                            topicId = topic.id,
                             sessionId = sessionId,
                             messageId = source.messageId,
                             quote = quote,
@@ -280,6 +295,7 @@ class ByokMemoryConsolidator(
                             text = text,
                             section = section,
                             profileKey = op.profileKey,
+                            topicId = topic.id,
                             sessionId = sessionId,
                             messageId = source.messageId,
                             quote = quote,
@@ -300,6 +316,7 @@ class ByokMemoryConsolidator(
                         text = entry.text,
                         section = entry.section,
                         profileKey = entry.profileKey,
+                        topicId = entry.topicId,
                         sessionId = sessionId,
                         messageId = source.messageId,
                         quote = quote,
@@ -326,6 +343,39 @@ class ByokMemoryConsolidator(
             }
         }
         return Result(written = written, pending = pending)
+    }
+
+    private suspend fun organizeExistingTopics(): Result = mutex.withLock {
+        val settings = settingsStore.settings.first()
+        if (!settings.byokMemoryMasterEnabled || !settings.byokMemoryAutoLearn) return@withLock Result()
+        val target = resolveModel(settings.byokMemoryModelKey) ?: return@withLock Result()
+        val entries = memoryRepository.entries().filter { it.topicId == null }
+        if (entries.isEmpty()) return@withLock Result()
+        val input = ByokMemoryAnalyzer.Input(
+            providerId = target.first,
+            modelId = target.second,
+            window = emptyList(),
+            existing = entries.map { ByokMemoryDigestEntry(id = it.id, section = it.section, text = it.text) },
+            topics = memoryRepository.topics(),
+        )
+        val assignments = try {
+            analyzer.organizeTopics(input)
+        } catch (error: Exception) {
+            Logger.w(TAG, "记忆主题整理失败：${error.message}", error)
+            return@withLock Result(failed = 1)
+        }
+        val validIds = entries.mapTo(mutableSetOf()) { it.id }
+        val assigned = mutableSetOf<String>()
+        var organized = 0
+        assignments.forEach { assignment ->
+            val ids = assignment.entryIds.filter { it in validIds && assigned.add(it) }
+            if (ids.isEmpty()) return@forEach
+            val section = entries.first { it.id == ids.first() }.section
+            val topic = memoryRepository.resolveTopic(section, assignment.title, assignment.group, assignment.summary)
+            memoryRepository.assignTopic(ids, topic.id)
+            organized++
+        }
+        Result(organized = organized, failed = if (assigned.size == validIds.size) 0 else 1)
     }
 
     private suspend fun entryById(id: String?): ByokMemoryEntry? {

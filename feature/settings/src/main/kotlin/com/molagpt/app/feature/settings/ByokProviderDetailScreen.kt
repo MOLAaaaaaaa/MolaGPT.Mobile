@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -45,6 +46,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.RadioButton
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Button
@@ -80,6 +82,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,6 +91,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.CustomBodyParam
+import com.molagpt.app.core.model.ModelPricing
+import com.molagpt.app.core.model.ModelsDevPrice
+import com.molagpt.app.core.model.ModelsDevPricing
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.ThinkingBehavior
@@ -357,6 +364,7 @@ fun ByokProviderDetailScreen(
             draft = draft,
             isImageProvider = isImageProvider,
             providerBaseUrl = provider.baseUrl,
+            onFetchPrices = viewModel::fetchModelPriceCandidates,
             onDismiss = { editingModel = null },
             onSave = { saved ->
                 val base = (saveDraftRef.value ?: provider!!)
@@ -384,6 +392,9 @@ fun ByokProviderDetailScreen(
         ModelFetchSheet(
             models = fetched,
             existingIds = base.models.map { it.id }.toSet(),
+            isImageProvider = base.purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE,
+            providerBaseUrl = base.baseUrl,
+            onFetchPrices = viewModel::fetchModelPriceCandidates,
             onDismiss = { fetchResult = null },
             onAdd = { selected ->
                 viewModel.addByokModels(base, selected)
@@ -399,6 +410,20 @@ private fun defaultChatPathFor(type: ByokProviderType): String = when (type) {
     ByokProviderType.OPENAI_RESPONSE -> "v1/responses"
     ByokProviderType.ANTHROPIC -> "v1/messages"
     ByokProviderType.GEMINI -> "models/{model}:streamGenerateContent"
+}
+
+/** 地址预览的拼接规则与网络层 ByokProvider.endpoint() 一致：base 去尾斜杠 + "/" + path 去首斜杠。 */
+private fun joinEndpoint(baseUrl: String, path: String, fallback: String): String =
+    baseUrl.trim().trimEnd('/') + "/" + path.trim().ifBlank { fallback }.trimStart('/')
+
+@Composable
+private fun EndpointPreview(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier,
+    )
 }
 
 @Composable
@@ -563,9 +588,52 @@ private fun ConfigSection(
             label = { Text("API 地址 (Base URL)") }, singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        // 请求路径与拼接结果放在主区域：base + path 拼出来是什么，配置时就能看见。
+        val useImagesEndpoints = isImage && imageFormat == com.molagpt.app.core.model.ByokImageFormat.OPENAI_IMAGES
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (useImagesEndpoints) {
+                OutlinedTextField(
+                    value = imagePath, onValueChange = { imagePath = it; reportDraft() },
+                    label = { Text("图像生成路径") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                // Gemini 出图与编辑都走生成路径（:generateContent），没有单独的编辑端点。
+                if (type != com.molagpt.app.core.model.ByokProviderType.GEMINI) {
+                    OutlinedTextField(
+                        value = imageEditPath, onValueChange = { imageEditPath = it; reportDraft() },
+                        label = { Text("图像编辑路径") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            } else {
+                OutlinedTextField(
+                    value = chatPath, onValueChange = { chatPath = it; reportDraft() },
+                    label = { Text(if (isImage) "出图路径（chat/completions）" else "对话路径") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (baseUrl.isNotBlank()) {
+                when {
+                    !isImage -> EndpointPreview(
+                        "实际请求地址：" + joinEndpoint(baseUrl, chatPath, defaultChatPathFor(type)),
+                    )
+                    !useImagesEndpoints -> EndpointPreview(
+                        "生成 / 编辑地址：" + joinEndpoint(baseUrl, chatPath, "v1/chat/completions"),
+                    )
+                    type == com.molagpt.app.core.model.ByokProviderType.GEMINI -> EndpointPreview(
+                        "生成地址：" + joinEndpoint(baseUrl, imagePath, "models/{model}:generateContent"),
+                    )
+                    else -> {
+                        EndpointPreview("生成地址：" + joinEndpoint(baseUrl, imagePath, "v1/images/generations"))
+                        EndpointPreview("编辑地址：" + joinEndpoint(baseUrl, imageEditPath, "v1/images/edits"))
+                    }
+                }
+            }
+        }
         OutlinedTextField(
             value = apiKey, onValueChange = { apiKey = it; reportDraft() },
-            label = { Text("API 密钥（仅存于本机）") }, singleLine = true,
+            label = { Text("API 密钥") }, singleLine = true,
             visualTransformation = if (keyVisible) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = {
                 TextButton(onClick = { keyVisible = !keyVisible }) {
@@ -576,36 +644,37 @@ private fun ConfigSection(
         )
 
         TextButton(onClick = { showAdvanced = !showAdvanced }) {
-            Text(if (showAdvanced) "收起高级设置" else "展开高级设置（路径）")
+            Text(if (showAdvanced) "收起高级设置" else "展开高级设置")
         }
         if (showAdvanced) {
-            OutlinedTextField(
-                value = chatPath, onValueChange = { chatPath = it; reportDraft() },
-                label = { Text(if (isImage && imageFormat == com.molagpt.app.core.model.ByokImageFormat.OPENAI_CHAT_IMAGE) "出图路径（chat/completions）" else "对话路径") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = modelsPath, onValueChange = { modelsPath = it; reportDraft() },
-                label = { Text("模型列表路径") }, singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (isImage && imageFormat == com.molagpt.app.core.model.ByokImageFormat.OPENAI_IMAGES) {
+            // 图像服务的对话路径只在编辑大图回退时用到，留在高级设置里。
+            if (useImagesEndpoints) {
                 OutlinedTextField(
-                    value = imagePath, onValueChange = { imagePath = it; reportDraft() },
-                    label = { Text("图像生成路径") }, singleLine = true,
+                    value = chatPath, onValueChange = { chatPath = it; reportDraft() },
+                    label = { Text("对话路径") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedTextField(
-                    value = imageEditPath, onValueChange = { imageEditPath = it; reportDraft() },
-                    label = { Text("图像编辑路径") }, singleLine = true,
+                    value = modelsPath, onValueChange = { modelsPath = it; reportDraft() },
+                    label = { Text("模型列表路径") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (baseUrl.isNotBlank()) {
+                    EndpointPreview(
+                        "自动获取地址：" + joinEndpoint(
+                            baseUrl,
+                            modelsPath,
+                            if (type == com.molagpt.app.core.model.ByokProviderType.GEMINI) "models" else "v1/models",
+                        ),
+                    )
+                }
             }
 
             Text("自定义请求头", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                "附加到该服务全部请求（对话 / 模型列表 / 测试），auth 之后追加。",
+                "将作用到该服务全部请求（对话 / 模型列表 / 测试）之后追加。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -835,7 +904,9 @@ private fun ModelEditSheet(
     onDelete: (() -> Unit)?,
     isImageProvider: Boolean = false,
     providerBaseUrl: String = "",
+    onFetchPrices: suspend (Collection<String>) -> Map<String, List<ModelsDevPrice>>,
 ) {
+    val scope = rememberCoroutineScope()
     var modelId by remember { mutableStateOf(draft.modelId) }
     var displayName by remember { mutableStateOf(draft.displayName) }
     var isImage by remember { mutableStateOf(if (isImageProvider) true else draft.isImage) }
@@ -862,6 +933,21 @@ private fun ModelEditSheet(
     var customEffortInput by remember { mutableStateOf("") }
     var tools by remember { mutableStateOf(draft.tools) }
     var customBody by remember { mutableStateOf(draft.customBody) }
+    var pricing by remember { mutableStateOf(draft.pricing) }
+    var priceCandidates by remember { mutableStateOf<List<ModelsDevPrice>?>(null) }
+    var fetchingPrice by remember { mutableStateOf(false) }
+    var priceStatus by remember { mutableStateOf<String?>(null) }
+    var customPrice by remember { mutableStateOf(false) }
+    var inputPrice by remember { mutableStateOf(draft.pricing?.input?.let(::formatPrice).orEmpty()) }
+    var outputPrice by remember { mutableStateOf(draft.pricing?.output?.let(::formatPrice).orEmpty()) }
+    var cacheReadPrice by remember { mutableStateOf(draft.pricing?.cacheRead?.let(::formatPrice).orEmpty()) }
+    var cacheWritePrice by remember { mutableStateOf(draft.pricing?.cacheWrite?.let(::formatPrice).orEmpty()) }
+    val customPriceValid = !customPrice || (
+        inputPrice.isNotBlank() && outputPrice.isNotBlank() &&
+            listOf(inputPrice, outputPrice, cacheReadPrice, cacheWritePrice).all {
+                it.isBlank() || it.toDoubleOrNull()?.let { value -> value.isFinite() && value >= 0 } == true
+            }
+        )
 
     fun applyAutoDetect() {
         val auto = ThinkingKinds.autoConfigFor(modelId, providerBaseUrl, supportedParams = null)
@@ -930,6 +1016,82 @@ private fun ModelEditSheet(
                 label = { Text("显示名称") }, singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            if (!isImageProvider) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("价格", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f))
+                    TextButton(
+                        onClick = {
+                            val opening = !customPrice
+                            customPrice = opening
+                            if (opening) {
+                                inputPrice = pricing?.input?.let(::formatPrice).orEmpty()
+                                outputPrice = pricing?.output?.let(::formatPrice).orEmpty()
+                                cacheReadPrice = pricing?.cacheRead?.let(::formatPrice).orEmpty()
+                                cacheWritePrice = pricing?.cacheWrite?.let(::formatPrice).orEmpty()
+                                priceStatus = null
+                            }
+                        },
+                    ) { Text(if (customPrice) "收起自定义" else "自定义") }
+                    OutlinedButton(
+                        onClick = {
+                            val id = modelId.trim()
+                            scope.launch {
+                                fetchingPrice = true
+                                priceStatus = null
+                                runCatching { onFetchPrices(listOf(id))[id].orEmpty() }
+                                    .onSuccess { candidates ->
+                                        priceCandidates = candidates
+                                        val preferred = preferredPrice(candidates, providerBaseUrl, pricing)
+                                        if (preferred != null) {
+                                            pricing = preferred.pricing.copy(source = "models.dev:${preferred.providerKey}")
+                                            customPrice = false
+                                        }
+                                        priceStatus = if (candidates.isEmpty()) "未找到价格" else null
+                                    }
+                                    .onFailure { priceStatus = "获取失败：${it.message ?: "未知错误"}" }
+                                fetchingPrice = false
+                            }
+                        },
+                        enabled = modelId.isNotBlank() && !fetchingPrice,
+                    ) { Text(if (fetchingPrice) "获取中…" else "获取价格") }
+                }
+                priceCandidates?.takeIf { !customPrice && it.isNotEmpty() }?.let { candidates ->
+                    PriceSourcePicker(
+                        candidates = candidates,
+                        pricing = pricing,
+                        onSelect = { selected ->
+                            pricing = selected.pricing.copy(source = "models.dev:${selected.providerKey}")
+                            customPrice = false
+                        },
+                        onClear = { pricing = null },
+                    )
+                }
+                if (customPrice) {
+                    PriceFields(
+                        input = inputPrice,
+                        output = outputPrice,
+                        cacheRead = cacheReadPrice,
+                        cacheWrite = cacheWritePrice,
+                        onInputChange = { inputPrice = it },
+                        onOutputChange = { outputPrice = it },
+                        onCacheReadChange = { cacheReadPrice = it },
+                        onCacheWriteChange = { cacheWritePrice = it },
+                    )
+                    if (!customPriceValid) {
+                        Text("输入和输出需同时填写，价格必须为非负数。", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                } else if (pricing != null && priceCandidates.isNullOrEmpty()) {
+                    PricingSummary(pricing = pricing!!) { pricing = null }
+                }
+                priceStatus?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             if (isImageProvider) {
                 Text("图像能力", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1166,11 +1328,20 @@ private fun ModelEditSheet(
                                 manualOverride = manualOverride,
                                 tools = tools,
                                 customBody = customBody,
+                                pricing = if (customPrice) {
+                                    ModelPricing(
+                                        inputPrice.toDouble(),
+                                        outputPrice.toDouble(),
+                                        cacheReadPrice.toDoubleOrNull(),
+                                        cacheWritePrice.toDoubleOrNull(),
+                                        "manual",
+                                    )
+                                } else pricing,
                             ),
                         )
                     }
                 },
-                enabled = modelId.isNotBlank(),
+                enabled = modelId.isNotBlank() && customPriceValid,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (draft.isExisting) "保存" else "添加") }
             if (onDelete != null) {
@@ -1371,12 +1542,22 @@ private fun ReasoningNoteCard(text: String, warn: Boolean = false) {
 private fun ModelFetchSheet(
     models: List<ProviderModel>,
     existingIds: Set<String>,
+    isImageProvider: Boolean,
+    providerBaseUrl: String,
+    onFetchPrices: suspend (Collection<String>) -> Map<String, List<ModelsDevPrice>>,
     onDismiss: () -> Unit,
     onAdd: (List<ProviderModel>) -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
     // 默认不勾选——用户必须主动选要添加的模型。
     var selected by remember(models) { mutableStateOf(emptySet<String>()) }
     var query by remember { mutableStateOf("") }
+    var pricingStep by remember { mutableStateOf(false) }
+    var fetchingPrices by remember { mutableStateOf(false) }
+    var candidatesByModel by remember { mutableStateOf<Map<String, List<ModelsDevPrice>>>(emptyMap()) }
+    var selectedPrices by remember { mutableStateOf<Map<String, ModelPricing>>(emptyMap()) }
+    var clearedPrices by remember { mutableStateOf(emptySet<String>()) }
+    var priceStatus by remember { mutableStateOf<String?>(null) }
 
     fun capabilitySummary(m: ProviderModel): String {
         val parts = mutableListOf<String>()
@@ -1400,6 +1581,7 @@ private fun ModelFetchSheet(
     }
     val selectable = filtered.filter { it.id !in existingIds }
     val allSelectableSelected = selectable.isNotEmpty() && selectable.all { it.id in selected }
+    val selectedModels = models.filter { it.id in selected && it.id !in existingIds }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1416,104 +1598,325 @@ private fun ModelFetchSheet(
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text("选择要添加的模型", style = MaterialTheme.typography.titleLarge)
-            Text(
-                "已勾选 ${selected.size} 个 · 共 ${models.size} 个（${existingIds.intersect(models.map { it.id }.toSet()).size} 个已存在）",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                label = { Text("搜索模型") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            if (pricingStep) {
+                Text("设置价格", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "过滤后 ${filtered.size} 个",
-                    style = MaterialTheme.typography.labelMedium,
+                    "已选择 ${selectedModels.size} 个模型",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextButton(
+                OutlinedButton(
                     onClick = {
-                        selected = if (allSelectableSelected) {
-                            selected - selectable.map { it.id }.toSet()
-                        } else {
-                            selected + selectable.map { it.id }.toSet()
+                        scope.launch {
+                            fetchingPrices = true
+                            priceStatus = null
+                            runCatching { onFetchPrices(selectedModels.map { it.id }) }
+                                .onSuccess { result ->
+                                    candidatesByModel = result
+                                    selectedPrices = selectedModels.mapNotNull { model ->
+                                        preferredPrice(result[model.id].orEmpty(), providerBaseUrl, model.pricing)
+                                            ?.let { choice ->
+                                                model.id to choice.pricing.copy(source = "models.dev:${choice.providerKey}")
+                                            }
+                                    }.toMap()
+                                    clearedPrices = emptySet()
+                                    val found = result.count { it.value.isNotEmpty() }
+                                    priceStatus = if (found == 0) "未找到公开价格" else "已获取 $found 个模型的价格"
+                                }
+                                .onFailure { priceStatus = "获取失败：${it.message ?: "未知错误"}" }
+                            fetchingPrices = false
                         }
                     },
-                    enabled = selectable.isNotEmpty(),
+                    enabled = !fetchingPrices,
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (allSelectableSelected) "取消全选" else "全选可见")
+                    Text(if (fetchingPrices) "获取中…" else "一键获取价格")
                 }
-            }
-            Column(
-                modifier = Modifier
-                    .verticalScroll(rememberScrollState())
-                    .weight(1f, fill = false),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                filtered.forEach { model ->
-                    val alreadyExists = model.id in existingIds
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(model.displayName, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(
-                                model.id,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                capabilitySummary(model),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                            )
-                        }
-                        if (alreadyExists) {
-                            Text("跳过", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                        } else {
-                            androidx.compose.material3.Checkbox(
-                                checked = model.id in selected,
-                                onCheckedChange = { checked ->
-                                    selected = if (checked) selected + model.id else selected - model.id
-                                },
-                            )
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()).weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    selectedModels.forEach { model ->
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.28f),
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(model.displayName, style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(model.id, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                val candidates = candidatesByModel[model.id]
+                                val modelPricing = when {
+                                    model.id in clearedPrices -> null
+                                    model.id in selectedPrices -> selectedPrices[model.id]
+                                    else -> model.pricing
+                                }
+                                if (!candidates.isNullOrEmpty()) {
+                                    PriceSourcePicker(
+                                        candidates = candidates,
+                                        pricing = modelPricing,
+                                        onSelect = { choice ->
+                                            selectedPrices = selectedPrices + (model.id to choice.pricing.copy(
+                                                source = "models.dev:${choice.providerKey}",
+                                            ))
+                                            clearedPrices = clearedPrices - model.id
+                                        },
+                                        onClear = {
+                                            selectedPrices = selectedPrices - model.id
+                                            clearedPrices = clearedPrices + model.id
+                                        },
+                                    )
+                                } else if (modelPricing != null) {
+                                    PricingSummary(modelPricing) {
+                                        selectedPrices = selectedPrices - model.id
+                                        clearedPrices = clearedPrices + model.id
+                                    }
+                                } else {
+                                    Text(
+                                        if (candidates != null) "未找到公开价格" else "暂未设置价格",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
-                if (filtered.isEmpty()) {
-                    Text(
-                        "无匹配模型",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 12.dp),
-                    )
+                priceStatus?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("取消") }
-                Button(
-                    onClick = {
-                        onAdd(models.filter { it.id in selected && it.id !in existingIds })
-                    },
-                    enabled = selected.any { it !in existingIds },
-                    modifier = Modifier.weight(1f),
-                ) { Text("添加已选") }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = { pricingStep = false }, modifier = Modifier.weight(1f)) { Text("返回") }
+                    Button(
+                        onClick = {
+                            onAdd(selectedModels.map { model ->
+                                model.copy(pricing = when {
+                                    model.id in clearedPrices -> null
+                                    model.id in selectedPrices -> selectedPrices[model.id]
+                                    else -> model.pricing
+                                })
+                            })
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("添加模型") }
+                }
+            } else {
+                Text("选择要添加的模型", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "已勾选 ${selected.size} 个 · 共 ${models.size} 个（${existingIds.intersect(models.map { it.id }.toSet()).size} 个已存在）",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("搜索模型") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "过滤后 ${filtered.size} 个",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(
+                        onClick = {
+                            selected = if (allSelectableSelected) {
+                                selected - selectable.map { it.id }.toSet()
+                            } else {
+                                selected + selectable.map { it.id }.toSet()
+                            }
+                        },
+                        enabled = selectable.isNotEmpty(),
+                    ) {
+                        Text(if (allSelectableSelected) "取消全选" else "全选可见")
+                    }
+                }
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()).weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    filtered.forEach { model ->
+                        val alreadyExists = model.id in existingIds
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(model.displayName, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    model.id,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    capabilitySummary(model),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                )
+                            }
+                            if (alreadyExists) {
+                                Text("跳过", style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                            } else {
+                                Checkbox(
+                                    checked = model.id in selected,
+                                    onCheckedChange = { checked ->
+                                        selected = if (checked) selected + model.id else selected - model.id
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    if (filtered.isEmpty()) {
+                        Text(
+                            "无匹配模型",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 12.dp),
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("取消") }
+                    Button(
+                        onClick = {
+                            if (isImageProvider) onAdd(selectedModels) else pricingStep = true
+                        },
+                        enabled = selectedModels.isNotEmpty(),
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (isImageProvider) "添加已选" else "下一步") }
+                }
             }
         }
     }
 }
+
+@Composable
+private fun PriceSourcePicker(
+    candidates: List<ModelsDevPrice>,
+    pricing: ModelPricing?,
+    onSelect: (ModelsDevPrice) -> Unit,
+    onClear: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedKey = pricing?.source?.substringAfter("models.dev:", "")
+    val selected = candidates.firstOrNull { it.providerKey == selectedKey }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.weight(1f)) {
+            OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+                Text(selected?.providerName ?: "选择价格来源", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier.heightIn(max = 360.dp),
+            ) {
+                candidates.forEach { candidate ->
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(candidate.providerName)
+                                Text(
+                                    "输入 ${formatPrice(candidate.pricing.input)} · 输出 ${formatPrice(candidate.pricing.output)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        },
+                        onClick = {
+                            expanded = false
+                            onSelect(candidate)
+                        },
+                    )
+                }
+            }
+        }
+        if (pricing != null) TextButton(onClick = onClear) { Text("暂不设置") }
+    }
+    pricing?.let { PricingSummary(it) }
+}
+
+@Composable
+private fun PricingSummary(pricing: ModelPricing, onClear: (() -> Unit)? = null) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                "输入 ${formatPrice(pricing.input)} · 输出 ${formatPrice(pricing.output)}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (pricing.cacheRead != null || pricing.cacheWrite != null) {
+                Text(
+                    "缓存读取 ${formatPrice(pricing.cacheRead)} · 写入 ${formatPrice(pricing.cacheWrite)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (onClear != null) TextButton(onClick = onClear) { Text("暂不设置") }
+    }
+}
+
+@Composable
+private fun PriceFields(
+    input: String,
+    output: String,
+    cacheRead: String,
+    cacheWrite: String,
+    onInputChange: (String) -> Unit,
+    onOutputChange: (String) -> Unit,
+    onCacheReadChange: (String) -> Unit,
+    onCacheWriteChange: (String) -> Unit,
+) {
+    val values = listOf(input, output, cacheRead, cacheWrite)
+    val labels = listOf("输入", "输出", "缓存读取", "缓存写入")
+    val updates = listOf(onInputChange, onOutputChange, onCacheReadChange, onCacheWriteChange)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        values.chunked(2).forEachIndexed { row, pair ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                pair.forEachIndexed { column, value ->
+                    val index = row * 2 + column
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = updates[index],
+                        label = { Text(labels[index]) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun preferredPrice(
+    candidates: List<ModelsDevPrice>,
+    providerBaseUrl: String,
+    current: ModelPricing?,
+): ModelsDevPrice? {
+    val selectedKey = current?.source?.substringAfter("models.dev:", "")
+    return candidates.firstOrNull { it.providerKey == selectedKey }
+        ?: candidates.firstOrNull { it.pricing.copy(source = null) == current?.copy(source = null) }
+        ?: ModelsDevPricing.guessProviderKey(providerBaseUrl)?.let { key ->
+            candidates.firstOrNull { it.providerKey == key }
+        }
+        ?: candidates.firstOrNull()
+}
+
+private fun formatPrice(value: Double?): String = value?.let {
+    java.math.BigDecimal.valueOf(it).stripTrailingZeros().toPlainString()
+} ?: "—"
 
 /** 模型编辑表单的中间态。与 [ProviderModel] 互转，避免直接在 UI 持有全部字段。 */
 private data class ModelDraft(
@@ -1531,6 +1934,7 @@ private data class ModelDraft(
     val manualOverride: Boolean = false,
     val tools: Boolean = true,
     val customBody: List<CustomBodyParam> = emptyList(),
+    val pricing: com.molagpt.app.core.model.ModelPricing? = null,
     val isExisting: Boolean = false,
 ) {
     fun toModel(provider: ByokProvider): ProviderModel = ProviderModel(
@@ -1559,6 +1963,7 @@ private data class ModelDraft(
             )
             cfg.copy(defaultEffort = ThinkingKinds.resolveDefaultEffort(cfg))
         } else null,
+        pricing = pricing,
         customBody = customBody.filter { it.key.isNotBlank() },
     )
 
@@ -1580,6 +1985,7 @@ private data class ModelDraft(
                 manualOverride = tcfg?.manualOverride == true,
                 tools = model.supportsToolCalling,
                 customBody = model.customBody,
+                pricing = model.pricing,
                 isExisting = true,
             )
         }

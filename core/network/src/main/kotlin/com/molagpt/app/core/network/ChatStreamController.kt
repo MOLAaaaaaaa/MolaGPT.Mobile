@@ -17,7 +17,7 @@ class ChatStreamController {
             event.thinking?.let { add(DeltaCommand.AppendThinking(it)) }
             event.text?.let { add(DeltaCommand.AppendText(it)) }
         }
-        is StreamEvent.Sources -> listOf(DeltaCommand.SetSources(event.refs))
+        is StreamEvent.Sources -> listOf(DeltaCommand.SetSources(event.refs, event.query))
         is StreamEvent.Pending -> listOf(DeltaCommand.SetPending(event.label, event.detail))
         is StreamEvent.Image -> listOf(DeltaCommand.AddImage(event.url, event.prompt))
         is StreamEvent.WireHistory -> listOf(
@@ -36,6 +36,7 @@ class ChatStreamController {
                 ),
             ),
         )
+        is StreamEvent.UsageUpdate -> emptyList()
         is StreamEvent.Finish -> listOf(DeltaCommand.Complete(event.usage, event.reason))
         is StreamEvent.Failed -> listOf(DeltaCommand.Fail(event.message))
     }
