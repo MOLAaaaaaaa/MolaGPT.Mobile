@@ -5,3 +5,6 @@ class MolaAuthExpiredException(message: String = "登录状态已失效，请重
 
 /** 后端返回的业务错误（非 2xx 或流内 error）。 */
 class MolaApiException(val statusCode: Int?, message: String) : Exception(message)
+
+internal fun serverResponseError(summary: String, statusCode: Int, raw: String): String =
+    "$summary：HTTP $statusCode\n\nRaw：\n$raw"

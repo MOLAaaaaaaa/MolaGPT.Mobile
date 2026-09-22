@@ -95,11 +95,14 @@ fun Flow<StreamEvent>.webTypingPaced(): Flow<StreamEvent> = channelFlow {
 internal data class StreamPacingConfig(
     val tickMillis: Long = STREAM_TEXT_TICK_MS,
     val minimumCharsPerSecond: Double = 62.5,
-    val maximumCharsPerSecond: Double = 600.0,
+    // 上限按 [maximumBatch] 每帧折算，只是防止一帧倾泻的安全阀，不是目标节奏——
+    // 节奏由 [targetDrainMillis] 决定。上限压到几百字/秒时它会反过来盖住排空逻辑：
+    // 一万多字的积压要打二十多秒，正文早就收完了停止按钮还亮着。
+    val maximumCharsPerSecond: Double = 6_000.0,
     val targetDrainMillis: Double = 600.0,
     val accelerationSmoothing: Double = 0.18,
     val decelerationSmoothing: Double = 0.12,
-    val maximumBatch: Int = 10,
+    val maximumBatch: Int = 96,
     val maximumBacklogFraction: Double = 0.15,
 ) {
     init {

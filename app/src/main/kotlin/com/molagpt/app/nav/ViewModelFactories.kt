@@ -102,6 +102,9 @@ object ViewModelFactories {
             persistDefaultModel = { modelId, kind, providerId ->
                 container.settingsStore.setDefaultModelSelection(modelId, kind, providerId)
             },
+            persistThinkingNotDisableable = { providerId, modelId ->
+                container.markThinkingNotDisableable(providerId, modelId)
+            },
             // composer 运行时工具开关初值（network/网页拉取/代码执行）。
             // mcp/vision/imageGeneration 在对话内无开关，由 BYOK 工具设置页实时驱动（见 resolveRequestTools），不在此初始化。
             tools = EnabledTools(

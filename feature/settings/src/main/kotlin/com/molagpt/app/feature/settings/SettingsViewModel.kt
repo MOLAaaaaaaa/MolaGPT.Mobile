@@ -10,6 +10,7 @@ import com.molagpt.app.core.model.ByokProviderPresets
 import com.molagpt.app.core.model.byokMcpServerTokenKey
 import com.molagpt.app.core.model.McpToolInfo
 import com.molagpt.app.core.model.ResponseRegexRule
+import com.molagpt.app.core.model.ThinkingKinds
 import com.molagpt.app.core.model.webSearchApiKeyKey
 import com.molagpt.app.core.model.withoutToken
 import com.molagpt.app.core.network.AccountStatusCache
@@ -159,13 +160,45 @@ class SettingsViewModel(
         "连接失败：${e.message ?: "未知错误"}"
     }
 
-    /** 拉取候选模型，同时刷新已添加模型的接口价格。 */
+    /** 拉取候选模型，同时刷新已添加模型的接口价格与推理能力。 */
     suspend fun fetchByokModels(provider: ByokProvider): List<com.molagpt.app.core.model.ProviderModel> =
         withContext(dispatchers.io) {
             val fetched = byokModelApi.fetchModels(provider)
             applyByokPrices(provider.id, fetched.mapNotNull { m -> m.pricing?.let { m.id to it } }.toMap())
+            applyByokThinkingConfigs(provider.id, fetched)
             fetched
         }
+
+    /**
+     * 把服务商能力表里的推理声明同步到**已添加**的模型上。
+     *
+     * 不做这步的话，能力表只惠及新加的模型：早先加的仍留着按模型名猜出来的档位，
+     * 服务商声明「强制推理」也传不进来，界面会继续给一个点了没用的「关」。
+     * 用户手动指定过的（[ThinkingConfig.manualOverride]）不动。
+     */
+    private suspend fun applyByokThinkingConfigs(
+        providerId: String,
+        fetched: List<com.molagpt.app.core.model.ProviderModel>,
+    ) {
+        val provider = byokProviders.get(providerId) ?: return
+        val byId = fetched.associateBy { it.id }
+        var changed = false
+        val models = provider.models.map { model ->
+            val current = model.thinkingConfig
+            if (current?.manualOverride == true) return@map model
+            val next = byId[model.id]?.thinkingConfig ?: return@map model
+            // 观测结论比服务商声明更硬：它来自真实回复，不是猜的。
+            val merged = next.copy(offIneffective = current?.offIneffective == true)
+            if (merged == current) return@map model
+            changed = true
+            model.copy(
+                thinkingConfig = merged,
+                supportsThinking = true,
+                supportsReasoningEffort = ThinkingKinds.resolveEffortLevels(merged, provider.baseUrl).isNotEmpty(),
+            )
+        }
+        if (changed) byokProviders.upsert(provider.copy(models = models))
+    }
 
     private val _pricingRefresh = MutableStateFlow(PricingRefreshState(cachedAt = modelsDevCatalog.cachedAt))
     val pricingRefresh: StateFlow<PricingRefreshState> = _pricingRefresh.asStateFlow()

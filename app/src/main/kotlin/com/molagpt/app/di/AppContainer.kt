@@ -432,6 +432,21 @@ class AppContainer(
     suspend fun consolidateByokMemoryNow(): ByokMemoryConsolidator.Result =
         applicationScope.async { byokMemoryConsolidator.consolidateNow() }.await()
 
+    /**
+     * 记下「关了推理但模型仍在思考」这个观测结果。
+     * 写在模型配置上而不是会话里：这是模型/服务商的属性，换个对话同样成立。
+     */
+    suspend fun markThinkingNotDisableable(providerId: String, modelId: String) {
+        val provider = byokProviderRepository.get(providerId) ?: return
+        val model = provider.models.firstOrNull { it.id == modelId } ?: return
+        val config = model.thinkingConfig ?: return
+        if (config.offIneffective) return
+        val updated = provider.models.map {
+            if (it.id == modelId) it.copy(thinkingConfig = config.copy(offIneffective = true)) else it
+        }
+        byokProviderRepository.upsert(provider.copy(models = updated))
+    }
+
     /** 整理完成的轻量提示。会话仍打开时由聊天页消费，不向消息历史插伪造内容。 */
     val memoryConsolidated =
         MutableSharedFlow<Pair<String, ByokMemoryConsolidator.Result>>(extraBufferCapacity = 8)

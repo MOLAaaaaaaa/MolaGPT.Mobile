@@ -15,6 +15,7 @@ import com.molagpt.app.core.model.ImageGenerationConfig
 import com.molagpt.app.core.model.MemorySection
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.model.ReasoningOff
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.StreamEvent
 import com.molagpt.app.core.model.ThinkingConfig
@@ -305,7 +306,6 @@ class ByokChatService(
                     } else emit(event)
                 }
                 if (toolRound == null) {
-                    emit(StreamEvent.Failed("OpenAI Compatible 工具响应格式无效"))
                     return@flow
                 }
                 messages = toolRound.messages
@@ -347,12 +347,13 @@ class ByokChatService(
         try {
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    emit(StreamEvent.Failed("BYOK 请求失败：HTTP ${resp.code} ${resp.body?.string().orEmpty().take(160)}"))
+                    val text = resp.body?.string().orEmpty()
+                    emit(StreamEvent.Failed(serverResponseError("Anthropic 请求失败", resp.code, text)))
                     return@flow
                 }
                 val source = resp.body?.source()
                 if (source == null) {
-                    emit(StreamEvent.Failed("BYOK 响应为空"))
+                    emit(StreamEvent.Failed(serverResponseError("Anthropic 响应为空", resp.code, "")))
                     return@flow
                 }
                 var streamUsage: Usage? = null
@@ -377,7 +378,19 @@ class ByokChatService(
                         )
                         emit(StreamEvent.UsageUpdate(streamUsage))
                     }
-                    parseAnthropicEvent(payload.data)?.let { emit(it) }
+                    parseAnthropicEvent(payload.data)?.let { event ->
+                        if (event is StreamEvent.Failed) {
+                            emit(
+                                StreamEvent.Failed(
+                                    serverResponseError(
+                                        "Anthropic 流式请求失败（${event.message}）",
+                                        resp.code,
+                                        payload.data,
+                                    ),
+                                ),
+                            )
+                        } else emit(event)
+                    }
                 }
             }
         } finally {
@@ -401,12 +414,13 @@ class ByokChatService(
         try {
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    emit(StreamEvent.Failed("BYOK 请求失败：HTTP ${resp.code} ${resp.body?.string().orEmpty().take(160)}"))
+                    val text = resp.body?.string().orEmpty()
+                    emit(StreamEvent.Failed(serverResponseError("Gemini 请求失败", resp.code, text)))
                     return@flow
                 }
                 val source = resp.body?.source()
                 if (source == null) {
-                    emit(StreamEvent.Failed("BYOK 响应为空"))
+                    emit(StreamEvent.Failed(serverResponseError("Gemini 响应为空", resp.code, "")))
                     return@flow
                 }
                 var emittedFinish = false
@@ -418,7 +432,17 @@ class ByokChatService(
                         return@collect
                     }
                     parseGeminiEvent(payload.data).forEach { event ->
-                        emit(event)
+                        if (event is StreamEvent.Failed) {
+                            emit(
+                                StreamEvent.Failed(
+                                    serverResponseError(
+                                        "Gemini 流式请求失败（${event.message}）",
+                                        resp.code,
+                                        payload.data,
+                                    ),
+                                ),
+                            )
+                        } else emit(event)
                         if (event is StreamEvent.Finish) emittedFinish = true
                     }
                 }
@@ -448,12 +472,12 @@ class ByokChatService(
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
                     val text = resp.body?.string().orEmpty()
-                    emit(StreamEvent.Failed("BYOK 请求失败：HTTP ${resp.code} ${text.take(160)}"))
+                    emit(StreamEvent.Failed(serverResponseError("OpenAI Compatible 请求失败", resp.code, text)))
                     return@flow
                 }
                 val source = resp.body?.source()
                 if (source == null) {
-                    emit(StreamEvent.Failed("BYOK 响应为空"))
+                    emit(StreamEvent.Failed(serverResponseError("OpenAI Compatible 响应为空", resp.code, "")))
                     return@flow
                 }
                 var finished = false
@@ -465,7 +489,17 @@ class ByokChatService(
                         return@collect
                     }
                     parser.parse(payload).forEach { event ->
-                        emit(event)
+                        if (event is StreamEvent.Failed) {
+                            emit(
+                                StreamEvent.Failed(
+                                    serverResponseError(
+                                        "OpenAI Compatible 流式请求失败（${event.message}）",
+                                        resp.code,
+                                        payload.data,
+                                    ),
+                                ),
+                            )
+                        } else emit(event)
                         if (event is StreamEvent.Finish) finished = true
                     }
                 }
@@ -496,7 +530,6 @@ class ByokChatService(
                     } else emit(event)
                 }
                 if (toolRound == null) {
-                    emit(StreamEvent.Failed("Responses API 工具响应格式无效"))
                     return@flow
                 }
                 input = toolRound.messages
@@ -538,17 +571,18 @@ class ByokChatService(
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
                     val text = resp.body?.string().orEmpty()
-                    emit(StreamEvent.Failed("BYOK 请求失败：HTTP ${resp.code} ${text.take(160)}"))
+                    emit(StreamEvent.Failed(serverResponseError("Responses API 请求失败", resp.code, text)))
                     return@flow
                 }
                 val source = resp.body?.source()
                 if (source == null) {
-                    emit(StreamEvent.Failed("BYOK 响应为空"))
+                    emit(StreamEvent.Failed(serverResponseError("Responses API 响应为空", resp.code, "")))
                     return@flow
                 }
                 val outputItems = mutableListOf<JsonObject>()
                 val answer = StringBuilder()
                 var finish: StreamEvent.Finish? = null
+                var usage: Usage? = null
                 var failed = false
 
                 suspend fun handle(events: List<StreamEvent>) {
@@ -575,7 +609,19 @@ class ByokChatService(
                         return@collect
                     }
                     captureResponsesOutputItems(http.json, payload.data, outputItems)
-                    handle(parser.parse(payload))
+                    responsesStreamUsage(http.json, payload.data)?.let { usage = it }
+                    val events = parser.parse(payload).map { event ->
+                        if (event is StreamEvent.Failed) {
+                            StreamEvent.Failed(
+                                serverResponseError(
+                                    "Responses API 流式请求失败（${event.message}）",
+                                    resp.code,
+                                    payload.data,
+                                ),
+                            )
+                        } else event
+                    }
+                    handle(events)
                 }
                 if (finish == null) handle(parser.finishTail(null))
                 if (failed) return@flow
@@ -593,7 +639,9 @@ class ByokChatService(
                         ),
                     ),
                 )
-                emit(finish ?: StreamEvent.Finish("stop"))
+                // usage 只在 response.completed 的 response 对象里，StreamParser 读的是 chat/completions
+                // 形状的顶层 usage，这条路径原本一路是空的。
+                emit(StreamEvent.Finish(finish?.reason ?: "stop", usage ?: finish?.usage))
             }
         } finally {
             runCatching { if (!call.isCanceled()) call.cancel() }
@@ -623,11 +671,15 @@ class ByokChatService(
             put("stream", stream)
             if (systemText != null) put("instructions", systemText)
             putJsonArray("input") { inputItems.forEach { add(it) } }
-            // Responses API（OpenAI 官方 /v1/responses）推理：reasoning:{effort}，按 kind 门控。
+            // Responses API 推理：reasoning:{effort}；关闭同样要显式发，与 chat/completions 一致。
             val thinkingOn = request.useThinking || isAlwaysOnThinking(provider, request.modelId)
-            if (thinkingOn && effectiveThinkingKind(provider, request.modelId) != ThinkingParamKind.NONE) {
-                putJsonObject("reasoning") {
-                    put("effort", request.reasoningEffort.ifBlank { ThinkingKinds.MEDIUM })
+            if (effectiveThinkingKind(provider, request.modelId) != ThinkingParamKind.NONE) {
+                if (thinkingOn) {
+                    putJsonObject("reasoning") {
+                        put("effort", request.reasoningEffort.ifBlank { ThinkingKinds.HIGH })
+                    }
+                } else {
+                    addReasoningOff(provider, request.modelId)
                 }
             }
             if (includeTools && request.enabledTools.hasByokTools) {
@@ -647,7 +699,13 @@ class ByokChatService(
         put("parameters", buildToolParameters(spec, uppercaseTypes = false))
     }
 
-    /** Responses API 非流式工具轮：解析 output[] 中的 function_call，执行后回填 function_call_output。 */
+    /**
+     * Responses API 工具轮：流式接收，正文边到边发；output[] 从流里收集，函数调用在本轮结束后按序执行。
+     *
+     * output item 取两个来源：逐条的 `response.output_item.done`，以及终止事件里那份完整 output。
+     * 官方两者都发，`response.completed` 的更权威（reasoning 的 encrypted_content 在 `.added` 阶段可能还不完整）；
+     * 第三方实现常常只有其中一种。[captureResponsesOutputItems] 负责合并。
+     */
     private suspend fun runResponseToolRound(
         provider: ByokProvider,
         request: ChatRequest,
@@ -655,61 +713,105 @@ class ByokChatService(
         citations: WebSearchCitations,
         emitEvent: suspend (StreamEvent) -> Unit,
     ): ToolRoundResult? {
-        val body = buildOpenAiResponseBody(provider, request, messages, stream = false, includeTools = true)
+        val body = buildOpenAiResponseBody(provider, request, messages, stream = true, includeTools = true)
         val req = Request.Builder()
             .url(provider.endpoint(provider.chatPath))
+            .header("Accept", "text/event-stream")
             .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
-        http.okHttp.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) return null
-            val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
-            val output = (root["output"] as? JsonArray)
-                ?.mapNotNull { it as? JsonObject }
-                ?: return null
-            emitEvent(StreamEvent.UsageUpdate(parseOpenAiResponseUsage(root) ?: Usage(costComplete = false)))
-            val parsedOutput = parseResponseOutputItems(output)
-            val functionOutputs = ArrayList<ResponseFunctionOutput>()
-            val hasFunctionCalls = parsedOutput.any { it is ParsedResponseOutputItem.FunctionCall }
-
-            // output[] 本身就是有序协议：reasoning / message / function_call 必须逐项消费。
-            // 特别是工具前导句（message）必须紧挨它后面的工具卡，不能先收集所有文本再执行所有调用。
-            parsedOutput.forEach { item ->
-                when (item) {
-                    is ParsedResponseOutputItem.Reasoning -> {
-                        emitEvent(StreamEvent.Delta(thinking = item.text))
-                    }
-                    is ParsedResponseOutputItem.Message -> {
-                        emitEvent(StreamEvent.Delta(text = item.text))
-                    }
-                    is ParsedResponseOutputItem.FunctionCall -> {
-                        val call = ToolCall(
-                            id = item.id ?: Ids.newFragmentId(),
-                            name = item.name,
-                            arguments = item.arguments,
-                            responseCallId = item.callId,
-                        )
-                        val result = executeAndEmitTool(provider, request, call, citations, emitEvent)
-                        functionOutputs.add(
-                            ResponseFunctionOutput(
-                                callId = call.responseCallId ?: call.id,
-                                output = result.output,
-                            ),
-                        )
+        val parser = StreamParser(http.json)
+        val outputItems = mutableListOf<JsonObject>()
+        val answer = StringBuilder()
+        var usage: Usage? = null
+        var failed = false
+        val networkCall = http.okHttp.newCall(req)
+        try {
+            networkCall.execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val text = resp.body?.string().orEmpty()
+                    emitEvent(StreamEvent.Failed(serverResponseError("Responses API 工具请求失败", resp.code, text)))
+                    return null
+                }
+                val source = resp.body?.source()
+                if (source == null) {
+                    emitEvent(StreamEvent.Failed(serverResponseError("Responses API 工具响应为空", resp.code, "")))
+                    return null
+                }
+                // 本轮是否结束看 output[] 里有没有 function_call，不看流的 Finish，由外层循环判。
+                suspend fun drain(events: List<StreamEvent>, raw: String) {
+                    for (event in events) {
+                        when (event) {
+                            is StreamEvent.Finish -> Unit
+                            is StreamEvent.Failed -> {
+                                failed = true
+                                emitEvent(
+                                    StreamEvent.Failed(
+                                        serverResponseError(
+                                            "Responses API 工具流式请求失败（${event.message}）",
+                                            resp.code,
+                                            raw,
+                                        ),
+                                    ),
+                                )
+                            }
+                            is StreamEvent.Delta -> {
+                                event.text?.let(answer::append)
+                                emitEvent(event)
+                            }
+                            else -> emitEvent(event)
+                        }
                     }
                 }
+                sseFlow { source.readUtf8Line() }.collect { payload ->
+                    currentCoroutineContext().ensureActive()
+                    if (!payload.isDone) {
+                        captureResponsesOutputItems(http.json, payload.data, outputItems)
+                        responsesStreamUsage(http.json, payload.data)?.let { usage = it }
+                    }
+                    drain(parser.parse(payload), payload.data)
+                }
+                drain(parser.finishTail(null), "")
             }
-            // 官方手动上下文模式要求先原样回放整个 response.output（含 reasoning 的加密内容），
-            // 再附加与 call_id 对应的 function_call_output；不能把这些 item 转成空 user message。
-            val newInput = buildResponseReplayInput(messages, output, functionOutputs)
-            return ToolRoundResult(
-                messages = newInput,
-                completed = !hasFunctionCalls,
+        } finally {
+            runCatching { if (!networkCall.isCanceled()) networkCall.cancel() }
+        }
+        if (failed) return null
+        emitEvent(StreamEvent.UsageUpdate(usage ?: Usage(costComplete = false)))
+
+        // 只发文本增量、不发 output_item 的端点，这一轮的回答在历史里会整段消失，补一条 message 顶上。
+        if (outputItems.none(::isResponsesMessageItem) && answer.isNotEmpty()) {
+            outputItems += syntheticResponsesMessage(answer.toString())
+        }
+        val calls = parseResponseOutputItems(outputItems)
+            .filterIsInstance<ParsedResponseOutputItem.FunctionCall>()
+        val functionOutputs = ArrayList<ResponseFunctionOutput>()
+        for (item in calls) {
+            val call = ToolCall(
+                id = item.id ?: Ids.newFragmentId(),
+                name = item.name,
+                arguments = item.arguments,
+                responseCallId = item.callId,
+            )
+            val result = executeAndEmitTool(provider, request, call, citations, emitEvent)
+            functionOutputs.add(
+                ResponseFunctionOutput(callId = call.responseCallId ?: call.id, output = result.output),
             )
         }
+        // 官方手动上下文模式要求先原样回放整个 response.output（含 reasoning 的加密内容），
+        // 再附加与 call_id 对应的 function_call_output；不能把这些 item 转成空 user message。
+        return ToolRoundResult(
+            messages = buildResponseReplayInput(messages, outputItems, functionOutputs),
+            completed = calls.isEmpty(),
+        )
     }
 
+    /**
+     * OpenAI 兼容工具轮：流式接收，tool_calls 分片累积到本轮结束再执行。
+     *
+     * 工具只是可能发生的分支，正文该边生成边显示。整包接收时一条上万字的回答会让界面
+     * 在骨架屏上停十几秒，和请求卡死无法区分；而多数轮次模型根本不调工具。
+     */
     private suspend fun runToolRound(
         provider: ByokProvider,
         request: ChatRequest,
@@ -717,50 +819,92 @@ class ByokChatService(
         citations: WebSearchCitations,
         emitEvent: suspend (StreamEvent) -> Unit,
     ): ToolRoundResult? {
-        val body = buildOpenAiBody(provider, request, baseMessages, stream = false, includeTools = true)
+        val body = buildOpenAiBody(provider, request, baseMessages, stream = true, includeTools = true)
         val req = Request.Builder()
             .url(provider.endpoint(provider.chatPath))
+            .header("Accept", "text/event-stream")
             .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
-        http.okHttp.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) return null
-            val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
-            val roundUsage = parseOpenAiUsage(root)
-            emitEvent(StreamEvent.UsageUpdate(roundUsage ?: Usage(costComplete = false)))
-            val message = (root["choices"] as? JsonArray)
-                ?.firstOrNull()
-                ?.jsonObject
-                ?.get("message")
-                ?.jsonObject
-                ?: return null
-            val calls = (message["tool_calls"] as? JsonArray)
-                ?.mapNotNull { parseToolCall(it) }
-                .orEmpty()
-
-            // 先把工具调用前的助手前导文本/推理发给 UI（如「让我测试一下工具」），
-            // 与 Desktop 一致——非流式工具轮也要展示 content/reasoning，而不是直接蹦出工具卡片。
-            val preamble = message["content"]?.jsonPrimitive?.contentOrNull
-            val reasoning = message["reasoning_content"]?.jsonPrimitive?.contentOrNull
-                ?: message["reasoning"]?.jsonPrimitive?.contentOrNull
-            if (!reasoning.isNullOrBlank()) emitEvent(StreamEvent.Delta(thinking = reasoning))
-            if (!preamble.isNullOrBlank()) emitEvent(StreamEvent.Delta(text = preamble))
-            val messages = baseMessages.toMutableList()
-            messages.add(message)
-            if (calls.isEmpty()) return ToolRoundResult(messages, completed = true)
-            for (call in calls) {
-                val result = executeAndEmitTool(provider, request, call, citations, emitEvent)
-                messages.add(toolResultMessage(call.id, result.output))
+        val parser = StreamParser(http.json)
+        val pending = PendingToolCalls()
+        val rawContent = StringBuilder()
+        var usage: Usage? = null
+        var failed = false
+        val networkCall = http.okHttp.newCall(req)
+        try {
+            networkCall.execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val text = resp.body?.string().orEmpty()
+                    emitEvent(StreamEvent.Failed(serverResponseError("OpenAI Compatible 工具请求失败", resp.code, text)))
+                    return null
+                }
+                val source = resp.body?.source()
+                if (source == null) {
+                    emitEvent(StreamEvent.Failed(serverResponseError("OpenAI Compatible 工具响应为空", resp.code, "")))
+                    return null
+                }
+                // Finish 在这里不算数：本轮是否结束看有没有 tool_calls，由外层循环判。
+                // Tool 事件同理——解析器看到的是半截参数，真正的工具卡由 executeAndEmitTool 发。
+                suspend fun drain(events: List<StreamEvent>, raw: String) {
+                    for (event in events) {
+                        when (event) {
+                            is StreamEvent.Tool -> Unit
+                            is StreamEvent.Finish -> usage = event.usage ?: usage
+                            is StreamEvent.Failed -> {
+                                failed = true
+                                emitEvent(
+                                    StreamEvent.Failed(
+                                        serverResponseError(
+                                            "OpenAI Compatible 工具流式请求失败（${event.message}）",
+                                            resp.code,
+                                            raw,
+                                        ),
+                                    ),
+                                )
+                            }
+                            else -> emitEvent(event)
+                        }
+                    }
+                }
+                sseFlow { source.readUtf8Line() }.collect { payload ->
+                    currentCoroutineContext().ensureActive()
+                    if (!payload.isDone) accumulateToolCallDelta(payload.data, rawContent, pending)
+                    drain(parser.parse(payload), payload.data)
+                }
+                drain(parser.finishTail(null), "")
             }
-            return ToolRoundResult(messages, completed = false)
+        } finally {
+            runCatching { if (!networkCall.isCanceled()) networkCall.cancel() }
         }
+        if (failed) return null
+        emitEvent(StreamEvent.UsageUpdate(usage ?: Usage(costComplete = false)))
+
+        val calls = pending.build()
+        val messages = baseMessages + assistantToolCallMessage(rawContent.toString(), calls)
+        if (calls.isEmpty()) return ToolRoundResult(messages, completed = true)
+        val withResults = messages.toMutableList()
+        for (call in calls) {
+            val result = executeAndEmitTool(provider, request, call, citations, emitEvent)
+            withResults.add(toolResultMessage(call.id, result.output))
+        }
+        return ToolRoundResult(withResults, completed = false)
+    }
+
+    /** 回放历史要的是模型原文，不是 <think> 拆分和工具卡剥离之后的渲染文本，所以这里单独累积一份。 */
+    private fun accumulateToolCallDelta(data: String, content: StringBuilder, pending: PendingToolCalls) {
+        val root = runCatching { http.json.parseToJsonElement(data) }.getOrNull() as? JsonObject ?: return
+        val choice = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return
+        val delta = choice["delta"] as? JsonObject ?: return
+        (delta["content"] as? JsonPrimitive)?.contentOrNull?.let(content::append)
+        (delta["tool_calls"] as? JsonArray)?.forEach(pending::feed)
     }
 
     /**
      * Claude 原生 Messages 工具循环。
      * 每次都把服务端返回的整个 assistant content（含 thinking/signature/redacted_thinking/tool_use）
      * 原样放回历史，再追加一个包含本轮全部 tool_result 的 user message。
+     * content 由 [streamAnthropicToolRound] 从流式分片重建，回放形状与非流式响应一致。
      */
     private suspend fun runAnthropicToolLoop(
         provider: ByokProvider,
@@ -776,65 +920,17 @@ class ByokChatService(
 
         while (true) {
             currentCoroutineContext().ensureActive()
-            val body = buildAnthropicBody(provider, request, messages, stream = false, includeTools = true)
-            val networkRequest = Request.Builder()
-                .url(provider.endpoint(provider.chatPath))
-                .header("anthropic-version", "2023-06-01")
-                .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
-                .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
-                .build()
-            val responseText = try {
-                http.okHttp.newCall(networkRequest).execute().use { response ->
-                    val text = response.body?.string().orEmpty()
-                    if (!response.isSuccessful) {
-                        emitEvent(StreamEvent.Failed("BYOK 请求失败：HTTP ${response.code} ${text.take(160)}"))
-                        return
-                    }
-                    text
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                emitEvent(StreamEvent.Failed("Anthropic 请求失败：${error.message ?: error::class.simpleName}"))
-                return
-            }
-            val root = runCatching { http.json.parseToJsonElement(responseText).jsonObject }.getOrNull()
-            if (root == null) {
-                emitEvent(StreamEvent.Failed("Anthropic 响应格式无效"))
-                return
-            }
-            root["error"]?.let { error ->
-                val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull
-                emitEvent(StreamEvent.Failed(message ?: "Anthropic 请求失败"))
-                return
-            }
-            val contentBlocks = root["content"] as? JsonArray
-            if (contentBlocks == null) {
-                emitEvent(StreamEvent.Failed("Anthropic 响应缺少 content"))
-                return
-            }
-            usage = usage.accumulate(anthropicUsage(root) ?: Usage(costComplete = false))
+            val round = streamAnthropicToolRound(provider, request, messages, emitEvent) ?: return
+            usage = usage.accumulate(round.usage ?: Usage(costComplete = false))
             usage?.let { emitEvent(StreamEvent.UsageUpdate(it)) }
             val assistantMessage = buildJsonObject {
                 put("role", "assistant")
-                put("content", contentBlocks)
+                put("content", JsonArray(round.content))
             }
             messages += assistantMessage
             turnItems += assistantMessage
 
-            val calls = ArrayList<ToolCall>()
-            contentBlocks.forEach { element ->
-                val block = element as? JsonObject ?: return@forEach
-                when (block["type"]?.jsonPrimitive?.contentOrNull) {
-                    "thinking" -> block["thinking"]?.jsonPrimitive?.contentOrNull
-                        ?.takeIf { it.isNotEmpty() }
-                        ?.let { emitEvent(StreamEvent.Delta(thinking = it)) }
-                    "text" -> block["text"]?.jsonPrimitive?.contentOrNull
-                        ?.takeIf { it.isNotEmpty() }
-                        ?.let { emitEvent(StreamEvent.Delta(text = it)) }
-                    "tool_use" -> parseAnthropicToolCall(block)?.let(calls::add)
-                }
-            }
+            val calls = round.content.mapNotNull(::parseAnthropicToolCall)
 
             if (calls.isEmpty()) {
                 emitEvent(
@@ -848,8 +944,7 @@ class ByokChatService(
                         metadataKey = ChatMessageMetadataKeys.ANTHROPIC_WIRE_HISTORY,
                     ),
                 )
-                val reason = root["stop_reason"]?.jsonPrimitive?.contentOrNull ?: "stop"
-                emitEvent(StreamEvent.Finish(reason, usage))
+                emitEvent(StreamEvent.Finish(round.stopReason ?: "stop", usage))
                 return
             }
 
@@ -866,6 +961,98 @@ class ByokChatService(
             messages += resultMessage
             turnItems += resultMessage
         }
+    }
+
+    private data class AnthropicRound(
+        val content: List<JsonObject>,
+        val stopReason: String?,
+        val usage: Usage?,
+    )
+
+    /**
+     * Claude 工具轮的一次流式请求：文本与思考边到边发，同时把 content 块重建出来供回放。
+     *
+     * usage 分两处下发：`message_start` 带输入侧，`message_delta` 带输出侧，都要收。
+     * 返回 null 表示本轮已经发过 Failed，调用方直接结束。
+     */
+    private suspend fun streamAnthropicToolRound(
+        provider: ByokProvider,
+        request: ChatRequest,
+        messages: List<JsonObject>,
+        emitEvent: suspend (StreamEvent) -> Unit,
+    ): AnthropicRound? {
+        val body = buildAnthropicBody(provider, request, messages, stream = true, includeTools = true)
+        val req = Request.Builder()
+            .url(provider.endpoint(provider.chatPath))
+            .header("Accept", "text/event-stream")
+            .header("anthropic-version", "2023-06-01")
+            .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
+            .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
+            .build()
+        val blocks = AnthropicStreamBlocks()
+        var stopReason: String? = null
+        var usage: Usage? = null
+        var failed = false
+        val networkCall = http.okHttp.newCall(req)
+        try {
+            networkCall.execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val text = resp.body?.string().orEmpty()
+                    emitEvent(StreamEvent.Failed(serverResponseError("Anthropic 工具请求失败", resp.code, text)))
+                    return null
+                }
+                val source = resp.body?.source()
+                if (source == null) {
+                    emitEvent(StreamEvent.Failed(serverResponseError("Anthropic 工具响应为空", resp.code, "")))
+                    return null
+                }
+                sseFlow { source.readUtf8Line() }.collect { payload ->
+                    currentCoroutineContext().ensureActive()
+                    val root = runCatching { http.json.parseToJsonElement(payload.data) }.getOrNull() as? JsonObject
+                        ?: return@collect
+                    when (root["type"]?.jsonPrimitive?.contentOrNull) {
+                        "message_start" -> (root["message"] as? JsonObject)?.let { message ->
+                            usage = usage.mergeAnthropic(anthropicUsage(message))
+                        }
+                        "message_delta" -> {
+                            usage = usage.mergeAnthropic(anthropicUsage(root))
+                            (root["delta"] as? JsonObject)?.get("stop_reason")?.jsonPrimitive?.contentOrNull
+                                ?.let { stopReason = it }
+                        }
+                        "content_block_start" -> blocks.start(root)
+                        "content_block_delta" -> blocks.delta(root)
+                    }
+                    parseAnthropicEvent(payload.data)?.let { event ->
+                        when (event) {
+                            // 本轮是否结束看有没有 tool_use，不看 message_stop，由外层循环判。
+                            is StreamEvent.Finish -> Unit
+                            is StreamEvent.Failed -> {
+                                failed = true
+                                emitEvent(
+                                    StreamEvent.Failed(
+                                        serverResponseError(
+                                            "Anthropic 工具流式请求失败（${event.message}）",
+                                            resp.code,
+                                            payload.data,
+                                        ),
+                                    ),
+                                )
+                            }
+                            else -> emitEvent(event)
+                        }
+                    }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            emitEvent(StreamEvent.Failed("Anthropic 请求失败：${error.message ?: error::class.simpleName}"))
+            return null
+        } finally {
+            runCatching { if (!networkCall.isCanceled()) networkCall.cancel() }
+        }
+        if (failed) return null
+        return AnthropicRound(blocks.build(http.json), stopReason, usage)
     }
 
     /**
@@ -886,64 +1073,15 @@ class ByokChatService(
 
         while (true) {
             currentCoroutineContext().ensureActive()
-            val body = buildGeminiBody(provider, request, contents, includeTools = true)
-            val networkRequest = Request.Builder()
-                .url(geminiEndpoint(provider, request.modelId, stream = false))
-                .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
-                .build()
-            val responseText = try {
-                http.okHttp.newCall(networkRequest).execute().use { response ->
-                    val text = response.body?.string().orEmpty()
-                    if (!response.isSuccessful) {
-                        emitEvent(StreamEvent.Failed("BYOK 请求失败：HTTP ${response.code} ${text.take(160)}"))
-                        return
-                    }
-                    text
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                emitEvent(StreamEvent.Failed("Gemini 请求失败：${error.message ?: error::class.simpleName}"))
-                return
-            }
-            val root = runCatching { http.json.parseToJsonElement(responseText).jsonObject }.getOrNull()
-            if (root == null) {
-                emitEvent(StreamEvent.Failed("Gemini 响应格式无效"))
-                return
-            }
-            root["error"]?.let { error ->
-                val message = (error as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull
-                emitEvent(StreamEvent.Failed(message ?: "Gemini 请求失败"))
-                return
-            }
-            val candidate = (root["candidates"] as? JsonArray)?.firstOrNull() as? JsonObject
-            val rawContent = candidate?.get("content") as? JsonObject
-            if (candidate == null || rawContent == null) {
-                val blockReason = (root["promptFeedback"] as? JsonObject)
-                    ?.get("blockReason")?.jsonPrimitive?.contentOrNull
-                emitEvent(StreamEvent.Failed(blockReason?.let { "Gemini 请求被拦截：$it" } ?: "Gemini 响应缺少 content"))
-                return
-            }
-            val modelContent = ensureGeminiModelRole(rawContent)
+            val round = streamGeminiToolRound(provider, request, contents, emitEvent) ?: return
+            val modelContent = ensureGeminiModelRole(round.content)
             contents += modelContent
             turnItems += modelContent
-            usage = usage.accumulate(geminiUsage(root) ?: Usage(costComplete = false))
+            usage = usage.accumulate(round.usage ?: Usage(costComplete = false))
             usage?.let { emitEvent(StreamEvent.UsageUpdate(it)) }
 
-            val calls = ArrayList<ToolCall>()
-            val parts = modelContent["parts"] as? JsonArray ?: JsonArray(emptyList())
-            parts.forEach { element ->
-                val part = element as? JsonObject ?: return@forEach
-                val text = part["text"]?.jsonPrimitive?.contentOrNull
-                if (!text.isNullOrEmpty()) {
-                    if (part["thought"]?.jsonPrimitive?.booleanOrNull == true) {
-                        emitEvent(StreamEvent.Delta(thinking = text))
-                    } else {
-                        emitEvent(StreamEvent.Delta(text = text))
-                    }
-                }
-                parseGeminiToolCall(part)?.let(calls::add)
-            }
+            val parts = (modelContent["parts"] as? JsonArray).orEmpty()
+            val calls = parts.mapNotNull(::parseGeminiToolCall)
 
             if (calls.isEmpty()) {
                 emitEvent(
@@ -957,8 +1095,7 @@ class ByokChatService(
                         metadataKey = ChatMessageMetadataKeys.GEMINI_WIRE_HISTORY,
                     ),
                 )
-                val reason = candidate["finishReason"]?.jsonPrimitive?.contentOrNull ?: "stop"
-                emitEvent(StreamEvent.Finish(reason, usage))
+                emitEvent(StreamEvent.Finish(round.finishReason ?: "stop", usage))
                 return
             }
 
@@ -975,6 +1112,96 @@ class ByokChatService(
             contents += responseContent
             turnItems += responseContent
         }
+    }
+
+    private data class GeminiRound(
+        val content: JsonObject,
+        val finishReason: String?,
+        val usage: Usage?,
+    )
+
+    /**
+     * Gemini 工具轮的一次流式请求：正文与思考边到边发，同时把 parts 合并回一个 content 供回放。
+     *
+     * 每个分片的 usageMetadata 是累计值，取最后一份即可，不要再跨分片求和。
+     * 返回 null 表示本轮已经发过 Failed，调用方直接结束。
+     */
+    private suspend fun streamGeminiToolRound(
+        provider: ByokProvider,
+        request: ChatRequest,
+        contents: List<JsonObject>,
+        emitEvent: suspend (StreamEvent) -> Unit,
+    ): GeminiRound? {
+        val body = buildGeminiBody(provider, request, contents, includeTools = true)
+        val req = Request.Builder()
+            .url(geminiEndpoint(provider, request.modelId, stream = true))
+            .header("Accept", "text/event-stream")
+            .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
+            .build()
+        val parts = GeminiStreamParts()
+        var finishReason: String? = null
+        var usage: Usage? = null
+        var blockReason: String? = null
+        var failed = false
+        val networkCall = http.okHttp.newCall(req)
+        try {
+            networkCall.execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    val text = resp.body?.string().orEmpty()
+                    emitEvent(StreamEvent.Failed(serverResponseError("Gemini 工具请求失败", resp.code, text)))
+                    return null
+                }
+                val source = resp.body?.source()
+                if (source == null) {
+                    emitEvent(StreamEvent.Failed(serverResponseError("Gemini 工具响应为空", resp.code, "")))
+                    return null
+                }
+                sseFlow { source.readUtf8Line() }.collect { payload ->
+                    currentCoroutineContext().ensureActive()
+                    val root = runCatching { http.json.parseToJsonElement(payload.data) }.getOrNull() as? JsonObject
+                    if (root != null) {
+                        parts.feed(root)
+                        (root["promptFeedback"] as? JsonObject)?.get("blockReason")?.jsonPrimitive?.contentOrNull
+                            ?.let { blockReason = it }
+                    }
+                    parseGeminiEvent(payload.data).forEach { event ->
+                        when (event) {
+                            // 本轮是否结束看有没有 functionCall，不看 finishReason，由外层循环判。
+                            is StreamEvent.Finish -> finishReason = event.reason ?: finishReason
+                            is StreamEvent.UsageUpdate -> usage = event.usage
+                            is StreamEvent.Failed -> {
+                                failed = true
+                                emitEvent(
+                                    StreamEvent.Failed(
+                                        serverResponseError(
+                                            "Gemini 工具流式请求失败（${event.message}）",
+                                            resp.code,
+                                            payload.data,
+                                        ),
+                                    ),
+                                )
+                            }
+                            else -> emitEvent(event)
+                        }
+                    }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            emitEvent(StreamEvent.Failed("Gemini 请求失败：${error.message ?: error::class.simpleName}"))
+            return null
+        } finally {
+            runCatching { if (!networkCall.isCanceled()) networkCall.cancel() }
+        }
+        if (failed) return null
+        val content = parts.build()
+        if ((content["parts"] as? JsonArray).isNullOrEmpty()) {
+            val summary = blockReason?.let { "Gemini 工具请求被拦截：$it" } ?: "Gemini 工具响应缺少 content"
+            emitEvent(StreamEvent.Failed(summary))
+            return null
+        }
+        return GeminiRound(content, finishReason, usage)
     }
 
     private fun buildOpenAiBody(
@@ -1007,26 +1234,47 @@ class ByokChatService(
     private fun supportsStreamUsage(baseUrl: String): Boolean =
         !baseUrl.contains("api.mistral.ai", ignoreCase = true)
 
+    private fun thinkingConfigOf(provider: ByokProvider, modelId: String): ThinkingConfig? =
+        provider.models.firstOrNull { it.id == modelId }?.thinkingConfig
+
     /**
-     * 有效推理 kind：模型显式配置（含 NONE=关闭）优先；否则按 OpenRouter→host→模型 ID 兜底。
+     * 有效推理 kind：模型显式配置（含 NONE=关闭）优先；否则按方言表的 host 形状→模型 ID 兜底。
      * 聚合网关下预算类通过 [ThinkingKinds.wireKind] 折算为 OPENAI_REASONING_EFFORT，
-     * 避免把 thinking_budget 等家族私有参数发到 OpenRouter。
+     * 避免把 thinking_budget 等家族私有参数发到网关。
      */
     private fun effectiveThinkingKind(provider: ByokProvider, modelId: String): ThinkingParamKind {
-        val cfg = provider.models.firstOrNull { it.id == modelId }?.thinkingConfig
-        val raw = when {
-            cfg != null -> cfg.kind
-            ThinkingKinds.isOpenRouter(provider.baseUrl) -> ThinkingParamKind.OPENAI_REASONING_EFFORT
-            else -> ThinkingKinds.hostInferredKind(provider.baseUrl)
-                ?: ThinkingKinds.inferFromModelId(modelId)
-        }
+        val raw = thinkingConfigOf(provider, modelId)?.kind
+            ?: ThinkingKinds.hostInferredKind(provider.baseUrl)
+            ?: ThinkingKinds.inferFromModelId(modelId)
         return ThinkingKinds.wireKind(raw, provider.baseUrl)
     }
 
-    /** 模型是否强制开启推理（如 Kimi K3）。 */
-    private fun isAlwaysOnThinking(provider: ByokProvider, modelId: String): Boolean =
-        provider.models.firstOrNull { it.id == modelId }?.thinkingConfig?.alwaysOn == true ||
-            ThinkingKinds.isKimiK3(modelId)
+    /**
+     * 该模型是否关不掉推理：服务商声明强制、方言表无关闭手段、或观测到关了也没用。
+     * 关不掉时按「开启」构造请求——发一个服务商不认的禁用参数只会换来 400。
+     */
+    private fun isAlwaysOnThinking(provider: ByokProvider, modelId: String): Boolean {
+        val cfg = thinkingConfigOf(provider, modelId)
+            ?: return ThinkingKinds.isKimiK3(modelId)
+        return ThinkingKinds.isAlwaysOn(cfg, provider.baseUrl) || ThinkingKinds.isKimiK3(modelId)
+    }
+
+    /**
+     * 关闭推理：按方言表显式发出禁用参数。
+     *
+     * 省略参数不等于关闭——混合推理模型上多数服务商把缺省解释为「沿用服务端默认」，
+     * 而默认往往是开启。方言表给不出关闭手段时（[ReasoningOff.UNSUPPORTED]）什么都不发，
+     * 因为那种模型本来就关不掉，硬发只会 400；UI 侧同样不会给出「关」档。
+     */
+    private fun JsonObjectBuilder.addReasoningOff(provider: ByokProvider, modelId: String) {
+        val kind = thinkingConfigOf(provider, modelId)?.kind ?: effectiveThinkingKind(provider, modelId)
+        when (ThinkingKinds.offFor(provider.baseUrl, kind)) {
+            ReasoningOff.OMIT, ReasoningOff.UNSUPPORTED -> Unit
+            ReasoningOff.REASONING_DISABLED -> putJsonObject("reasoning") { put("enabled", false) }
+            ReasoningOff.THINKING_DISABLED -> putJsonObject("thinking") { put("type", "disabled") }
+            ReasoningOff.ENABLE_THINKING_FALSE -> put("enable_thinking", false)
+        }
+    }
 
     /**
      * 向 OpenAI-compat 请求体追加推理参数（top-level 字段，按 kind 分派）。
@@ -1043,13 +1291,7 @@ class ByokChatService(
         val alwaysOn = isAlwaysOnThinking(provider, modelId)
         val useThinking = requestedThinking || alwaysOn
         if (!useThinking) {
-            // 关闭：仅对需要显式禁用的 kind 发禁用参数，其余省略（更安全）。
-            when (kind) {
-                ThinkingParamKind.DEEPSEEK_THINKING, ThinkingParamKind.KIMI ->
-                    putJsonObject("thinking") { put("type", "disabled") }
-                ThinkingParamKind.QWEN_THINKING_BUDGET -> put("enable_thinking", false)
-                else -> {}
-            }
+            addReasoningOff(provider, modelId)
             return
         }
         val effort = reasoningEffort.ifBlank {
@@ -1428,15 +1670,6 @@ class ByokChatService(
         putJsonArray("required") { spec.required.forEach { add(it) } }
     }
 
-    private fun parseToolCall(element: JsonElement): ToolCall? {
-        val obj = element as? JsonObject ?: return null
-        val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: return null
-        val function = obj["function"] as? JsonObject ?: return null
-        val name = function["name"]?.jsonPrimitive?.contentOrNull ?: return null
-        val arguments = function["arguments"]?.jsonPrimitive?.contentOrNull ?: "{}"
-        return ToolCall(id, name, arguments)
-    }
-
     private fun parseAnthropicToolCall(element: JsonElement): ToolCall? {
         val obj = element as? JsonObject ?: return null
         if (obj["type"]?.jsonPrimitive?.contentOrNull != "tool_use") return null
@@ -1644,8 +1877,10 @@ class ByokChatService(
         return runCatching {
             http.okHttp.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) return "Vision failed: HTTP ${resp.code} ${text.take(800)}"
-                parseOpenAiTextResult(text)
+                if (!resp.isSuccessful) {
+                    return "Vision failed: ${serverResponseError("OpenAI Compatible 视觉请求失败", resp.code, text)}"
+                }
+                parseOpenAiTextResult(resp.code, text)
             }
         }.getOrElse { "Vision failed: ${it.message}" }
     }
@@ -1678,21 +1913,23 @@ class ByokChatService(
         return runCatching {
             http.okHttp.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) return "Vision failed: HTTP ${resp.code} ${text.take(800)}"
-                parseResponseTextResult(text)
+                if (!resp.isSuccessful) {
+                    return "Vision failed: ${serverResponseError("Responses API 视觉请求失败", resp.code, text)}"
+                }
+                parseResponseTextResult(resp.code, text)
             }
         }.getOrElse { "Vision failed: ${it.message}" }
     }
 
     /** 从 Responses API 非流式结果中抽取 output[].content[].text。 */
-    private fun parseResponseTextResult(text: String): String {
-        val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return text.take(800)
+    private fun parseResponseTextResult(statusCode: Int, text: String): String {
+        val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull()
+            ?: return "Vision failed: ${serverResponseError("Responses API 视觉响应格式无效", statusCode, text)}"
         if (root["status"]?.jsonPrimitive?.contentOrNull.equals("failed", ignoreCase = true)) {
-            val message = (root["error"] as? JsonObject)?.get("message")?.jsonPrimitive?.contentOrNull
-                ?: "Responses API returned failed"
-            return "Vision failed: $message"
+            return "Vision failed: ${serverResponseError("Responses API 视觉请求失败", statusCode, text)}"
         }
-        val output = root["output"] as? JsonArray ?: return root["status"]?.jsonPrimitive?.contentOrNull ?: text.take(800)
+        val output = root["output"] as? JsonArray
+            ?: return "Vision failed: ${serverResponseError("Responses API 视觉响应缺少 output", statusCode, text)}"
         return output.mapNotNull { item ->
             val o = item as? JsonObject ?: return@mapNotNull null
             if (o["type"]?.jsonPrimitive?.contentOrNull != "message") return@mapNotNull null
@@ -1702,7 +1939,9 @@ class ByokChatService(
                     co["text"]?.jsonPrimitive?.contentOrNull
                 } else null
             }?.joinToString("")
-        }.joinToString("").ifBlank { text.take(800) }
+        }.joinToString("").ifBlank {
+            "Vision failed: ${serverResponseError("Responses API 视觉响应缺少文本", statusCode, text)}"
+        }
     }
 
     private fun analyzeAnthropicImage(provider: ByokProvider, modelId: String, url: String, prompt: String): String {
@@ -1744,8 +1983,10 @@ class ByokChatService(
         return runCatching {
             http.okHttp.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) return "Vision failed: HTTP ${resp.code} ${text.take(800)}"
-                parseAnthropicTextResult(text)
+                if (!resp.isSuccessful) {
+                    return "Vision failed: ${serverResponseError("Anthropic 视觉请求失败", resp.code, text)}"
+                }
+                parseAnthropicTextResult(resp.code, text)
             }
         }.getOrElse { "Vision failed: ${it.message}" }
     }
@@ -1782,53 +2023,61 @@ class ByokChatService(
         return runCatching {
             http.okHttp.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                if (!resp.isSuccessful) return "Vision failed: HTTP ${resp.code} ${text.take(800)}"
-                parseGeminiTextResult(text)
+                if (!resp.isSuccessful) {
+                    return "Vision failed: ${serverResponseError("Gemini 视觉请求失败", resp.code, text)}"
+                }
+                parseGeminiTextResult(resp.code, text)
             }
         }.getOrElse { "Vision failed: ${it.message}" }
     }
 
-    private fun parseOpenAiTextResult(text: String): String {
+    private fun parseOpenAiTextResult(statusCode: Int, text: String): String {
         val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull()
-            ?: return text.take(4000)
-        root["error"]?.jsonObject?.let { error ->
-            val message = error["message"]?.jsonPrimitive?.contentOrNull ?: error.toString()
-            return "Vision failed: $message"
+            ?: return "Vision failed: ${serverResponseError("OpenAI Compatible 视觉响应格式无效", statusCode, text)}"
+        root["error"]?.jsonObject?.let {
+            return "Vision failed: ${serverResponseError("OpenAI Compatible 视觉请求失败", statusCode, text)}"
         }
-        val choice = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return text.take(4000)
-        val message = choice["message"] as? JsonObject ?: return text.take(4000)
-        val content = message["content"] ?: return text.take(4000)
+        val choice = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject
+            ?: return "Vision failed: ${serverResponseError("OpenAI Compatible 视觉响应缺少 choice", statusCode, text)}"
+        val message = choice["message"] as? JsonObject
+            ?: return "Vision failed: ${serverResponseError("OpenAI Compatible 视觉响应缺少 message", statusCode, text)}"
+        val content = message["content"]
+            ?: return "Vision failed: ${serverResponseError("OpenAI Compatible 视觉响应缺少 content", statusCode, text)}"
         if (content is JsonArray) {
             return content.mapNotNull { part ->
                 (part as? JsonObject)?.get("text")?.jsonPrimitive?.contentOrNull
-            }.joinToString("\n").ifBlank { text.take(4000) }
+            }.joinToString("\n").ifBlank {
+                "Vision failed: ${serverResponseError("OpenAI Compatible 视觉响应缺少文本", statusCode, text)}"
+            }
         }
-        return content.jsonPrimitive.contentOrNull?.takeIf { it.isNotBlank() } ?: text.take(4000)
+        return content.jsonPrimitive.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: "Vision failed: ${serverResponseError("OpenAI Compatible 视觉响应缺少文本", statusCode, text)}"
     }
 
-    private fun parseAnthropicTextResult(text: String): String {
+    private fun parseAnthropicTextResult(statusCode: Int, text: String): String {
         val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull()
-            ?: return text.take(4000)
-        root["error"]?.jsonObject?.let { error ->
-            val message = error["message"]?.jsonPrimitive?.contentOrNull ?: error.toString()
-            return "Vision failed: $message"
+            ?: return "Vision failed: ${serverResponseError("Anthropic 视觉响应格式无效", statusCode, text)}"
+        root["error"]?.jsonObject?.let {
+            return "Vision failed: ${serverResponseError("Anthropic 视觉请求失败", statusCode, text)}"
         }
-        val content = root["content"] as? JsonArray ?: return text.take(4000)
+        val content = root["content"] as? JsonArray
+            ?: return "Vision failed: ${serverResponseError("Anthropic 视觉响应缺少 content", statusCode, text)}"
         return content.mapNotNull { part ->
             (part as? JsonObject)
                 ?.takeIf { it["type"]?.jsonPrimitive?.contentOrNull == "text" }
                 ?.get("text")
                 ?.jsonPrimitive
                 ?.contentOrNull
-        }.joinToString("\n").ifBlank { text.take(4000) }
+        }.joinToString("\n").ifBlank {
+            "Vision failed: ${serverResponseError("Anthropic 视觉响应缺少文本", statusCode, text)}"
+        }
     }
 
-    private fun parseGeminiTextResult(text: String): String {
+    private fun parseGeminiTextResult(statusCode: Int, text: String): String {
         val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull()
-            ?: return text.take(4000)
-        root["error"]?.jsonObject?.let { error ->
-            val message = error["message"]?.jsonPrimitive?.contentOrNull ?: error.toString()
-            return "Vision failed: $message"
+            ?: return "Vision failed: ${serverResponseError("Gemini 视觉响应格式无效", statusCode, text)}"
+        root["error"]?.jsonObject?.let {
+            return "Vision failed: ${serverResponseError("Gemini 视觉请求失败", statusCode, text)}"
         }
         val parts = (root["candidates"] as? JsonArray)
             ?.firstOrNull()
@@ -1836,10 +2085,10 @@ class ByokChatService(
             ?.get("content")
             ?.jsonObject
             ?.get("parts") as? JsonArray
-            ?: return text.take(4000)
+            ?: return "Vision failed: ${serverResponseError("Gemini 视觉响应缺少 content", statusCode, text)}"
         return parts.mapNotNull { it.jsonObject["text"]?.jsonPrimitive?.contentOrNull }
             .joinToString("\n")
-            .ifBlank { text.take(4000) }
+            .ifBlank { "Vision failed: ${serverResponseError("Gemini 视觉响应缺少文本", statusCode, text)}" }
     }
 
     private fun callMcpServer(call: ToolCall): String {
@@ -2098,6 +2347,30 @@ class ByokChatService(
         put("content", result)
     }
 
+    /**
+     * 工具轮回放用的 assistant 消息。
+     * 流式拿不到服务端那个完整 message 对象，按累积结果重建：协议要求的就是 content 与 tool_calls，
+     * reasoning_content 不回灌（DeepSeek 等会拒绝带着它的后续请求）。
+     */
+    private fun assistantToolCallMessage(content: String, calls: List<ToolCall>): JsonObject = buildJsonObject {
+        put("role", "assistant")
+        put("content", content)
+        if (calls.isNotEmpty()) {
+            putJsonArray("tool_calls") {
+                calls.forEach { call ->
+                    addJsonObject {
+                        put("id", call.id)
+                        put("type", "function")
+                        putJsonObject("function") {
+                            put("name", call.name)
+                            put("arguments", call.arguments)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun ToolCall.arg(name: String): String? =
         runCatching { http.json.parseToJsonElement(arguments).jsonObject[name]?.jsonPrimitive?.contentOrNull }
             .getOrNull()
@@ -2185,7 +2458,7 @@ class ByokChatService(
      */
     private fun toolPreviewOf(call: ToolCall, result: ToolExecutionResult): String? {
         if (!shouldShowToolPreview(call.name)) return null
-        if (result.status == ToolStatus.FAILED) return result.output.take(400)
+        if (result.status == ToolStatus.FAILED) return result.output
         return when (call.name) {
             "search_web", "web_search" -> call.arg("query")?.takeIf { it.isNotBlank() }?.take(200)
             "fetch_url" ->
@@ -2394,10 +2667,134 @@ class ByokChatService(
         val arguments: String,
         val responseCallId: String? = null,
     )
+
+    /**
+     * Anthropic 流式 content 块重建器。
+     * `content_block_start` 给骨架，随后的 delta 按类型往里填：text_delta→text、thinking_delta→thinking、
+     * signature_delta→signature、input_json_delta→拼成 tool_use 的 input。
+     * redacted_thinking 这类没有 delta 的块，骨架本身就是完整内容。
+     */
+    private class AnthropicStreamBlocks {
+        private class Slot(val skeleton: JsonObject) {
+            val text = StringBuilder()
+            val thinking = StringBuilder()
+            val partialJson = StringBuilder()
+            var signature: String? = null
+        }
+
+        private val slots = LinkedHashMap<Int, Slot>()
+
+        fun start(root: JsonObject) {
+            val index = (root["index"] as? JsonPrimitive)?.intOrNull ?: return
+            val block = root["content_block"] as? JsonObject ?: return
+            slots[index] = Slot(block)
+        }
+
+        fun delta(root: JsonObject) {
+            val index = (root["index"] as? JsonPrimitive)?.intOrNull ?: return
+            val slot = slots[index] ?: return
+            val delta = root["delta"] as? JsonObject ?: return
+            (delta["text"] as? JsonPrimitive)?.contentOrNull?.let(slot.text::append)
+            (delta["thinking"] as? JsonPrimitive)?.contentOrNull?.let(slot.thinking::append)
+            (delta["partial_json"] as? JsonPrimitive)?.contentOrNull?.let(slot.partialJson::append)
+            (delta["signature"] as? JsonPrimitive)?.contentOrNull?.let { slot.signature = it }
+        }
+
+        fun build(json: Json): List<JsonObject> = slots.values.map { slot ->
+            buildJsonObject {
+                slot.skeleton.forEach { (key, value) -> put(key, value) }
+                when (slot.skeleton["type"]?.jsonPrimitive?.contentOrNull) {
+                    "text" -> put("text", skeletonText(slot.skeleton, "text") + slot.text)
+                    "thinking" -> {
+                        put("thinking", skeletonText(slot.skeleton, "thinking") + slot.thinking)
+                        slot.signature?.let { put("signature", it) }
+                    }
+                    // 参数是分片拼出来的 JSON 文本；拼不成对象时保留骨架里的空 input，
+                    // 让工具带着空参数失败并把原因显示出来。
+                    "tool_use" -> slot.partialJson.toString()
+                        .takeIf { it.isNotBlank() }
+                        ?.let { raw -> runCatching { json.parseToJsonElement(raw) }.getOrNull() }
+                        ?.let { put("input", it) }
+                }
+            }
+        }
+
+        private fun skeletonText(block: JsonObject, key: String): String =
+            (block[key] as? JsonPrimitive)?.contentOrNull.orEmpty()
+    }
+
+    /**
+     * Gemini 流式 parts 合并器。
+     * 文本按分片下发，functionCall 一次给全。thoughtSignature 可能挂在任意 part 上
+     * （generateContent 没有独立的思考块，签名就是挂在 functionCall 或末尾 part 的元数据），
+     * 所以只合并两个都不带签名的纯文本 part，其余原样保留——否则回放时签名对不上。
+     */
+    private class GeminiStreamParts {
+        private val parts = ArrayList<JsonObject>()
+
+        fun feed(root: JsonObject) {
+            val candidate = (root["candidates"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return
+            val incoming = (candidate["content"] as? JsonObject)?.get("parts") as? JsonArray ?: return
+            incoming.forEach { element ->
+                val part = element as? JsonObject ?: return@forEach
+                val last = parts.lastOrNull()
+                if (last != null && isPlainText(last) && isPlainText(part) && last["thought"] == part["thought"]) {
+                    parts[parts.lastIndex] = buildJsonObject {
+                        last.forEach { (key, value) -> put(key, value) }
+                        put("text", textOf(last) + textOf(part))
+                    }
+                } else {
+                    parts += part
+                }
+            }
+        }
+
+        fun build(): JsonObject = buildJsonObject {
+            put("role", "model")
+            put("parts", JsonArray(parts))
+        }
+
+        private fun isPlainText(part: JsonObject): Boolean =
+            part["text"] is JsonPrimitive && part["thoughtSignature"] == null && part["functionCall"] == null
+
+        private fun textOf(part: JsonObject): String = (part["text"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+    }
+
+    /**
+     * 流式 tool_calls 累积器。一次调用被拆成多个分片：id 与 function.name 只出现在首片，
+     * function.arguments 是逐段拼起来的 JSON 文本，靠 index 归位。
+     */
+    private class PendingToolCalls {
+        private class Slot {
+            var id: String? = null
+            var name: String? = null
+            val arguments = StringBuilder()
+        }
+
+        private val slots = LinkedHashMap<Int, Slot>()
+
+        fun feed(element: JsonElement) {
+            val obj = element as? JsonObject ?: return
+            // index 是协议里的分片键；省略它的端点只会发单个调用。
+            val slot = slots.getOrPut((obj["index"] as? JsonPrimitive)?.intOrNull ?: 0) { Slot() }
+            (obj["id"] as? JsonPrimitive)?.contentOrNull?.let { slot.id = it }
+            val function = obj["function"] as? JsonObject ?: return
+            (function["name"] as? JsonPrimitive)?.contentOrNull?.let { slot.name = it }
+            (function["arguments"] as? JsonPrimitive)?.contentOrNull?.let(slot.arguments::append)
+        }
+
+        fun build(): List<ToolCall> = slots.values.mapNotNull { slot ->
+            val name = slot.name ?: return@mapNotNull null
+            ToolCall(
+                id = slot.id ?: Ids.newFragmentId(),
+                name = name,
+                arguments = slot.arguments.toString().ifBlank { "{}" },
+            )
+        }
+    }
     private data class ToolRoundResult(
         val messages: List<JsonObject>,
         val completed: Boolean = false,
-        /** 本轮的 token 用量。工具轮是非流式请求，usage 直接在响应体里。 */
     )
     private data class ToolSpec(
         val name: String,
@@ -2701,6 +3098,16 @@ private fun captureResponsesOutputItems(
             outputItems.clear()
             outputItems.addAll(authoritative)
         }
+    }
+}
+
+/** Responses 流的 usage 只挂在终止事件的 response 对象上，字段名也和 chat/completions 不同。 */
+private fun responsesStreamUsage(json: Json, data: String): Usage? {
+    val root = runCatching { json.parseToJsonElement(data) as? JsonObject }.getOrNull() ?: return null
+    return when (root["type"]?.jsonPrimitive?.contentOrNull) {
+        "response.completed", "response.incomplete" ->
+            (root["response"] as? JsonObject)?.let(::parseOpenAiResponseUsage)
+        else -> null
     }
 }
 

@@ -98,6 +98,9 @@ class ChatViewModel(
     /** 将当前选用模型记为新对话默认（含阵营），供冷启动按需拉模型。 */
     private val persistDefaultModel: suspend (modelId: String, kind: ProviderKind, providerId: String?) -> Unit =
         { _, _, _ -> },
+    /** 落库「该模型关不掉推理」的观测结果，让下次的界面一开始就说实话。 */
+    private val persistThinkingNotDisableable: suspend (providerId: String, modelId: String) -> Unit =
+        { _, _ -> },
     private val tools: EnabledTools,
     useThinking: Boolean,
     reasoningEffort: String,
@@ -145,7 +148,7 @@ class ChatViewModel(
     private val _useThinking = MutableStateFlow(useThinking)
     private val _reasoningEffort = MutableStateFlow(reasoningEffort)
     /** 本次回复未检测到推理内容时的自校正提示（低置信配置更易触发）。 */
-    private val _reasoningMissHint = MutableStateFlow<ReasoningMissHint?>(null)
+    private val _reasoningMismatchHint = MutableStateFlow<ReasoningMismatchHint?>(null)
     private val _pendingAttachments = MutableStateFlow<List<FileInfo>>(emptyList())
     /** 编辑用户消息：发送前按 createdAt 截断该条及之后，再按普通 send 重发。 */
     private val _editingMessage = MutableStateFlow<EditingUserMessage?>(null)
@@ -171,7 +174,7 @@ class ChatViewModel(
         viewModelScope.launch {
             backgroundStreams.completions.collect { completion ->
                 if (completion.sessionId != sessionId) return@collect
-                maybeShowReasoningMissHint()
+                maybeShowReasoningMismatchHint()
             }
         }
         viewModelScope.launch {
@@ -184,31 +187,58 @@ class ChatViewModel(
         }
     }
 
-    private fun maybeShowReasoningMissHint() {
-        if (!_useThinking.value) return
+    /**
+     * 双向自校正。声明（方言表 + 服务商能力表）可能是错的，回复本身是唯一的事实来源：
+     * 开了却没思考 → 参数形状八成猜错了；关了却仍在思考 → 禁用参数没被接受，或这模型压根关不掉。
+     * 后一条不依赖任何预先知道的方言，所以对没收录过的服务商一样管用。
+     */
+    private fun maybeShowReasoningMismatchHint() {
         val model = uiState.value.selectedModel ?: return
         // 仅对 BYOK 且已识别为推理的模型做自校正：MolaGPT 无用户可调设置，弹「去设置」只会打扰。
         if (model.providerKind != ProviderKind.BYOK) return
         val tc = model.thinkingConfig ?: return
-        // 仅开关类（无档位）不提示——本身就没有思考强度语义。
-        val levels = com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(tc)
-        if (levels.isEmpty()) return
+        val baseUrl = uiState.value.providerBaseUrl
         val lastAssistant = uiState.value.messages.lastOrNull { it.role == Role.ASSISTANT } ?: return
         val hasThinking = lastAssistant.fragments.any {
             it is com.molagpt.app.core.model.MessageFragment.Thinking && it.text.isNotBlank()
         }
         // 有些模型隐藏思考文本却会上报 reasoning_tokens——据此判定「确实推理了」，避免误报。
+        // 反向判定不能只看它：实测阶跃星辰返回了思考内容却把 reasoning_tokens 报成 0。
         val reasoningTokens = lastAssistant.metadata["reasoningTokens"]?.toIntOrNull() ?: 0
-        if (hasThinking || reasoningTokens > 0) {
-            _reasoningMissHint.value = null
+        val reasoned = hasThinking || reasoningTokens > 0
+
+        if (!_useThinking.value) {
+            // 已经知道关不掉的就别再提示了，用户已经看到「该模型无法关闭推理」。
+            if (!reasoned || com.molagpt.app.core.model.ThinkingKinds.isAlwaysOn(tc, baseUrl)) {
+                _reasoningMismatchHint.value = null
+                return
+            }
+            markThinkingNotDisableable(model)
+            _reasoningMismatchHint.value = ReasoningMismatchHint(ReasoningMismatchHint.Kind.NOT_DISABLED)
+            return
+        }
+
+        // 仅开关类（无档位）不提示——本身就没有思考强度语义。
+        if (com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(tc, baseUrl).isEmpty()) return
+        if (reasoned) {
+            _reasoningMismatchHint.value = null
             return
         }
         val lowConf = !com.molagpt.app.core.model.ThinkingKinds.isHighConfidence(tc.detectSource) &&
             !tc.manualOverride
-        _reasoningMissHint.value = ReasoningMissHint(
+        _reasoningMismatchHint.value = ReasoningMismatchHint(
+            kind = ReasoningMismatchHint.Kind.MISSING,
             lowConfidence = lowConf,
-            canTurnOff = !tc.alwaysOn,
+            canTurnOff = !com.molagpt.app.core.model.ThinkingKinds.isAlwaysOn(tc, baseUrl),
         )
+    }
+
+    /** 把「关不掉」这个观测结果落到模型配置上，下次直接按常开渲染，不再给一个点了没用的「关」。 */
+    private fun markThinkingNotDisableable(model: ProviderModel) {
+        val providerId = model.providerId ?: return
+        viewModelScope.launch {
+            runCatching { persistThinkingNotDisableable(providerId, model.id) }
+        }
     }
 
     /** 新对话把旧格式或失效 BYOK 默认值一次性迁移为已经解析出的有效选择。 */
@@ -239,7 +269,7 @@ class ChatViewModel(
     }
 
     private val controls = combine(
-        _error, _authExpired, _enabledTools, _useThinking, _reasoningEffort, _reasoningMissHint,
+        _error, _authExpired, _enabledTools, _useThinking, _reasoningEffort, _reasoningMismatchHint,
     ) { values ->
         val error = values[0] as String?
         val authExpired = values[1] as Boolean
@@ -247,7 +277,7 @@ class ChatViewModel(
         val thinking = values[3] as Boolean
         val effort = values[4] as String
         @Suppress("UNCHECKED_CAST")
-        val miss = values[5] as ReasoningMissHint?
+        val miss = values[5] as ReasoningMismatchHint?
         ChatControlState(error, authExpired, enabledTools, thinking, effort, miss)
     }
 
@@ -482,7 +512,7 @@ class ChatViewModel(
             useThinking = controls.useThinking,
             reasoningEffort = controls.reasoningEffort,
             providerBaseUrl = byokBaseUrlResolver(meta.providerId),
-            reasoningMissHint = controls.reasoningMissHint,
+            reasoningMismatchHint = controls.reasoningMismatchHint,
             pendingAttachments = pending,
             editingMessage = meta.editingMessage,
             error = controls.error ?: streamState.error,
@@ -609,21 +639,21 @@ class ChatViewModel(
             com.molagpt.app.core.model.ThinkingKinds.isKimiK3(uiState.value.selectedModelId.orEmpty())
         if (alwaysOn && !enabled) return
         _useThinking.value = enabled
-        if (!enabled) dismissReasoningMissHint()
+        if (!enabled) dismissReasoningMismatchHint()
     }
 
     fun setReasoningEffort(effort: String) {
         _reasoningEffort.value = effort
     }
 
-    fun dismissReasoningMissHint() {
-        _reasoningMissHint.value = null
+    fun dismissReasoningMismatchHint() {
+        _reasoningMismatchHint.value = null
     }
 
     /** 运行时自校正：用户选择关闭推理。 */
     fun applyReasoningMissOff() {
         setUseThinking(false)
-        dismissReasoningMissHint()
+        dismissReasoningMismatchHint()
     }
 
     /**
@@ -1556,7 +1586,7 @@ private data class ChatControlState(
     val enabledTools: EnabledTools,
     val useThinking: Boolean,
     val reasoningEffort: String,
-    val reasoningMissHint: ReasoningMissHint? = null,
+    val reasoningMismatchHint: ReasoningMismatchHint? = null,
 )
 
 private data class ChatUiMetaCore(

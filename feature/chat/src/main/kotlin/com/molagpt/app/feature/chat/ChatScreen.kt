@@ -558,16 +558,15 @@ fun ChatScreen(
                         }
                     }
                 }
-                state.reasoningMissHint?.let { hint ->
-                    ReasoningMissCard(
-                        lowConfidence = hint.lowConfidence,
-                        canTurnOff = hint.canTurnOff,
+                state.reasoningMismatchHint?.let { hint ->
+                    ReasoningMismatchCard(
+                        hint = hint,
                         onManual = {
-                            viewModel.dismissReasoningMissHint()
+                            viewModel.dismissReasoningMismatchHint()
                             onOpenSettings()
                         },
                         onTurnOff = viewModel::applyReasoningMissOff,
-                        onDismiss = viewModel::dismissReasoningMissHint,
+                        onDismiss = viewModel::dismissReasoningMismatchHint,
                     )
                 }
                 HorizontalDivider()
@@ -712,15 +711,15 @@ private fun rememberPreviewUrlHolder(): com.molagpt.app.feature.file.ImagePrevie
     }
 }
 
-/** 顶栏「远程 Agent」入口图标——一个显示器轮廓，把 Agent 控制提到首屏一级。 */
+/** 推理开关与实际结果对不上时的自校正卡片，两个方向共用。 */
 @Composable
-private fun ReasoningMissCard(
-    lowConfidence: Boolean,
-    canTurnOff: Boolean,
+private fun ReasoningMismatchCard(
+    hint: ReasoningMismatchHint,
     onManual: () -> Unit,
     onTurnOff: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val notDisabled = hint.kind == ReasoningMismatchHint.Kind.NOT_DISABLED
     val cs = MaterialTheme.colorScheme
     Column(
         modifier = Modifier
@@ -740,7 +739,7 @@ private fun ReasoningMissCard(
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(
-                "本次回复未检测到推理",
+                if (notDisabled) "该模型无法关闭推理" else "本次回复未推理",
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Bold,
                 color = cs.onTertiaryContainer,
@@ -751,18 +750,18 @@ private fun ReasoningMissCard(
             }
         }
         Text(
-            text = if (lowConfidence) {
-                "当前推理方式是推测得到的，且本次未产生思考内容。很可能识别有误，建议手动指定。"
-            } else {
-                "已按当前格式发送请求，但未返回思考内容。可能该模型这次未触发思考，或服务端暂不支持。"
+            text = when {
+                notDisabled -> "已关闭推理，模型仍返回了思考内容。已按常开处理。"
+                hint.lowConfidence -> "推理参数按模型名推测，可能不对。"
+                else -> "请求已按当前推理参数发出，模型未返回思考内容。"
             },
             style = MaterialTheme.typography.bodySmall,
             color = cs.onTertiaryContainer.copy(alpha = 0.9f),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onManual) { Text("去设置") }
-            // 常开推理模型（如 Kimi K3）无法关闭，隐藏该操作以免误导。
-            if (canTurnOff) {
+            // 关不掉的模型不给「关闭推理」，避免给出一个点了没用的操作。
+            if (!notDisabled && hint.canTurnOff) {
                 OutlinedButton(onClick = onTurnOff) { Text("关闭推理") }
             }
         }

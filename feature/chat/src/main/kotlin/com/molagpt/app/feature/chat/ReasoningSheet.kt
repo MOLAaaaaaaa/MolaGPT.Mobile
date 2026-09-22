@@ -209,8 +209,9 @@ internal fun ReasoningSheet(
     onOpenModelSettings: (() -> Unit)? = null,
 ) {
     val colorScheme = MaterialTheme.colorScheme
-    val levels = remember(config) { ThinkingKinds.resolveEffortLevels(config) }
-    val alwaysOn = config.alwaysOn
+    val levels = remember(config, baseUrl) { ThinkingKinds.resolveEffortLevels(config, baseUrl) }
+    // 关不掉的三种来源（服务商声明强制 / 方言表无关闭手段 / 观测到关了也没用）都在这里收口。
+    val alwaysOn = remember(config, baseUrl) { ThinkingKinds.isAlwaysOn(config, baseUrl) }
     val stops: List<String?> = remember(levels, alwaysOn) {
         if (alwaysOn) levels.map { it as String? } else listOf<String?>(null) + levels
     }
@@ -225,10 +226,7 @@ internal fun ReasoningSheet(
     val displayedStop = stops.getOrNull(displayedIndex)
     val displayedOn = alwaysOn || displayedStop != null
     val displayedEffort = displayedStop ?: reasoningEffort
-    val defaultEffort = remember(config) { ThinkingKinds.resolveDefaultEffort(config) }
-    val isBudget = ThinkingKinds.showAsBudget(config, baseUrl)
-    val wireKind = ThinkingKinds.wireKind(config.kind, baseUrl)
-    val wireParam = ThinkingKinds.wireParamName(wireKind)
+    val defaultEffort = remember(config, baseUrl) { ThinkingKinds.resolveDefaultEffort(config, baseUrl) }
     var showTech by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
@@ -276,7 +274,7 @@ internal fun ReasoningSheet(
                 }
             }
             Text(
-                "强度越高，思考越深入；回答更慢、更耗用量。",
+                "强度越高思考越深，响应更慢、更费额度。",
                 style = MaterialTheme.typography.bodySmall,
                 color = colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 2.dp, bottom = 16.dp),
@@ -284,9 +282,9 @@ internal fun ReasoningSheet(
 
             val statusLabel = if (displayedOn) ThinkingKinds.effortLabel(displayedEffort) else "已关闭"
             val statusSub = when {
-                !displayedOn -> "本次对话不进行推理"
-                alwaysOn -> "该模型常开推理，拖动滑杆调整强度"
-                else -> "拖动滑杆或点击档位调整强度"
+                !displayedOn -> "本次不进行推理"
+                alwaysOn -> "该模型无法关闭推理"
+                else -> ""
             }
             AnimatedContent(
                 targetState = Triple(statusLabel, displayedOn, statusSub),
@@ -427,7 +425,7 @@ internal fun ReasoningSheet(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
-                    text = if (showTech) "收起技术细节" else "使用的推理参数",
+                    text = if (showTech) "收起" else "查看请求参数",
                     style = MaterialTheme.typography.labelMedium,
                     color = colorScheme.onSurfaceVariant,
                     modifier = Modifier
@@ -443,18 +441,9 @@ internal fun ReasoningSheet(
                     enter = fadeIn() + expandVertically(),
                     exit = fadeOut() + shrinkVertically(),
                 ) {
-                    val wireText = when {
-                        !displayedOn -> "不发送推理参数"
-                        isBudget -> {
-                            val tokens = ThinkingKinds.budgetFor(config.kind, displayedEffort)
-                            "$wireParam ≈ ${"%,d".format(tokens)} tokens"
-                        }
-                        ThinkingKinds.isAggregatingGateway(baseUrl) ->
-                            "reasoning: { effort: \"$displayedEffort\" }"
-                        else -> "$wireParam=$displayedEffort"
-                    }
+                    // 文案由模型层按方言表生成，避免界面说法与实际请求参数各自演化。
                     Text(
-                        text = wireText,
+                        text = ThinkingKinds.wireSummary(config, baseUrl, displayedOn, displayedEffort),
                         style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
                         color = colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),

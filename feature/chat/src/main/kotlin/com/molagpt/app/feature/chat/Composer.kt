@@ -145,16 +145,16 @@ fun Composer(
     val tc = selectedModel?.thinkingConfig
     val thinkingConfig: com.molagpt.app.core.model.ThinkingConfig? = when {
         tc != null && tc.kind != com.molagpt.app.core.model.ThinkingParamKind.NONE -> tc
+        // 档位留空，交给方言表按服务商决定；写死三档会把 OpenRouter 的 minimal/xhigh/max 一并抹掉。
         selectedModel?.supportsReasoningEffort == true -> com.molagpt.app.core.model.ThinkingConfig(
             kind = com.molagpt.app.core.model.ThinkingParamKind.OPENAI_REASONING_EFFORT,
-            effortLevels = listOf("low", "medium", "high"),
-            defaultEffort = "medium",
+            defaultEffort = com.molagpt.app.core.model.ThinkingKinds.HIGH,
             alwaysOn = !selectedModel.supportsThinking,
         )
         else -> null
     }
     val effortLevels: List<String> = thinkingConfig
-        ?.let { com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(it) }
+        ?.let { com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(it, providerBaseUrl) }
         ?: emptyList()
     val isByok = selectedModel?.providerKind == ProviderKind.BYOK
     // BYOK 工具的通用前提：模型声明支持工具调用。
@@ -245,7 +245,8 @@ fun Composer(
                 )
                 if (showThinking) {
                     val toggleOnly = effortLevels.isEmpty()
-                    val alwaysOn = thinkingConfig?.alwaysOn == true
+                    val alwaysOn = thinkingConfig != null &&
+                        com.molagpt.app.core.model.ThinkingKinds.isAlwaysOn(thinkingConfig, providerBaseUrl)
                     val chipOn = alwaysOn || useThinking
                     ReasoningChip(
                         checked = chipOn,
@@ -266,7 +267,8 @@ fun Composer(
                                     onToggleThinking(true)
                                     thinkingConfig?.let {
                                         onSetReasoningEffort(
-                                            com.molagpt.app.core.model.ThinkingKinds.resolveDefaultEffort(it),
+                                            com.molagpt.app.core.model.ThinkingKinds
+                                                .resolveDefaultEffort(it, providerBaseUrl),
                                         )
                                     }
                                 }
@@ -362,14 +364,16 @@ fun Composer(
     }
 
     if (showReasoningSheet && thinkingConfig != null) {
+        val cannotTurnOff = com.molagpt.app.core.model.ThinkingKinds
+            .isAlwaysOn(thinkingConfig, providerBaseUrl)
         ReasoningSheet(
             config = thinkingConfig,
-            useThinking = useThinking || thinkingConfig.alwaysOn,
+            useThinking = useThinking || cannotTurnOff,
             reasoningEffort = reasoningEffort,
             baseUrl = providerBaseUrl,
             onPick = { pick ->
                 if (pick == null) {
-                    if (!thinkingConfig.alwaysOn) onToggleThinking(false)
+                    if (!cannotTurnOff) onToggleThinking(false)
                 } else {
                     if (!useThinking) onToggleThinking(true)
                     onSetReasoningEffort(pick)

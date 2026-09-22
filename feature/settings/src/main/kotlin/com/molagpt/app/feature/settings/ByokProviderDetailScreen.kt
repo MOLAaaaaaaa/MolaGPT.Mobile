@@ -917,6 +917,7 @@ private fun ModelEditSheet(
     var alwaysOn by remember { mutableStateOf(draft.alwaysOn) }
     var detectSource by remember { mutableStateOf(draft.detectSource) }
     var manualOverride by remember { mutableStateOf(draft.manualOverride) }
+    var offIneffective by remember { mutableStateOf(draft.offIneffective) }
     var manualOpen by remember {
         mutableStateOf(draft.manualOverride || !ThinkingKinds.isHighConfidence(draft.detectSource))
     }
@@ -962,8 +963,10 @@ private fun ModelEditSheet(
         alwaysOn = auto.alwaysOn
         detectSource = auto.detectSource
         manualOverride = false
-        effortLevels = ThinkingKinds.resolveEffortLevels(auto)
-        defaultEffort = ThinkingKinds.resolveDefaultEffort(auto)
+        // 重新识别等于放弃旧结论，观测标记一并清掉，让它有机会再试一次关闭。
+        offIneffective = false
+        effortLevels = ThinkingKinds.resolveEffortLevels(auto, providerBaseUrl)
+        defaultEffort = ThinkingKinds.resolveDefaultEffort(auto, providerBaseUrl)
         thinking = auto.kind != ThinkingParamKind.NONE
         manualOpen = !ThinkingKinds.isHighConfidence(auto.detectSource)
     }
@@ -1167,6 +1170,9 @@ private fun ModelEditSheet(
                         }
                     }
 
+                    // 方言表声明该服务商没有关闭手段：界面照实说，而不是给一个点了没用的「关」。
+                    val noOffSwitch = ThinkingKinds.offFor(providerBaseUrl, thinkingKind) ==
+                        com.molagpt.app.core.model.ReasoningOff.UNSUPPORTED
                     val showEffortEditor = effectiveKind != ThinkingParamKind.NONE &&
                         effectiveKind != ThinkingParamKind.KIMI
                     if (showEffortEditor) {
@@ -1254,21 +1260,24 @@ private fun ModelEditSheet(
                                 ) { Text("添加") }
                             }
                         }
+                        val gatewayBudgetClash = ThinkingKinds.isAggregatingGateway(providerBaseUrl) &&
+                            ThinkingKinds.isBudgetKind(thinkingKind)
                         ReasoningNoteCard(
                             text = when {
-                                ThinkingKinds.isAggregatingGateway(providerBaseUrl) &&
-                                    ThinkingKinds.isBudgetKind(thinkingKind) && manualOverride ->
-                                    "该服务商会统一按强度处理，预算 token 不会精确生效。"
-                                ThinkingKinds.isAggregatingGateway(providerBaseUrl) &&
-                                    ThinkingKinds.isBudgetKind(thinkingKind) && !manualOverride ->
-                                    "已按 OpenRouter 自动折算为强度档位。"
+                                gatewayBudgetClash && manualOverride ->
+                                    "该服务商统一按强度处理，预算 token 不会精确生效。"
+                                gatewayBudgetClash -> "已自动折算为强度档位。"
+                                offIneffective -> "对话中观测到关闭无效，已按常开处理。"
                                 alwaysOn -> "该模型始终开启推理，不可关闭。"
+                                noOffSwitch -> "该服务商未提供关闭推理的参数。"
                                 isBudget -> "强度越高，分配的思考额度越多。"
-                                else -> "对话时可在这些强度间快速切换。可添加服务商支持的自定义档位。"
+                                else -> "对话时可在这些强度间快速切换，也可添加服务商支持的档位。"
                             },
-                            warn = ThinkingKinds.isAggregatingGateway(providerBaseUrl) &&
-                                ThinkingKinds.isBudgetKind(thinkingKind) && manualOverride,
+                            warn = gatewayBudgetClash && manualOverride,
                         )
+                        if (offIneffective) {
+                            TextButton(onClick = { offIneffective = false }) { Text("重新尝试关闭") }
+                        }
                     } else if (effectiveKind == ThinkingParamKind.KIMI) {
                         ReasoningNoteCard(
                             text = "该模型只支持开 / 关推理，不可调整推理强度。",
@@ -1326,6 +1335,7 @@ private fun ModelEditSheet(
                                 alwaysOn = alwaysOn,
                                 detectSource = detectSource,
                                 manualOverride = manualOverride,
+                                offIneffective = offIneffective,
                                 tools = tools,
                                 customBody = customBody,
                                 pricing = if (customPrice) {
@@ -1932,6 +1942,8 @@ private data class ModelDraft(
     val alwaysOn: Boolean = false,
     val detectSource: ThinkingDetectSource? = null,
     val manualOverride: Boolean = false,
+    /** 对话里观测到「关了推理仍在思考」。保留在草稿里，编辑其它字段时不会顺手抹掉这个结论。 */
+    val offIneffective: Boolean = false,
     val tools: Boolean = true,
     val customBody: List<CustomBodyParam> = emptyList(),
     val pricing: com.molagpt.app.core.model.ModelPricing? = null,
@@ -1960,6 +1972,7 @@ private data class ModelDraft(
                 alwaysOn = alwaysOn || ThinkingKinds.isKimiK3(modelId),
                 detectSource = detectSource,
                 manualOverride = manualOverride,
+                offIneffective = offIneffective,
             )
             cfg.copy(defaultEffort = ThinkingKinds.resolveDefaultEffort(cfg))
         } else null,
@@ -1983,6 +1996,7 @@ private data class ModelDraft(
                 alwaysOn = tcfg?.alwaysOn == true || ThinkingKinds.isKimiK3(model.id),
                 detectSource = tcfg?.detectSource,
                 manualOverride = tcfg?.manualOverride == true,
+                offIneffective = tcfg?.offIneffective == true,
                 tools = model.supportsToolCalling,
                 customBody = model.customBody,
                 pricing = model.pricing,

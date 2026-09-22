@@ -5,6 +5,7 @@ import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.model.ProviderKind
+import com.molagpt.app.core.model.ReasoningCapability
 import com.molagpt.app.core.model.ThinkingConfig
 import com.molagpt.app.core.model.ThinkingDetectSource
 import com.molagpt.app.core.model.ThinkingKinds
@@ -17,6 +18,7 @@ import io.ktor.http.isSuccess
 import java.net.URLEncoder
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -27,12 +29,25 @@ class ByokModelApi(private val http: MolaHttp) {
         val resp = http.client.get(url) {
             provider.applyAuthHeaders { name, value -> header(name, value) }
         }
-        val text = resp.bodyAsText().trimStart('﻿')
+        val raw = resp.bodyAsText()
+        val text = raw.trimStart('﻿')
         if (!resp.status.isSuccess()) {
-            throw MolaApiException(resp.status.value, "模型列表获取失败：HTTP ${resp.status.value} ${text.take(160)}")
+            throw MolaApiException(
+                resp.status.value,
+                serverResponseError("模型列表获取失败", resp.status.value, raw),
+            )
         }
-        val root = http.json.parseToJsonElement(text) as? JsonObject
-            ?: return emptyList()
+        val root = runCatching { http.json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+            ?: throw MolaApiException(
+                resp.status.value,
+                serverResponseError("模型列表响应格式无效", resp.status.value, raw),
+            )
+        if (root["error"] != null) {
+            throw MolaApiException(
+                resp.status.value,
+                serverResponseError("模型列表获取失败", resp.status.value, raw),
+            )
+        }
         return parseByokModels(root, provider)
     }
 
@@ -59,7 +74,7 @@ class ByokModelApi(private val http: MolaHttp) {
             // chat 用途：仅保留聊天模型，图像模型交给 image 用途 provider。
             if (!looksLikeByokChatModel(id)) return@mapNotNull null
             val supportedParams = parseSupportedParameters(obj)
-            val thinkingConfig = thinkingConfigFor(provider, id, supportedParams)
+            val thinkingConfig = thinkingConfigFor(provider, id, supportedParams, parseReasoningCapability(obj))
             val isThinking = thinkingConfig != null
             ProviderModel(
                 id = id,
@@ -86,6 +101,23 @@ class ByokModelApi(private val http: MolaHttp) {
         val arr = obj["supported_parameters"] as? JsonArray ?: return null
         val out = arr.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
         return out.toSet()
+    }
+
+    /**
+     * 解析模型对象上的 `reasoning` 能力声明（OpenRouter）：
+     * `{ mandatory, default_enabled, supported_efforts, default_effort }`。
+     * 非推理模型与动态路由模型不带该字段，返回 null 表示「未公布」，交给名称推断。
+     */
+    private fun parseReasoningCapability(obj: JsonObject): ReasoningCapability? {
+        val node = obj["reasoning"] as? JsonObject ?: return null
+        val efforts = (node["supported_efforts"] as? JsonArray)
+            ?.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
+            .orEmpty()
+        return ReasoningCapability(
+            mandatory = node["mandatory"]?.jsonPrimitive?.booleanOrNull == true,
+            supportedEfforts = efforts,
+            defaultEffort = node["default_effort"]?.jsonPrimitive?.contentOrNull,
+        )
     }
 
     private fun parseAnthropicModels(root: JsonObject, provider: ByokProvider): List<ProviderModel> {
@@ -202,10 +234,11 @@ class ByokModelApi(private val http: MolaHttp) {
         provider: ByokProvider,
         id: String,
         supportedParams: Set<String>? = null,
+        capability: ReasoningCapability? = null,
     ): ThinkingConfig? {
         // 有能力表：以能力表为准（即使名字不像推理模型）。
         if (supportedParams != null) {
-            return ThinkingKinds.autoConfigFor(id, provider.baseUrl, supportedParams)
+            return ThinkingKinds.autoConfigFor(id, provider.baseUrl, supportedParams, capability)
         }
         // 无能力表：仅当名字命中「精选推理模型集」才给配置。
         // 不能放宽到 inferFromModelId——它把所有 Claude/Gemini/Kimi 都归类为推理，
@@ -427,7 +460,9 @@ fun ByokProvider.applyAuthHeaders(add: (String, String) -> Unit) {
  * 若用户已在 [ByokProvider.customHeaders] 里配置同名头（含 `Referer` 别名），则跳过对应默认值。
  */
 internal fun ByokProvider.applyOpenRouterAttributionHeaders(add: (String, String) -> Unit) {
-    if (!ThinkingKinds.isOpenRouter(baseUrl)) return
+    // 归因头是 HTTP 层的事，与推理方言无关，所以这里独立判 host 而不复用方言表。
+    val host = runCatching { java.net.URI(baseUrl).host.orEmpty() }.getOrDefault("").lowercase()
+    if (!host.endsWith("openrouter.ai")) return
     val names = customHeaders.mapNotNull { it.name.trim().takeIf { n -> n.isNotEmpty() } }
     fun has(name: String) = names.any { it.equals(name, ignoreCase = true) }
     if (!has("HTTP-Referer") && !has("Referer")) add("HTTP-Referer", OpenRouterRefererUrl)

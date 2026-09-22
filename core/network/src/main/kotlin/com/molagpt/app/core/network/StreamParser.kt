@@ -217,8 +217,8 @@ class StreamParser(
 /**
  * 解析 OpenAI 形状的 `usage`（chat/completions 系）。
  *
- * 提到顶层是因为非流式的工具轮也要用：BYOK 开了工具之后走的是「非流式多轮 + 最后补一个 Finish」，
- * 那条路径拿不到 SSE，只能从响应体里读同一个字段（见 ByokChatService.runToolRound）。
+ * 提到顶层是因为非流式路径也要用：Responses API 的工具轮拿不到 SSE，
+ * 只能从整包响应体里读同一个字段（见 ByokChatService.runResponseToolRound）。
  */
 internal fun parseOpenAiUsage(root: JsonObject): Usage? {
     val u = root["usage"] as? JsonObject ?: return null
@@ -268,6 +268,24 @@ internal fun Usage?.accumulate(next: Usage?): Usage? {
         cacheWriteTokens = add(cacheWriteTokens, next.cacheWriteTokens),
         costComplete = costComplete && next.costComplete && promptTokens != null && completionTokens != null &&
             next.promptTokens != null && next.completionTokens != null,
+    )
+}
+
+/**
+ * Anthropic 流式 usage 的字段补齐：输入侧在 `message_start`、输出侧在 `message_delta`，各带各的一半。
+ * 与 [accumulate] 不同——那是跨工具轮求和，这里是同一轮里把两半拼完整。
+ */
+internal fun Usage?.mergeAnthropic(next: Usage?): Usage? {
+    if (next == null) return this
+    if (this == null) return next
+    val prompt = next.promptTokens ?: promptTokens
+    val completion = next.completionTokens ?: completionTokens
+    return Usage(
+        promptTokens = prompt,
+        completionTokens = completion,
+        totalTokens = if (prompt != null && completion != null) prompt + completion else null,
+        cachedTokens = next.cachedTokens ?: cachedTokens,
+        cacheWriteTokens = next.cacheWriteTokens ?: cacheWriteTokens,
     )
 }
 

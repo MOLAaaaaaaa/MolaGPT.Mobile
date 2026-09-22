@@ -66,9 +66,10 @@ enum class ThinkingDetectSource {
  * 单模型的推理配置。auto-fill 自模型 ID（[ThinkingKinds.inferFromModelId]），可在模型编辑页手动覆盖。
  * - [effortLevels]：UI 可选的符号档位；非空时优先于方言默认（可追加 max/ultra 等自定义档）。
  * - [defaultEffort]：模型切换时 Composer 重置到的默认档位。
- * - [alwaysOn]：始终开启推理（如 Kimi K3），UI 无「关」停靠点。
+ * - [alwaysOn]：服务商声明该模型强制推理（OpenRouter 的 `mandatory`、Kimi K3），UI 无「关」停靠点。
  * - [detectSource]：自动侦测来源；null = 旧数据或未标注。
  * - [manualOverride]：用户在设置页手动指定了行为类别，跳过自动识别。
+ * - [offIneffective]：观测到「已关闭推理但仍返回思考内容」，即声明与事实不符，按关不掉处理。
  */
 @Serializable
 data class ThinkingConfig(
@@ -78,6 +79,7 @@ data class ThinkingConfig(
     val alwaysOn: Boolean = false,
     val detectSource: ThinkingDetectSource? = null,
     val manualOverride: Boolean = false,
+    val offIneffective: Boolean = false,
 )
 
 /** 推理参数推断与档位映射。 */
@@ -96,7 +98,7 @@ object ThinkingKinds {
      */
     fun effortLevelsFor(kind: ThinkingParamKind): List<String> = when (kind) {
         ThinkingParamKind.NONE, ThinkingParamKind.KIMI -> emptyList()
-        ThinkingParamKind.OPENAI_REASONING_EFFORT -> listOf(MINIMAL, LOW, MEDIUM, HIGH, XHIGH)
+        ThinkingParamKind.OPENAI_REASONING_EFFORT -> listOf(MINIMAL, LOW, MEDIUM, HIGH, XHIGH, MAX)
         ThinkingParamKind.CLAUDE_ADAPTIVE -> listOf(LOW, MEDIUM, HIGH, XHIGH, MAX)
         ThinkingParamKind.DEEPSEEK_THINKING -> listOf(HIGH, MAX)
         ThinkingParamKind.GEMINI -> listOf(MINIMAL, LOW, MEDIUM, HIGH)
@@ -105,11 +107,11 @@ object ThinkingKinds {
         -> listOf(LOW, MEDIUM, HIGH)
     }
 
-    /** 模型切换时 Composer 重置到的默认档位（须落在该 kind 的 [effortLevelsFor] 内）。 */
-    fun defaultEffortFor(kind: ThinkingParamKind): String = when (kind) {
-        ThinkingParamKind.DEEPSEEK_THINKING -> HIGH
-        else -> MEDIUM
-    }
+    /**
+     * 模型切换时 Composer 重置到的默认档位（须落在该 kind 的 [effortLevelsFor] 内）。
+     * [HIGH] 是每个有档位的 kind 都提供的档，故对全部 kind 通用。
+     */
+    fun defaultEffortFor(kind: ThinkingParamKind): String = HIGH
 
     /** 默认配置（非推理模型）。 */
     val NONE_CONFIG = ThinkingConfig(ThinkingParamKind.NONE)
@@ -172,25 +174,28 @@ object ThinkingKinds {
     }
 
     /** 据 baseUrl host 推断 kind（模型 ID 启发式漏掉时的兜底）。null 表示无已知兜底。 */
-    fun hostInferredKind(baseUrl: String): ThinkingParamKind? {
-        val host = runCatching { java.net.URI(baseUrl).host.orEmpty() }.getOrDefault("").lowercase()
-        return when {
-            host.endsWith("openrouter.ai") -> ThinkingParamKind.OPENAI_REASONING_EFFORT
-            host.endsWith("api.deepseek.com") -> ThinkingParamKind.DEEPSEEK_THINKING
-            // Moonshot 官方：默认 KIMI 开关；K3 由模型 ID 优先识别。
-            host.endsWith("api.moonshot.cn") || host.endsWith("api.moonshot.ai") -> ThinkingParamKind.KIMI
-            host.contains("dashscope.aliyuncs.com") -> ThinkingParamKind.QWEN_THINKING_BUDGET
-            else -> null
-        }
-    }
+    fun hostInferredKind(baseUrl: String): ThinkingParamKind? =
+        ReasoningDialects.forBaseUrl(baseUrl).forceKind
 
-    /** 是否为 OpenRouter（统一走 reasoning:{effort} 对象，而非 reasoning_effort 字符串）。 */
-    fun isOpenRouter(baseUrl: String): Boolean =
-        runCatching { java.net.URI(baseUrl).host.orEmpty() }.getOrDefault("").lowercase()
-            .endsWith("openrouter.ai")
+    /** 该服务商按模型公布推理能力表（OpenRouter 的 reasoning 对象），可跳过名称猜测。 */
+    fun hasCapabilityTable(baseUrl: String): Boolean = ReasoningDialects.hasCapabilityTable(baseUrl)
 
-    /** 是否为已知会把各家推理参数归一化的聚合网关（当前仅 OpenRouter）。 */
-    fun isAggregatingGateway(baseUrl: String): Boolean = isOpenRouter(baseUrl)
+    /** 是否走统一 `reasoning` 对象（开 `{effort}`、关 `{enabled:false}`）而非顶层 reasoning_effort。 */
+    fun isAggregatingGateway(baseUrl: String): Boolean =
+        ReasoningDialects.forBaseUrl(baseUrl).usesReasoningObject
+
+    /** 关闭推理该发什么。见 [ReasoningDialects.offFor]。 */
+    fun offFor(baseUrl: String, kind: ThinkingParamKind): ReasoningOff =
+        ReasoningDialects.offFor(baseUrl, wireKind(kind, baseUrl))
+
+    /**
+     * 该模型能否关闭推理。三种关不掉：
+     * 服务商声明强制（[ThinkingConfig.alwaysOn]）、方言表无关闭手段、观测到关了也没用。
+     */
+    fun isAlwaysOn(config: ThinkingConfig, baseUrl: String): Boolean =
+        config.alwaysOn ||
+            config.offIneffective ||
+            offFor(baseUrl, config.kind) == ReasoningOff.UNSUPPORTED
 
     /**
      * 符号档位 → token 预算（用于 budget 类 kind）。
@@ -203,6 +208,23 @@ object ThinkingKinds {
         ThinkingParamKind.GEMINI -> when (effort) { MINIMAL -> 1024; LOW -> 2048; HIGH -> 24576; else -> 8192 }
         ThinkingParamKind.QWEN_THINKING_BUDGET -> when (effort) { LOW -> 4096; HIGH -> 16384; else -> 8192 }
         else -> 0
+    }
+
+    /**
+     * 把服务商公布的能力覆盖到推断出的配置上。
+     * `mandatory` 直接落到 [ThinkingConfig.alwaysOn]——UI 的「关」档和请求的禁用分支都读这个字段，
+     * 一处填对，界面与线上参数同时不再撒谎。
+     */
+    private fun ThinkingConfig.applyCapability(capability: ReasoningCapability?): ThinkingConfig {
+        if (capability == null) return this
+        val levels = normalizeEffortLevels(capability.supportedEfforts).filter { it != "none" }
+        val next = copy(
+            alwaysOn = alwaysOn || capability.mandatory,
+            effortLevels = levels.ifEmpty { effortLevels },
+            defaultEffort = capability.defaultEffort?.trim()?.lowercase()?.takeIf { it.isNotEmpty() && it != "none" }
+                ?: defaultEffort,
+        )
+        return next.copy(defaultEffort = resolveDefaultEffort(next))
     }
 
     /** 构造一个 kind 的默认配置（含档位列表与默认档位）。 */
@@ -230,8 +252,16 @@ object ThinkingKinds {
         )
     }
 
-    /** 据模型 ID + baseUrl 构造完整自动配置（含来源标注）。聚合网关强制 EFFORT。 */
-    fun autoConfigFor(modelId: String, baseUrl: String, supportedParams: Set<String>? = null): ThinkingConfig? {
+    /**
+     * 据模型 ID + baseUrl（+ 服务商能力表）构造完整自动配置。
+     * [capability] 是按模型公布的权威数据，有就照抄，不猜。
+     */
+    fun autoConfigFor(
+        modelId: String,
+        baseUrl: String,
+        supportedParams: Set<String>? = null,
+        capability: ReasoningCapability? = null,
+    ): ThinkingConfig? {
         // 能力表显式声明：OpenRouter supported_parameters 含 reasoning / include_reasoning。
         if (supportedParams != null) {
             val capable = supportedParams.any {
@@ -242,7 +272,7 @@ object ThinkingKinds {
             if (!capable) return null
             // 聚合网关：统一 effort；K3 仍标 alwaysOn。
             if (isAggregatingGateway(baseUrl)) {
-                return if (isKimiK3(modelId)) {
+                val base = if (isKimiK3(modelId)) {
                     KIMI_K3_CONFIG.copy(detectSource = ThinkingDetectSource.CAPABILITY)
                 } else {
                     configFor(
@@ -250,6 +280,7 @@ object ThinkingKinds {
                         detectSource = ThinkingDetectSource.CAPABILITY,
                     )
                 }
+                return base.applyCapability(capability)
             }
         }
 
@@ -288,13 +319,15 @@ object ThinkingKinds {
     }
 
     /**
-     * Composer / 设置页实际使用的档位列表：
-     * 模型上持久化的 [ThinkingConfig.effortLevels] 非空时直接用（支持覆写/追加自定义档）；
-     * 否则回落到方言默认。
+     * Composer / 设置页实际使用的档位列表，按精确度从高到低：
+     * 模型上持久化的 [ThinkingConfig.effortLevels]（来自服务商能力表或用户覆写）→
+     * 服务商方言表声明的档位 → 参数形状的通用档位。
      */
-    fun resolveEffortLevels(config: ThinkingConfig): List<String> {
+    fun resolveEffortLevels(config: ThinkingConfig, baseUrl: String = ""): List<String> {
         val custom = normalizeEffortLevels(config.effortLevels)
-        return custom.ifEmpty { effortLevelsFor(config.kind) }
+        if (custom.isNotEmpty()) return custom
+        ReasoningDialects.forBaseUrl(baseUrl).effortLevels?.let { return it }
+        return effortLevelsFor(wireKind(config.kind, baseUrl))
     }
 
     /** 清洗档位列表：去空白、小写、去重，保持用户输入顺序。 */
@@ -308,8 +341,8 @@ object ThinkingKinds {
     }
 
     /** 保存时校正 defaultEffort，确保落在最终档位列表内。 */
-    fun resolveDefaultEffort(config: ThinkingConfig): String {
-        val levels = resolveEffortLevels(config)
+    fun resolveDefaultEffort(config: ThinkingConfig, baseUrl: String = ""): String {
+        val levels = resolveEffortLevels(config, baseUrl)
         if (levels.isEmpty()) return defaultEffortFor(config.kind)
         val preferred = config.defaultEffort.trim().lowercase()
         if (preferred.isNotEmpty() && preferred in levels) return preferred
@@ -418,6 +451,33 @@ object ThinkingKinds {
         ThinkingParamKind.QWEN_THINKING_BUDGET -> "thinking_budget"
         ThinkingParamKind.KIMI -> "thinking"
         ThinkingParamKind.NONE -> ""
+    }
+
+    /**
+     * 当前设置实际会发出去的推理参数，供推理弹层「技术细节」行展示。
+     *
+     * 由模型层统一生成而不是 UI 自己拼，否则请求侧改了方言、界面还在显示旧说法——
+     * 「关掉推理却仍在思考」那次就是界面写着「不发送推理参数」而用户读成「已关闭」。
+     */
+    fun wireSummary(config: ThinkingConfig, baseUrl: String, on: Boolean, effort: String): String {
+        val kind = wireKind(config.kind, baseUrl)
+        if (kind == ThinkingParamKind.NONE) return "不发送推理参数"
+        if (!on) {
+            return when (offFor(baseUrl, config.kind)) {
+                ReasoningOff.OMIT -> "不发送推理参数"
+                ReasoningOff.REASONING_DISABLED -> "reasoning: { enabled: false }"
+                ReasoningOff.THINKING_DISABLED -> "thinking: { type: \"disabled\" }"
+                ReasoningOff.ENABLE_THINKING_FALSE -> "enable_thinking: false"
+                ReasoningOff.UNSUPPORTED -> "该服务商未提供关闭参数"
+            }
+        }
+        if (isBudgetKind(kind)) {
+            return "${wireParamName(kind)} ≈ ${"%,d".format(budgetFor(kind, effort))} tokens"
+        }
+        if (ReasoningDialects.forBaseUrl(baseUrl).usesReasoningObject) {
+            return "reasoning: { effort: \"$effort\" }"
+        }
+        return "${wireParamName(kind)}=$effort"
     }
 
     /** token 预算短格式：8192 → "8K"、24576 → "24K"、512 → "512"（刻度行标注用）。 */

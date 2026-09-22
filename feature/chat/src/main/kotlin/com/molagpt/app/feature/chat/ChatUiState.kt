@@ -39,8 +39,8 @@ data class ChatUiState(
     val reasoningEffort: String = "medium",
     /** 当前会话所属 BYOK 提供商 baseUrl（供推理弹层判断聚合网关/预算折算）；MolaGPT 会话为空串。 */
     val providerBaseUrl: String = "",
-    /** 本次回复未检测到推理时的自校正提示。 */
-    val reasoningMissHint: ReasoningMissHint? = null,
+    /** 推理开关与实际结果对不上时的自校正提示。 */
+    val reasoningMismatchHint: ReasoningMismatchHint? = null,
     val pendingAttachments: List<FileInfo> = emptyList(),
     /** 正在编辑的用户消息；非空时 Composer 进入编辑态，发送会截断该条及之后消息后重发。 */
     val editingMessage: EditingUserMessage? = null,
@@ -58,14 +58,28 @@ data class EditingUserMessage(
     val revision: Long,
 )
 
-/** 运行时自校正：开启了推理但回复中无思考内容。 */
+/**
+ * 运行时自校正：界面上的推理状态与实际发生的事对不上。
+ *
+ * 两个方向都要盯——只盯「开了却没推理」会漏掉更难发现的反向情况，
+ * 而反向那条不依赖任何预先知道的服务商方言，对没见过的服务商同样有效。
+ */
 @Immutable
-data class ReasoningMissHint(
+data class ReasoningMismatchHint(
+    val kind: Kind,
     /** 当前配置是否为低置信（仅按模型名推测）。 */
-    val lowConfidence: Boolean,
-    /** 是否允许「关闭推理」——常开推理模型（如 Kimi K3）无法关闭，隐藏该操作。 */
+    val lowConfidence: Boolean = false,
+    /** 是否允许「关闭推理」——关不掉的模型隐藏该操作。 */
     val canTurnOff: Boolean = true,
-)
+) {
+    enum class Kind {
+        /** 开了推理，回复里没有思考内容。 */
+        MISSING,
+
+        /** 关了推理，回复里仍有思考内容：禁用参数没被接受，或该模型本就关不掉。 */
+        NOT_DISABLED,
+    }
+}
 
 /**
  * 模型选择器分组：MolaGPT 账户为一组，每个 BYOK 提供商各自一组。

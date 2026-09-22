@@ -48,7 +48,7 @@ object MarkdownParser {
         .build()
 
     fun parse(markdown: String): List<MdBlock> {
-        val visibleMarkdown = stripPartialRefTail(stripHiddenContext(markdown))
+        val visibleMarkdown = normalizeRefTags(stripPartialRefTail(stripHiddenContext(markdown)))
         if (visibleMarkdown.isBlank()) return emptyList()
         val out = ArrayList<MdBlock>()
         for (seg in splitDisplayMath(visibleMarkdown)) {
@@ -75,6 +75,33 @@ object MarkdownParser {
      */
     private fun stripPartialRefTail(input: String): String =
         PARTIAL_REF_TAIL.find(input)?.let { input.substring(0, it.range.first) } ?: input
+
+    /**
+     * 把引用标签统一改写成 `<ref source="1,3" />` 再交给 CommonMark。
+     *
+     * 引号不配对就足以让整个标签不再是合法的 HTML 行内节点（规范要求 `"` 开头必须 `"` 收尾），
+     * CommonMark 于是原样当正文吐出来——用户看到的就是句末挂着一串 `<ref source="20,21,24“ />`。
+     * 模型在中文语境里带出弯引号 `“”`、全角引号 `＂`、或者干脆不加引号都很常见，指望提示词
+     * 约束不现实，这里统一收口：认标签靠 `<ref …>` 这个形状，编号靠数字，引号一律当分隔符。
+     *
+     * 认出来但一个编号都没有的（`<ref source="" />` 之类）直接抹掉：本来 CommonMark 也会把
+     * 合法的空标签当行内 HTML 丢掉，让写坏的那个反而留在正文里没有道理。代码区整段跳过。
+     */
+    private fun normalizeRefTags(input: String): String {
+        if (!input.contains("<ref", ignoreCase = true)) return input
+        val code = markdownCodeRanges(input)
+        var codeIndex = 0
+        return LOOSE_REF_TAG.replace(input) { match ->
+            while (codeIndex < code.size && match.range.first >= code[codeIndex].second) codeIndex++
+            val inCode = code.getOrNull(codeIndex)?.let { match.range.first >= it.first } == true
+            if (inCode) return@replace match.value
+            val value = REF_SOURCE_KEY.find(match.value)
+                ?.let { match.value.substring(it.range.last + 1).dropLast(1) }
+                .orEmpty()
+            val ids = parseRefIds(value)
+            if (ids.isEmpty()) "" else """<ref source="${ids.joinToString(",")}" />"""
+        }
+    }
 
     /**
      * 正文改写（回答后处理）必须整段跳过的区间：代码围栏与行内代码、行内与块级公式，
@@ -179,21 +206,26 @@ object MarkdownParser {
      */
     private fun citationsOf(html: String): List<MdInline.Citation> =
         REF_TAG.findAll(html).mapNotNull { match ->
-            val ids = ArrayList<Int>()
-            for (part in match.groupValues[1].split(REF_ID_SEPARATOR)) {
-                val piece = part.trim()
-                if (piece.isEmpty()) continue
-                val range = REF_ID_RANGE.find(piece)
-                if (range != null) {
-                    val from = range.groupValues[1].toIntOrNull() ?: continue
-                    val to = range.groupValues[2].toIntOrNull() ?: continue
-                    for (id in minOf(from, to)..maxOf(from, to)) if (id !in ids) ids.add(id)
-                } else {
-                    piece.toIntOrNull()?.let { if (it !in ids) ids.add(it) }
-                }
-            }
-            ids.takeIf { it.isNotEmpty() }?.let(MdInline::Citation)
+            parseRefIds(match.groupValues[1]).takeIf { it.isNotEmpty() }?.let(MdInline::Citation)
         }.toList()
+
+    /** `source` 的值 → 去重后的编号列表。引号、斜杠和各种分隔符都当分隔符，认不出的碎片丢掉。 */
+    private fun parseRefIds(value: String): List<Int> {
+        val ids = ArrayList<Int>()
+        for (part in value.split(REF_ID_SEPARATOR)) {
+            val piece = part.trim()
+            if (piece.isEmpty()) continue
+            val range = REF_ID_RANGE.find(piece)
+            if (range != null) {
+                val from = range.groupValues[1].toIntOrNull() ?: continue
+                val to = range.groupValues[2].toIntOrNull() ?: continue
+                for (id in minOf(from, to)..maxOf(from, to)) if (id !in ids) ids.add(id)
+            } else {
+                piece.toIntOrNull()?.let { if (it !in ids) ids.add(it) }
+            }
+        }
+        return ids
+    }
 
     private fun tableOf(table: TableBlock, inlineMath: InlineMathContext): MdBlock.Table {
         var header: List<List<MdInline>> = emptyList()
@@ -779,7 +811,13 @@ object MarkdownParser {
         """<ref\b[^>]*?\bsource\s*=\s*["']?([^"'>]*)["']?[^>]*/?>""",
         RegexOption.IGNORE_CASE,
     )
-    private val REF_ID_SEPARATOR = Regex("""[,，、|\s]+""")
+
+    /** 只认标签的形状，属性怎么写不管——写坏的标签交给 [normalizeRefTags] 收口。 */
+    private val LOOSE_REF_TAG = Regex("""<ref\b[^<>]*>""", RegexOption.IGNORE_CASE)
+    private val REF_SOURCE_KEY = Regex("""\bsource\s*=""", RegexOption.IGNORE_CASE)
+
+    /** 弯引号和全角引号一并当分隔符：模型在中文语境里写出来的引号常常不是 ASCII 的那两个。 */
+    private val REF_ID_SEPARATOR = Regex("""["'“”＂‘’/,，、|\s]+""")
     private val REF_ID_RANGE = Regex("""^(\d+)\s*[-~—]\s*(\d+)$""")
     private val PARTIAL_REF_TAIL = Regex("""<r(?:e(?:f[^>]*)?)?$""", RegexOption.IGNORE_CASE)
 

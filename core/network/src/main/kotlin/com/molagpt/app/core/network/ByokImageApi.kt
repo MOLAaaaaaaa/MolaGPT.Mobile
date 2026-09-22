@@ -253,7 +253,7 @@ class ByokImageApi(private val http: MolaHttp) {
         http.okHttp.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw MolaApiException(resp.code, "图像生成失败：HTTP ${resp.code} ${text.take(240)}")
+                throw MolaApiException(resp.code, serverResponseError("图像生成失败", resp.code, text))
             }
             val hits = extractImageHits(text)
             return ByokImageWorkbenchResult(
@@ -296,7 +296,7 @@ class ByokImageApi(private val http: MolaHttp) {
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw MolaApiException(resp.code, "图像请求失败：HTTP ${resp.code} ${extractErrorMessage(text)}")
+                throw MolaApiException(resp.code, serverResponseError("图像请求失败", resp.code, text))
             }
             return text
         }
@@ -314,7 +314,7 @@ class ByokImageApi(private val http: MolaHttp) {
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw MolaApiException(resp.code, "图像编辑失败：HTTP ${resp.code} ${extractErrorMessage(text)}")
+                throw MolaApiException(resp.code, serverResponseError("图像编辑失败", resp.code, text))
             }
             return text
         }
@@ -479,9 +479,9 @@ class ByokImageApi(private val http: MolaHttp) {
         http.okHttp.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw MolaApiException(resp.code, "图像生成失败：HTTP ${resp.code} ${text.take(160)}")
+                throw MolaApiException(resp.code, serverResponseError("图像生成失败", resp.code, text))
             }
-            return parseOpenAiImageResult(text)
+            return parseOpenAiImageResult(resp.code, text)
         }
     }
 
@@ -542,9 +542,9 @@ class ByokImageApi(private val http: MolaHttp) {
         http.okHttp.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw MolaApiException(resp.code, "图像生成失败：HTTP ${resp.code} ${text.take(160)}")
+                throw MolaApiException(resp.code, serverResponseError("图像生成失败", resp.code, text))
             }
-            return parseChatCompletionsImageResult(text)
+            return parseChatCompletionsImageResult(resp.code, text)
         }
     }
 
@@ -582,18 +582,17 @@ class ByokImageApi(private val http: MolaHttp) {
         http.okHttp.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw MolaApiException(resp.code, "图像生成失败：HTTP ${resp.code} ${text.take(160)}")
+                throw MolaApiException(resp.code, serverResponseError("图像生成失败", resp.code, text))
             }
-            return parseGeminiImageResult(text)
+            return parseGeminiImageResult(resp.code, text)
         }
     }
 
-    private fun parseOpenAiImageResult(text: String): ByokImageResult {
+    private fun parseOpenAiImageResult(statusCode: Int, text: String): ByokImageResult {
         val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull()
             ?: return ByokImageResult(raw = text.take(4000))
-        root["error"]?.jsonObject?.let { error ->
-            val message = error["message"]?.jsonPrimitive?.contentOrNull ?: error.toString()
-            throw MolaApiException(400, message)
+        root["error"]?.jsonObject?.let {
+            throw MolaApiException(statusCode, serverResponseError("图像生成失败", statusCode, text))
         }
         val data = root["data"] as? JsonArray ?: return ByokImageResult(raw = text.take(4000))
         val first = data.firstOrNull() as? JsonObject ?: return ByokImageResult(raw = text.take(4000))
@@ -606,12 +605,11 @@ class ByokImageApi(private val http: MolaHttp) {
         return ByokImageResult(raw = text.take(4000))
     }
 
-    private fun parseGeminiImageResult(text: String): ByokImageResult {
+    private fun parseGeminiImageResult(statusCode: Int, text: String): ByokImageResult {
         val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull()
             ?: return ByokImageResult(raw = text.take(4000))
-        root["error"]?.jsonObject?.let { error ->
-            val message = error["message"]?.jsonPrimitive?.contentOrNull ?: error.toString()
-            throw MolaApiException(400, message)
+        root["error"]?.jsonObject?.let {
+            throw MolaApiException(statusCode, serverResponseError("图像生成失败", statusCode, text))
         }
         val candidates = root["candidates"] as? JsonArray ?: return ByokImageResult(raw = text.take(4000))
         val parts = candidates.firstOrNull()
@@ -634,12 +632,11 @@ class ByokImageApi(private val http: MolaHttp) {
         return ByokImageResult(raw = textParts.joinToString("\n").ifBlank { text.take(4000) })
     }
 
-    private fun parseChatCompletionsImageResult(text: String): ByokImageResult {
+    private fun parseChatCompletionsImageResult(statusCode: Int, text: String): ByokImageResult {
         val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull()
             ?: return ByokImageResult(raw = text.take(4000))
-        root["error"]?.jsonObject?.let { error ->
-            val message = error["message"]?.jsonPrimitive?.contentOrNull ?: error.toString()
-            throw MolaApiException(400, message)
+        root["error"]?.jsonObject?.let {
+            throw MolaApiException(statusCode, serverResponseError("图像生成失败", statusCode, text))
         }
         val choices = root["choices"] as? JsonArray
         val message = choices?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
@@ -789,13 +786,6 @@ class ByokImageApi(private val http: MolaHttp) {
 
     private fun dataUrl(mimeType: String, base64: String): String =
         "data:$mimeType;base64,${base64.filterNot { it.isWhitespace() }}"
-
-    private fun extractErrorMessage(text: String): String {
-        val obj = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrNull()
-        val msg = obj?.get("error")?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
-            ?: obj?.get("message")?.jsonPrimitive?.contentOrNull
-        return (msg ?: text).take(240)
-    }
 
     private fun imageSizeTier(size: String): String {
         val edge = maxEdge(size)
