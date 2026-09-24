@@ -32,7 +32,8 @@ MolaGPT Mobile 是 [MolaGPT](https://chatgpt.wljay.cn) 的原生 Android 客户�
 ### 对话体验
 
 - 原生 Compose 界面，支持浅色、深色和跟随系统主题。
-- 流式 Markdown 渲染，支持代码块、表格、数学公式、图片、Mermaid 图、思考过程和工具调用状态。
+- 流式 Markdown 渲染，支持代码块、表格、数学公式、图片、思考过程和工具调用状态。
+- 可视化回答（自定义模型）：函数图像、图表、可排序表格、指标卡原生绘制，可拖动读数、全屏缩放、导出图片；整页网页以卡片显示，点「运行」在隔离沙盒中打开。
 - 联网搜索过程合并展示，回答中以来源角标标注引用，点按即可查看来源。
 - 可按对话调节推理强度，自动识别各服务商的推理参数，也可为模型手动指定档位。
 - 支持编辑已发送的消息并在编辑分支间切换；重新生成会保留历史版本，助手回答也可直接修改。
@@ -100,7 +101,7 @@ feature/settings/       设置、模型服务、记忆、角色、世界书与�
 feature/agent-control/  远程 Agent 控制
 feature/auth/           MolaGPT 登录
 feature/file/           附件、文档解析与图片预览
-feature/webview/        Mermaid 渲染与内置网页
+feature/webview/        网页运行沙盒与 CDN 代理
 feature/share/          系统分享
 baselineprofile/        Baseline Profile 配置
 screenshots/            README 截图

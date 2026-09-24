@@ -170,6 +170,25 @@ fun SettingsScreen(
                 }
             }
 
+            SectionTitle("可视化")
+            SettingsGroup {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    ToggleRow(
+                        label = "可视化回答",
+                        checked = s.visualAnswersEnabled,
+                        onChange = viewModel::setVisualAnswersEnabled,
+                        subtitle = "自定义模型可用函数图像、图表、表格和网页作答",
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                    ToggleRow(
+                        label = "网页以卡片显示",
+                        checked = s.htmlAsCard,
+                        onChange = viewModel::setHtmlAsCard,
+                        subtitle = "关闭后显示为代码，仍可点「运行」",
+                    )
+                }
+            }
+
             SectionTitle("远程控制")
             SettingsGroup {
                 SettingsEntryRow(

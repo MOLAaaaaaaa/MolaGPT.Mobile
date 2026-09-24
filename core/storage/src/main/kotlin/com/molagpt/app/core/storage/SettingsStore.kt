@@ -118,6 +118,10 @@ data class AppSettings(
     val responsePostProcessingEnabled: Boolean = true,
     /** 后处理规则，按列表顺序依次施加。未配置过时是内置的中文标点两条。 */
     val responseRegexRules: List<ResponseRegexRule> = ResponseRegexRules.DEFAULTS,
+    /** 可视化回答：给 BYOK 模型注入内嵌组件与网页的输出协议。长期偏好，不是每轮的模式。 */
+    val visualAnswersEnabled: Boolean = true,
+    /** 回答里的整页 HTML 显示成可运行的卡片；关闭后显示为代码块，标题栏仍可运行。 */
+    val htmlAsCard: Boolean = true,
 )
 
 /** DataStore 设置存储。 */
@@ -179,6 +183,8 @@ class SettingsStore(private val context: Context) {
             completionNotify = p[Keys.COMPLETION_NOTIFY] ?: true,
             responsePostProcessingEnabled = p[Keys.RESPONSE_POST_PROCESSING] ?: true,
             responseRegexRules = decodeRegexRules(p[Keys.RESPONSE_REGEX_RULES]),
+            visualAnswersEnabled = p[Keys.VISUAL_ANSWERS] ?: true,
+            htmlAsCard = p[Keys.HTML_AS_CARD] ?: true,
         )
     }
 
@@ -268,6 +274,8 @@ class SettingsStore(private val context: Context) {
     suspend fun setCompletionNotify(v: Boolean) = edit { it[Keys.COMPLETION_NOTIFY] = v }
 
     suspend fun setResponsePostProcessingEnabled(v: Boolean) = edit { it[Keys.RESPONSE_POST_PROCESSING] = v }
+    suspend fun setVisualAnswersEnabled(v: Boolean) = edit { it[Keys.VISUAL_ANSWERS] = v }
+    suspend fun setHtmlAsCard(v: Boolean) = edit { it[Keys.HTML_AS_CARD] = v }
 
     /** 保存规则列表。空列表也要落盘：那是「我把规则都删了」，不能被当成「没配置过」回灌默认值。 */
     suspend fun setResponseRegexRules(rules: List<ResponseRegexRule>) = edit {
@@ -387,6 +395,8 @@ class SettingsStore(private val context: Context) {
         val SYNC_CURSOR = stringPreferencesKey("sync_cursor_iso")
         val COMPLETION_NOTIFY = booleanPreferencesKey("completion_notify")
         val RESPONSE_POST_PROCESSING = booleanPreferencesKey("response_post_processing_enabled")
+        val VISUAL_ANSWERS = booleanPreferencesKey("visual_answers_enabled")
+        val HTML_AS_CARD = booleanPreferencesKey("html_as_card")
         val RESPONSE_REGEX_RULES = stringPreferencesKey("response_regex_rules")
         val SEEN_OPS_MESSAGE_IDS = stringSetPreferencesKey("seen_ops_message_ids")
         val SEEN_PROMO_IDS = stringSetPreferencesKey("seen_promo_ids")

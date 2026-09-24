@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -29,9 +30,16 @@ import androidx.compose.ui.unit.dp
 /**
  * 代码块：等宽字体 + 语言标签 + 复制按钮，横向可滚。首版不做语法高亮（保持依赖精简，
  * 高亮属阶段 6 增强）。整体作为独立可重组单元，长代码不阻塞其它 fragment。
+ *
+ * [actions] 放在复制按钮前面，给网页代码块的「运行」「收起为卡片」用。
  */
 @Composable
-fun CodeBlockView(language: String?, code: String, modifier: Modifier = Modifier) {
+fun CodeBlockView(
+    language: String?,
+    code: String,
+    modifier: Modifier = Modifier,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val shape = RoundedCornerShape(10.dp)
@@ -54,6 +62,7 @@ fun CodeBlockView(language: String?, code: String, modifier: Modifier = Modifier
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            actions()
             IconButton(onClick = {
                 clipboard.setText(AnnotatedString(code))
                 Toast.makeText(context, "复制成功", Toast.LENGTH_SHORT).show()

@@ -26,6 +26,11 @@ kotlin {
 
 dependencies {
     implementation(project(":core:common"))
+    implementation(project(":core:render"))
     implementation(libs.bundles.compose)
+    implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    // 网页运行页替页面去 CDN 取库（镜像竞速 + 磁盘缓存）。
+    implementation(libs.okhttp)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

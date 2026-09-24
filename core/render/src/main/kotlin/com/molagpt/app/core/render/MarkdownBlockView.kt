@@ -75,12 +75,15 @@ import androidx.compose.ui.unit.sp
 import com.molagpt.app.core.markdown.MdBlock
 import com.molagpt.app.core.markdown.MdInline
 import com.molagpt.app.core.markdown.MdTableAlignment
+import com.molagpt.app.core.markdown.visual.HtmlFence
+import com.molagpt.app.core.render.visual.HtmlFenceView
+import com.molagpt.app.core.render.visual.MolaUiBlockView
 import com.molagpt.app.core.model.SourceReference
 
 /**
  * Markdown 行内图片的渲染器（CompositionLocal）。:core:render 不依赖 Coil/:feature:file，
  * 由 feature 层（FragmentRenderer）提供真正的 Coil 实现；默认仅占位，保证本模块可独立编译。
- * 与 Mermaid 的 lambda 注入同思路，维持 core 不反向依赖 feature。
+ * 与运行网页交给 `LocalVisualHost` 同思路，维持 core 不反向依赖 feature。
  */
 val LocalMarkdownImageRenderer: ProvidableCompositionLocal<@Composable (String, Modifier) -> Unit> =
     staticCompositionLocalOf {
@@ -116,8 +119,11 @@ fun MarkdownBlockView(
     /**
      * 流式尾部渐隐：仅对**正在流式输出的最后一个 block** 传 true。
      * 渐变锚在真实行尾（由文本布局给出），不切分字符，开销与文本量无关。
+     * 同时表示「这一块所在的回答还在生成」：没写完的网页 / 组件围栏据此显示为生成中。
      */
     tailFade: Boolean = false,
+    /** 这一块在对话里的稳定身份，网页代码块记「卡片 / 代码」切换用；没有时切换只在控件里记。 */
+    blockKey: String? = null,
 ) {
     val bodyLarge = scaledTextStyle(MaterialTheme.typography.bodyLarge, textScale)
     val bodySmall = scaledTextStyle(MaterialTheme.typography.bodySmall, textScale)
@@ -170,9 +176,14 @@ fun MarkdownBlockView(
             }
         }
         is MdBlock.Table -> TableView(block, modifier.padding(vertical = 6.dp), bodySmall)
-        is MdBlock.Code -> CodeBlockView(language = block.language, code = block.code, modifier = modifier)
+        is MdBlock.Code -> if (HtmlFence.isHtml(block.language, block.code)) {
+            HtmlFenceView(block, streaming = tailFade, stateKey = blockKey, modifier = modifier.padding(vertical = 4.dp))
+        } else {
+            CodeBlockView(language = block.language, code = block.code, modifier = modifier)
+        }
         is MdBlock.MathBlock -> LatexView(expr = block.expr, display = true, modifier = modifier.padding(vertical = 4.dp))
         is MdBlock.Mermaid -> CodeBlockView(language = "mermaid", code = block.source, modifier = modifier)
+        is MdBlock.MolaUi -> MolaUiBlockView(block, streaming = tailFade, modifier = modifier.padding(vertical = 6.dp))
         MdBlock.Divider -> HorizontalDivider(modifier = modifier.padding(vertical = 8.dp))
     }
 }

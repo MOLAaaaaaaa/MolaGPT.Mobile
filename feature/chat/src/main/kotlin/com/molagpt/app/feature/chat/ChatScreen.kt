@@ -1,5 +1,12 @@
 package com.molagpt.app.feature.chat
 
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.input.pointer.pointerInput
+import com.molagpt.app.core.render.visual.LocalVisualHost
+import com.molagpt.app.feature.webview.HtmlRunner
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -128,9 +135,15 @@ fun ChatScreen(
     /** 打开 BYOK 当前模型的推理参数编辑页。 */
     onOpenByokModelSettings: (providerId: String, modelId: String) -> Unit = { _, _ -> },
     drawerOpen: Boolean = false,
+    /** 设置「网页以卡片显示」。 */
+    htmlAsCard: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val appContext = LocalContext.current.applicationContext
+    val htmlAsCardState = rememberUpdatedState(htmlAsCard)
+    val visualHost = remember { ChatVisualHost(appContext, htmlAsCardState) }
+    visualHost.sessionId = state.sessionId
     val activePersona by viewModel.activePersona.collectAsStateWithLifecycle()
     val personas by viewModel.personas.collectAsStateWithLifecycle()
     val memoryEnabled by viewModel.memoryEnabled.collectAsStateWithLifecycle()
@@ -281,6 +294,7 @@ fun ChatScreen(
         CompositionLocalProvider(
             LocalSharedTransitionScope provides sharedScope,
             LocalImagePreviewUrl provides previewHolder,
+            LocalVisualHost provides visualHost,
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
                 Scaffold(
@@ -692,6 +706,32 @@ fun ChatScreen(
                                     modifier = Modifier.fillMaxSize(),
                                 )
                             }
+                        }
+                    }
+                }
+
+                // ── 网页运行 / 组件全屏 overlay ──
+                // 与图片预览同一层：盖住顶栏和输入框。容器自己接住触摸，点空白处不会落到下面的列表上。
+                visualHost.overlay?.let { overlay ->
+                    // 在这里注册：比页面上其它返回处理更晚组合，返回键先关掉这一层。
+                    BackHandler { visualHost.close() }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .pointerInput(Unit) { detectTapGestures { } }
+                            .systemBarsPadding()
+                            .imePadding(),
+                    ) {
+                        when (overlay) {
+                            is VisualOverlay.Html -> HtmlRunner(
+                                source = overlay.request.source,
+                                title = overlay.request.title,
+                                fileName = overlay.request.fileName,
+                                originKey = overlay.originKey,
+                                onClose = visualHost::close,
+                            )
+                            is VisualOverlay.Fullscreen -> overlay.content(visualHost::close)
                         }
                     }
                 }

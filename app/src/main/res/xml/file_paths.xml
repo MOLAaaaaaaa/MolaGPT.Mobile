@@ -5,4 +5,8 @@
     <cache-path
         name="camera"
         path="camera/" />
+    <!-- 组件图片、网页和表格导出后经系统分享交出去的中转目录，与 VisualExport 一致。 -->
+    <cache-path
+        name="shared"
+        path="shared/" />
 </paths>

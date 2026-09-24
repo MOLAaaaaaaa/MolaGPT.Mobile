@@ -49,7 +49,7 @@ sealed interface MessageFragment {
         val display: Boolean = true,
     ) : MessageFragment
 
-    /** Mermaid 图（由 :feature:webview 离线 mermaid.js 渲染）。 */
+    /** Mermaid 图（暂按代码块显示）。 */
     @Serializable
     @SerialName("mermaid")
     data class Mermaid(override val id: String, val source: String) : MessageFragment

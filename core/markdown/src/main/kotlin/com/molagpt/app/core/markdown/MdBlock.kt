@@ -4,8 +4,8 @@ package com.molagpt.app.core.markdown
  * 中性 Markdown 模型（不依赖 Compose）。:core:render 把它映射成 Compose 组件，
  * 从而 markdown 解析层可在后台线程跑、可单测、且与 UI 解耦。
  *
- * 解析时把**代码块 / Mermaid / 块级 LaTeX** 抽成独立块，便于 render 层分发到
- * 高亮组件 / WebView / JLaTeXMath。普通文本块携带行内片段列表。
+ * 解析时把**代码块 / Mermaid / mola-ui 组件 / 块级 LaTeX** 抽成独立块，便于 render 层分发到
+ * 高亮组件 / 原生可视化组件 / JLaTeXMath。普通文本块携带行内片段列表。
  */
 sealed interface MdBlock {
     data class Heading(val level: Int, val inlines: List<MdInline>) : MdBlock
@@ -19,8 +19,21 @@ sealed interface MdBlock {
         val rows: List<List<List<MdInline>>>,
         val alignments: List<MdTableAlignment> = emptyList(),
     ) : MdBlock
-    data class Code(val language: String?, val code: String) : MdBlock
+    /** [closed]：围栏已写出结束标记。流式中还没写完的代码块为 false。 */
+    data class Code(val language: String?, val code: String, val closed: Boolean = true) : MdBlock
     data class Mermaid(val source: String) : MdBlock
+
+    /**
+     * `mola-ui` 围栏：内嵌组件（函数图像、图表、数据表、指标卡、条目卡）。
+     *
+     * [parsed] 在解析线程上就算好（JSON + 表达式编译），并按源码缓存：流式期间整段
+     * 回答每来一批就重解析一次，已写完的组件拿回的是同一个实例，界面不会重建。
+     */
+    data class MolaUi(
+        val source: String,
+        val closed: Boolean,
+        val parsed: com.molagpt.app.core.markdown.visual.MolaUiParsed,
+    ) : MdBlock
     /** 块级公式（`$$...$$`、`\[...\]`、math fence 或常见数学 environment）。 */
     data class MathBlock(val expr: String) : MdBlock
     data object Divider : MdBlock

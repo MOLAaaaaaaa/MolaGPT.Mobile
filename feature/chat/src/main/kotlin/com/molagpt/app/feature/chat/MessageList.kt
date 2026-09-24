@@ -67,7 +67,6 @@ import com.molagpt.app.core.render.RenderCache
 import com.molagpt.app.core.storage.RetryAttempts
 import com.molagpt.app.feature.file.RemoteFavicon
 import com.molagpt.app.feature.file.RemoteImage
-import com.molagpt.app.feature.webview.MermaidWebView
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 
@@ -238,17 +237,14 @@ fun MessageList(
                                 row.blocks.forEachIndexed { index, block ->
                                     // 渐隐只加在最后一个 block 上：整段套会把每个段落的行尾都淡掉。
                                     val tail = row.streamingTail && index == row.blocks.lastIndex
-                                    when (block) {
-                                        is MdBlock.Mermaid -> MermaidWebView(
-                                            block.source,
-                                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                        )
-                                        else -> MarkdownBlockView(
-                                            block = block,
-                                            modifier = Modifier.fillMaxWidth(),
-                                            tailFade = tail,
-                                        )
-                                    }
+                                    MarkdownBlockView(
+                                        block = block,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        tailFade = tail,
+                                        // 网页代码块「卡片 / 代码」的单独切换按这个键记在对话页里，
+                                        // 滚出屏幕再回来不丢。
+                                        blockKey = "${row.messageId}:${row.fragmentId}:$index",
+                                    )
                                 }
                             }
                         }

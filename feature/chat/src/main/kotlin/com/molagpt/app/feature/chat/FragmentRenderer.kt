@@ -14,7 +14,6 @@ import com.molagpt.app.core.render.SearchResultView
 import com.molagpt.app.core.render.StreamingMarkdownView
 import com.molagpt.app.core.render.ThinkingView
 import com.molagpt.app.core.render.ToolCallView
-import com.molagpt.app.feature.webview.MermaidWebView
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -41,7 +40,6 @@ fun FragmentRenderer(
             markdown = fragment.markdown,
             modifier = modifier,
             tailFade = streamingTail,
-            mermaidRenderer = { source, itemModifier -> MermaidWebView(source, itemModifier) },
         )
         is MessageFragment.Thinking -> ThinkingView(
             text = fragment.text,
@@ -52,7 +50,7 @@ fun FragmentRenderer(
         )
         is MessageFragment.CodeBlock -> CodeBlockView(fragment.language, fragment.code, modifier)
         is MessageFragment.Latex -> LatexView(fragment.expr, fragment.display, modifier)
-        is MessageFragment.Mermaid -> MermaidWebView(fragment.source, modifier)
+        is MessageFragment.Mermaid -> CodeBlockView("mermaid", fragment.source, modifier)
         is MessageFragment.SearchResult -> SearchResultView(fragment.query, fragment.refs, modifier)
         is MessageFragment.ToolCall -> ToolCallView(
             name = fragment.name,

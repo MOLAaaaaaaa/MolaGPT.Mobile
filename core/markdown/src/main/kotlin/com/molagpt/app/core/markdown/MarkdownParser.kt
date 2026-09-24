@@ -30,6 +30,7 @@ import org.commonmark.node.StrongEmphasis
 import org.commonmark.node.Text
 import org.commonmark.node.ThematicBreak
 import org.commonmark.parser.Parser
+import com.molagpt.app.core.markdown.visual.MolaUiParser
 
 /**
  * 把 Markdown 源串解析成 [MdBlock] 列表。**应在后台线程调用**（:core:render 会用
@@ -172,12 +173,17 @@ object MarkdownParser {
         is FencedCodeBlock -> {
             val info = node.info?.trim()?.lowercase().orEmpty()
             val language = info.substringBefore(' ').removeSurrounding("{", "}")
+            val closed = node.closingFenceLength != null
             when {
                 language == "mermaid" -> MdBlock.Mermaid(node.literal.trimEnd())
-                language in MATH_FENCE_LANGUAGES && node.closingFenceLength != null -> {
+                language == MolaUiParser.FENCE_LANGUAGE -> {
+                    val source = node.literal.trimEnd()
+                    MdBlock.MolaUi(source, closed, MolaUiParser.parseCached(source, closed))
+                }
+                language in MATH_FENCE_LANGUAGES && closed -> {
                     MdBlock.MathBlock(node.literal.trim())
                 }
-                else -> MdBlock.Code(node.info?.trim()?.ifBlank { null }, node.literal.trimEnd())
+                else -> MdBlock.Code(node.info?.trim()?.ifBlank { null }, node.literal.trimEnd(), closed)
             }
         }
         is IndentedCodeBlock -> MdBlock.Code(null, node.literal.trimEnd())

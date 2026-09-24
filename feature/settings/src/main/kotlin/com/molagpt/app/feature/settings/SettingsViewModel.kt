@@ -85,6 +85,8 @@ class SettingsViewModel(
         viewModelScope.launch { store.setShowAgentControlShortcut(v) }
     fun setShowImageWorkbenchShortcut(v: Boolean) =
         viewModelScope.launch { store.setShowImageWorkbenchShortcut(v) }
+    fun setVisualAnswersEnabled(v: Boolean) = viewModelScope.launch { store.setVisualAnswersEnabled(v) }
+    fun setHtmlAsCard(v: Boolean) = viewModelScope.launch { store.setHtmlAsCard(v) }
     fun setTemperature(v: Double) = viewModelScope.launch { store.setTemperature(v) }
     fun setUseThinking(v: Boolean) = viewModelScope.launch { store.setUseThinking(v) }
     fun setReasoningEffort(v: String) = viewModelScope.launch { store.setReasoningEffort(v) }

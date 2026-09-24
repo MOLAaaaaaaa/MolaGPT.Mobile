@@ -29,6 +29,7 @@ import com.molagpt.app.core.model.RolePromptResult
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.SystemPromptComposer
+import com.molagpt.app.core.model.VisualAnswerPrompt
 import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.core.model.titleFallback
 import com.molagpt.app.core.network.resolveOpeningModelSelection
@@ -1283,11 +1284,14 @@ class ChatViewModel(
                     mode = _conversationSystemPromptMode.value,
                     vars = vars,
                 )
-                // 顺序固定为 角色提示 → 会话提示 → 记忆块 → 记忆使用规则：
+                // 顺序固定为 角色提示 → 会话提示 → 记忆块 → 记忆使用规则 → 可视化协议：
                 // 记忆是背景数据，必须排在角色定义之后，不能反过来影响助手身份。
+                // 可视化协议是这台设备能渲染什么，与桌面端一样放在最后。
+                val visualAnswers = (settingsFlow.value ?: AppSettings()).visualAnswersEnabled
                 val sysText = listOfNotNull(
                     personaText?.takeIf { it.isNotBlank() },
                     buildMemoryContext(requestTools),
+                    VisualAnswerPrompt.TEXT.takeIf { visualAnswers },
                 ).joinToString("\n\n").takeIf { it.isNotBlank() }
                 val body = applyRolePlan(requestHistory, role?.plan)
                 if (sysText != null) listOf(systemMessage(sysText)) + body else body
