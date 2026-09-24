@@ -335,11 +335,11 @@ private class RunnerState(val host: String) {
     }
 
     fun trafficText(): String {
-        if (loaded == 0 && failed == 0 && blocked == 0) return if (loading) "正在加载" else "未访问外部网络"
+        if (loaded == 0 && failed == 0 && blocked == 0) return if (loading) "正在加载" else "未加载外部资源"
         return buildList {
             if (loaded > 0) add("从 CDN 加载 $loaded 个资源")
-            if (failed > 0) add("$failed 个加载失败")
-            if (blocked > 0) add("已拦截 $blocked 个请求")
+            if (failed > 0) add("$failed 个外部资源加载失败")
+            if (blocked > 0) add("已拦截 $blocked 个不可信请求")
         }.joinToString(" · ")
     }
 }
