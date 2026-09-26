@@ -3,6 +3,7 @@ package com.molagpt.app.core.network
 import com.molagpt.app.core.model.Attachment
 import com.molagpt.app.core.model.AttachmentMime
 import com.molagpt.app.core.model.ChatMessage
+import com.molagpt.app.core.model.ChatMessageMetadataKeys
 
 /**
  * 附件 → 请求 part 的选取规则。三处必须严格一致，所以收在一个地方：
@@ -29,9 +30,17 @@ internal object AttachmentParts {
     fun unavailableDocuments(message: ChatMessage): List<Attachment> =
         message.attachments.filter { it.unavailable && !AttachmentMime.isImage(it.mimeType) }
 
-    fun imageLabel(ordinal: Int, attachment: Attachment): String {
+    /** 这条消息的图片只发文字占位（较早的图片，见 [ChatMessageMetadataKeys.IMAGES_AS_TEXT]）。 */
+    fun imagesAsText(message: ChatMessage): Boolean =
+        message.metadata.containsKey(ChatMessageMetadataKeys.IMAGES_AS_TEXT)
+
+    fun imageLabel(ordinal: Int, attachment: Attachment, omitted: Boolean = false): String {
         val name = attachment.name.takeIf { it.isNotBlank() }
-        val suffix = if (attachment.unavailable) "（文件已丢失，无法查看）" else ""
+        val suffix = when {
+            attachment.unavailable -> "（文件已丢失，无法查看）"
+            omitted -> "（较早发送的图片，本次未附带）"
+            else -> ""
+        }
         return if (name != null) "[图片#$ordinal: $name]$suffix" else "[图片#$ordinal]$suffix"
     }
 

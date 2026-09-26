@@ -30,7 +30,13 @@ class AuthApi(private val http: MolaHttp) {
             setBody(LoginRequest(username, passwordSha256))
         }
         if (!resp.status.isSuccess()) {
-            return LoginResponse(success = false, message = "HTTP ${resp.status.value}: ${resp.bodyAsText().take(200)}")
+            // 登录限频（429）、账号服务不可用（503）都带 message，只显示那一句
+            val body = resp.bodyAsText()
+            return LoginResponse(
+                success = false,
+                message = molaServerErrorMessage(resp.status.value, body)
+                    ?: "HTTP ${resp.status.value}: ${body.take(200)}",
+            )
         }
         return runCatching { resp.body<LoginResponse>() }
             .getOrElse { LoginResponse(success = false, message = "登录响应解析失败") }
@@ -60,7 +66,12 @@ class AuthApi(private val http: MolaHttp) {
             setBody(OAuthExchangeRequest(code))
         }
         if (!resp.status.isSuccess()) {
-            return LoginResponse(success = false, message = "HTTP ${resp.status.value}: ${resp.bodyAsText().take(200)}")
+            val body = resp.bodyAsText()
+            return LoginResponse(
+                success = false,
+                message = molaServerErrorMessage(resp.status.value, body)
+                    ?: "HTTP ${resp.status.value}: ${body.take(200)}",
+            )
         }
         return runCatching { resp.body<LoginResponse>() }
             .getOrElse { LoginResponse(success = false, message = "OAuth 兑换响应解析失败") }

@@ -70,7 +70,10 @@ import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.core.render.ComposerSurface
 import com.molagpt.app.core.render.PersonaIcons
+import com.molagpt.app.core.render.RoundIconButton
+import com.molagpt.app.core.render.ToolChip
 
 /**
  * 输入区。输入态用 [rememberSaveable] 持有在本 Composable 内，与消息列表状态分离——
@@ -122,6 +125,8 @@ fun Composer(
     onCancelEdit: () -> Unit = {},
     /** BYOK：打开当前模型的推理参数编辑页；MolaGPT 传 null。 */
     onOpenModelReasoningSettings: (() -> Unit)? = null,
+    /** 发送键左侧的上下文用量环；没有时不占位。 */
+    contextGauge: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
@@ -170,194 +175,185 @@ fun Composer(
         }
     }
 
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(22.dp),
-        color = colorScheme.surface,
-        tonalElevation = 0.dp,
-        shadowElevation = 0.dp,
-        border = BorderStroke(1.dp, colorScheme.outline.copy(alpha = 0.34f)),
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (isEditing) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(colorScheme.primary.copy(alpha = 0.08f))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "正在编辑消息",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = colorScheme.primary,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        text = "取消",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(50))
-                            .clickable {
-                                onCancelEdit()
-                                text = ""
-                            }
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                    )
-                }
-            }
+    ComposerSurface(modifier = modifier) {
+        if (isEditing) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // 固定高度：推理开关切换时 SegmentedControl（36dp）出现/消失不再改变整行高度（避免上方按钮抖动）。
-                    .height(40.dp)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(colorScheme.primary.copy(alpha = 0.08f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (isByok && showPersonaChip) {
-                    PersonaChip(
-                        persona = activePersona,
-                        enabled = toolsEnabled,
-                        onClick = onOpenPersonaPicker,
-                    )
-                }
-                if (isByok && showMemoryChip) {
-                    ToolChip(
-                        label = "记忆",
-                        checked = memoryEnabled,
-                        enabled = toolsEnabled,
-                        onCheckedChange = onSetMemory,
-                    )
-                }
-                ToolChip(
-                    label = if (isByok) "网络访问" else "联网搜索",
-                    checked = enabledTools.network || enabledTools.steelBrowser,
-                    enabled = networkEnabled,
-                    onCheckedChange = onSetWebAccess,
+                Text(
+                    text = "正在编辑消息",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colorScheme.primary,
+                    modifier = Modifier.weight(1f),
                 )
-                if (showThinking) {
-                    val toggleOnly = effortLevels.isEmpty()
-                    val alwaysOn = thinkingConfig != null &&
-                        com.molagpt.app.core.model.ThinkingKinds.isAlwaysOn(thinkingConfig, providerBaseUrl)
-                    val chipOn = alwaysOn || useThinking
-                    ReasoningChip(
-                        checked = chipOn,
-                        effortLabel = if (!toggleOnly && chipOn) {
-                            com.molagpt.app.core.model.ThinkingKinds.effortLabel(reasoningEffort)
-                        } else {
-                            null
-                        },
-                        hasLevels = !toggleOnly,
-                        enabled = toolsEnabled,
-                        onToggle = {
-                            when {
-                                toggleOnly -> onToggleThinking(!useThinking)
-                                alwaysOn -> showReasoningSheet = true // 常开模型无法关闭，点主体开强度面板
-                                useThinking -> onToggleThinking(false)
-                                else -> {
-                                    // 关→开：默认档，不弹层
-                                    onToggleThinking(true)
-                                    thinkingConfig?.let {
-                                        onSetReasoningEffort(
-                                            com.molagpt.app.core.model.ThinkingKinds
-                                                .resolveDefaultEffort(it, providerBaseUrl),
-                                        )
-                                    }
+                Text(
+                    text = "取消",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable {
+                            onCancelEdit()
+                            text = ""
+                        }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                // 固定高度：推理开关切换时 SegmentedControl（36dp）出现/消失不再改变整行高度（避免上方按钮抖动）。
+                .height(40.dp)
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (isByok && showPersonaChip) {
+                PersonaChip(
+                    persona = activePersona,
+                    enabled = toolsEnabled,
+                    onClick = onOpenPersonaPicker,
+                )
+            }
+            if (isByok && showMemoryChip) {
+                ToolChip(
+                    label = "记忆",
+                    checked = memoryEnabled,
+                    enabled = toolsEnabled,
+                    onClick = { onSetMemory(!memoryEnabled) },
+                )
+            }
+            val webOn = enabledTools.network || enabledTools.steelBrowser
+            ToolChip(
+                label = if (isByok) "网络访问" else "联网搜索",
+                checked = webOn,
+                enabled = networkEnabled,
+                onClick = { onSetWebAccess(!webOn) },
+            )
+            if (showThinking) {
+                val toggleOnly = effortLevels.isEmpty()
+                val alwaysOn = thinkingConfig != null &&
+                    com.molagpt.app.core.model.ThinkingKinds.isAlwaysOn(thinkingConfig, providerBaseUrl)
+                val chipOn = alwaysOn || useThinking
+                ReasoningChip(
+                    checked = chipOn,
+                    effortLabel = if (!toggleOnly && chipOn) {
+                        com.molagpt.app.core.model.ThinkingKinds.effortLabel(reasoningEffort)
+                    } else {
+                        null
+                    },
+                    hasLevels = !toggleOnly,
+                    enabled = toolsEnabled,
+                    onToggle = {
+                        when {
+                            toggleOnly -> onToggleThinking(!useThinking)
+                            alwaysOn -> showReasoningSheet = true // 常开模型无法关闭，点主体开强度面板
+                            useThinking -> onToggleThinking(false)
+                            else -> {
+                                // 关→开：默认档，不弹层
+                                onToggleThinking(true)
+                                thinkingConfig?.let {
+                                    onSetReasoningEffort(
+                                        com.molagpt.app.core.model.ThinkingKinds
+                                            .resolveDefaultEffort(it, providerBaseUrl),
+                                    )
                                 }
                             }
-                        },
-                        onOpenLevels = { showReasoningSheet = true },
-                    )
-                }
-            }
-
-            if (pendingAttachments.isNotEmpty()) {
-                PendingAttachmentRow(files = pendingAttachments, onRemove = onRemoveAttachment)
-            }
-
-            BasicTextField(
-                value = text,
-                onValueChange = { text = it },
-                enabled = enabled,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp, max = 126.dp)
-                    .padding(horizontal = 4.dp, vertical = 2.dp),
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colorScheme.onSurface),
-                cursorBrush = SolidColor(colorScheme.primary),
-                keyboardOptions = KeyboardOptions(
-                    imeAction = if (enterToSend) ImeAction.Send else ImeAction.Default,
-                ),
-                keyboardActions = KeyboardActions(onSend = { submit() }),
-                maxLines = 6,
-                decorationBox = { innerTextField ->
-                    Box(modifier = Modifier.fillMaxWidth()) {
-                        if (text.isEmpty()) {
-                            Text(
-                                text = if (isEditing) "修改输入..." else "输入消息...",
-                                color = colorScheme.onSurfaceVariant.copy(alpha = 0.68f),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
                         }
-                        innerTextField()
-                    }
-                },
-            )
+                    },
+                    onOpenLevels = { showReasoningSheet = true },
+                )
+            }
+        }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box {
-                    RoundIconButton(
-                        icon = Icons.Filled.Add,
-                        contentDescription = "添加附件",
-                        selected = attachMenuOpen,
-                        enabled = toolsEnabled,
-                        onClick = { attachMenuOpen = true },
-                    )
-                    AttachmentMenu(
-                        expanded = attachMenuOpen,
-                        onDismiss = { attachMenuOpen = false },
-                        onTakePhoto = onTakePhoto,
-                        onPickImages = onPickImages,
-                        onPickFiles = onPickFiles,
-                    )
-                }
-                Spacer(modifier = Modifier.weight(1f))
-                Crossfade(
-                    targetState = isStreaming,
-                    animationSpec = com.molagpt.app.core.render.MolaMotion.standard(com.molagpt.app.core.render.MolaMotion.Medium),
-                    label = "sendStop",
-                ) { streaming ->
-                    if (streaming) {
-                        RoundIconButton(
-                            icon = Icons.Filled.Stop,
-                            contentDescription = "停止生成",
-                            selected = true,
-                            containerColor = colorScheme.error,
-                            contentColor = colorScheme.onError,
-                            onClick = onStop,
-                        )
-                    } else {
-                        RoundIconButton(
-                            icon = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "发送",
-                            selected = canSend,
-                            enabled = canSend,
-                            containerColor = if (canSend) colorScheme.primary else colorScheme.surfaceVariant,
-                            contentColor = if (canSend) colorScheme.onPrimary else colorScheme.onSurfaceVariant.copy(alpha = 0.54f),
-                            onClick = { submit() },
+        if (pendingAttachments.isNotEmpty()) {
+            PendingAttachmentRow(files = pendingAttachments, onRemove = onRemoveAttachment)
+        }
+
+        BasicTextField(
+            value = text,
+            onValueChange = { text = it },
+            enabled = enabled,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp, max = 126.dp)
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = colorScheme.onSurface),
+            cursorBrush = SolidColor(colorScheme.primary),
+            keyboardOptions = KeyboardOptions(
+                imeAction = if (enterToSend) ImeAction.Send else ImeAction.Default,
+            ),
+            keyboardActions = KeyboardActions(onSend = { submit() }),
+            maxLines = 6,
+            decorationBox = { innerTextField ->
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    if (text.isEmpty()) {
+                        Text(
+                            text = if (isEditing) "修改输入..." else "输入消息...",
+                            color = colorScheme.onSurfaceVariant.copy(alpha = 0.68f),
+                            style = MaterialTheme.typography.bodyLarge,
                         )
                     }
+                    innerTextField()
+                }
+            },
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box {
+                RoundIconButton(
+                    icon = Icons.Filled.Add,
+                    contentDescription = "添加附件",
+                    selected = attachMenuOpen,
+                    enabled = toolsEnabled,
+                    onClick = { attachMenuOpen = true },
+                )
+                AttachmentMenu(
+                    expanded = attachMenuOpen,
+                    onDismiss = { attachMenuOpen = false },
+                    onTakePhoto = onTakePhoto,
+                    onPickImages = onPickImages,
+                    onPickFiles = onPickFiles,
+                )
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            if (contextGauge != null) {
+                contextGauge()
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+            Crossfade(
+                targetState = isStreaming,
+                animationSpec = com.molagpt.app.core.render.MolaMotion.standard(com.molagpt.app.core.render.MolaMotion.Medium),
+                label = "sendStop",
+            ) { streaming ->
+                if (streaming) {
+                    RoundIconButton(
+                        icon = Icons.Filled.Stop,
+                        contentDescription = "停止生成",
+                        selected = true,
+                        containerColor = colorScheme.error,
+                        contentColor = colorScheme.onError,
+                        onClick = onStop,
+                    )
+                } else {
+                    RoundIconButton(
+                        icon = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "发送",
+                        selected = canSend,
+                        enabled = canSend,
+                        containerColor = if (canSend) colorScheme.primary else colorScheme.surfaceVariant,
+                        contentColor = if (canSend) colorScheme.onPrimary else colorScheme.onSurfaceVariant.copy(alpha = 0.54f),
+                        onClick = { submit() },
+                    )
                 }
             }
         }
@@ -520,61 +516,6 @@ private fun PendingAttachmentRow(files: List<FileInfo>, onRemove: (String) -> Un
 }
 
 @Composable
-private fun ToolChip(
-    label: String,
-    checked: Boolean,
-    enabled: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    val colorScheme = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(50)
-    val containerColor by animateColorAsState(
-        targetValue = when {
-            checked -> colorScheme.primary.copy(alpha = 0.14f)
-            else -> colorScheme.surfaceVariant.copy(alpha = 0.72f)
-        },
-        label = "toolChipContainer",
-    )
-    val contentColor by animateColorAsState(
-        targetValue = when {
-            !enabled -> colorScheme.onSurfaceVariant.copy(alpha = 0.42f)
-            checked -> colorScheme.primary
-            else -> colorScheme.onSurfaceVariant
-        },
-        label = "toolChipContent",
-    )
-    val borderColor = if (checked) {
-        colorScheme.primary.copy(alpha = 0.32f)
-    } else {
-        colorScheme.outline.copy(alpha = 0.12f)
-    }
-
-    Row(
-        modifier = Modifier
-            .heightIn(min = 32.dp)
-            .clip(shape)
-            .background(containerColor)
-            .border(1.dp, borderColor, shape)
-            .clickable(
-                enabled = enabled,
-                role = Role.Checkbox,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-            ) { onCheckedChange(!checked) }
-            .padding(horizontal = 11.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            color = contentColor,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Medium,
-            maxLines = 1,
-        )
-    }
-}
-
-@Composable
 private fun PersonaChip(
     persona: Persona?,
     enabled: Boolean,
@@ -617,58 +558,6 @@ private fun PersonaChip(
             contentDescription = null,
             modifier = Modifier.size(16.dp),
             tint = cs.primary,
-        )
-    }
-}
-
-@Composable
-private fun RoundIconButton(
-    icon: ImageVector,
-    contentDescription: String,
-    selected: Boolean,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    containerColor: Color? = null,
-    contentColor: Color? = null,
-    onClick: () -> Unit,
-) {
-    val colorScheme = MaterialTheme.colorScheme
-    val targetContainer = containerColor ?: if (selected) {
-        colorScheme.primary.copy(alpha = 0.14f)
-    } else {
-        colorScheme.surfaceVariant.copy(alpha = 0.72f)
-    }
-    val targetContent = contentColor ?: if (selected) {
-        colorScheme.primary
-    } else {
-        colorScheme.onSurfaceVariant
-    }
-    val animatedContainer by animateColorAsState(targetContainer, label = "roundButtonContainer")
-    val animatedContent by animateColorAsState(
-        if (enabled) targetContent else targetContent.copy(alpha = 0.48f),
-        label = "roundButtonContent",
-    )
-
-    Box(
-        modifier = modifier
-            .size(36.dp)
-            .clip(CircleShape)
-            .background(animatedContainer)
-            .border(1.dp, colorScheme.outline.copy(alpha = 0.12f), CircleShape)
-            .clickable(
-                enabled = enabled,
-                role = Role.Button,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
-                onClick = onClick,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            modifier = Modifier.size(18.dp),
-            tint = animatedContent,
         )
     }
 }

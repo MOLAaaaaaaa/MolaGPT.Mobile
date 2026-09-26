@@ -25,6 +25,13 @@ data class ChatRequest(
     val reasoningEffort: String = "medium",
     val enabledTools: EnabledTools = EnabledTools(),
     val privacyMode: Boolean = false,
+    /** 当前角色是角色扮演卡：上下文摘要改用剧情结构。 */
+    val rolePlay: Boolean = false,
+    /**
+     * 组装请求时已生效的上下文压缩检查点。它之前的消息不会发出，附件也就不必加载；
+     * 发送前由上下文压缩器再核验一次。
+     */
+    val contextCheckpointId: String? = null,
 )
 
 /**

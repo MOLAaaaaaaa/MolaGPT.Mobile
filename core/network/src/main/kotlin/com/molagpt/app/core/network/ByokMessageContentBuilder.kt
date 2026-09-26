@@ -30,12 +30,13 @@ internal object ByokMessageContentBuilder {
                 put("text", text)
             }
         }
+        val omitted = AttachmentParts.imagesAsText(message)
         AttachmentParts.orderedImages(message).forEach { attachment ->
             val n = imageOrdinal.incrementAndGet()
-            if (replaceImagesWithText || attachment.unavailable) {
+            if (replaceImagesWithText || attachment.unavailable || omitted) {
                 addJsonObject {
                     put("type", "text")
-                    put("text", AttachmentParts.imageLabel(n, attachment))
+                    put("text", AttachmentParts.imageLabel(n, attachment, omitted = omitted && !replaceImagesWithText))
                 }
                 return@forEach
             }
@@ -85,10 +86,13 @@ internal object ByokMessageContentBuilder {
     ): JsonArray = buildJsonArray {
         val text = message.sendableText()
         if (text.isNotBlank()) addJsonObject { put("text", text) }
+        val omitted = AttachmentParts.imagesAsText(message)
         AttachmentParts.orderedImages(message).forEach { attachment ->
             val n = imageOrdinal.incrementAndGet()
-            if (replaceImagesWithText || attachment.unavailable) {
-                addJsonObject { put("text", AttachmentParts.imageLabel(n, attachment)) }
+            if (replaceImagesWithText || attachment.unavailable || omitted) {
+                addJsonObject {
+                    put("text", AttachmentParts.imageLabel(n, attachment, omitted = omitted && !replaceImagesWithText))
+                }
             } else {
                 addJsonObject { putMediaPart(attachment) }
             }

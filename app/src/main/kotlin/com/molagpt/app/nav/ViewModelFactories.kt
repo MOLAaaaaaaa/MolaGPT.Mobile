@@ -10,6 +10,8 @@ import com.molagpt.app.di.AppContainer
 import com.molagpt.app.feature.auth.AuthViewModel
 import com.molagpt.app.feature.agentcontrol.AgentControlViewModel
 import com.molagpt.app.feature.chat.ChatViewModel
+import com.molagpt.app.feature.imagegen.ImageGalleryViewModel
+import com.molagpt.app.feature.imagegen.ImageWorkbenchViewModel
 import com.molagpt.app.feature.session.SessionViewModel
 import com.molagpt.app.feature.settings.ByokMemoryViewModel
 import com.molagpt.app.feature.settings.PersonalizationViewModel
@@ -44,11 +46,24 @@ object ViewModelFactories {
             byokProviders = container.byokProviderRepository,
             byokModelApi = container.byokModelApi,
             modelsDevCatalog = container.modelsDevCatalog,
-            byokImageApi = container.byokImageApi,
             mcpToolListApi = container.mcpToolListApi,
             credentialStore = container.credentialStore,
             dispatchers = container.dispatchers,
         )
+    }
+
+    fun imageWorkbench(container: AppContainer) = factory {
+        ImageWorkbenchViewModel(
+            manager = container.imageTaskManager,
+            repository = container.imageTaskRepository,
+            providerRepository = container.byokProviderRepository,
+            appContext = container.appContext,
+            pendingOpen = container.pendingOpenImageTaskId,
+        )
+    }
+
+    fun imageGallery(container: AppContainer) = factory {
+        ImageGalleryViewModel(container.imageTaskRepository)
     }
 
     fun personalization(container: AppContainer) = factory {
@@ -117,6 +132,8 @@ object ViewModelFactories {
             temperature = settings.temperature,
             throttleMs = settings.throttleMs,
             appContext = container.appContext,
+            contextCompactor = container.contextCompactor,
+            persistAutoCompaction = { enabled -> container.settingsStore.setContextCompactionEnabled(enabled) },
         )
     }
 

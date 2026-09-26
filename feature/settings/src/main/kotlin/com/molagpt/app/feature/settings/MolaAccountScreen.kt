@@ -394,6 +394,14 @@ private fun QuotaRow(q: QuotaItem, credits: CreditsInfo?) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(q.displayName, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
             CreditSymbol(q.creditSymbol)
+            q.pricingPeriodLabel?.let { period ->
+                Text(
+                    text = period,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 6.dp),
+                )
+            }
             Text(
                 text = valueText,
                 style = MaterialTheme.typography.bodySmall,

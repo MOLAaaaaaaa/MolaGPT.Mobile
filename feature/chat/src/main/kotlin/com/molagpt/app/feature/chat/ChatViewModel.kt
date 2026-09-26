@@ -13,6 +13,7 @@ import com.molagpt.app.core.model.ByokProfileKey
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatMessageMetadataKeys
 import com.molagpt.app.core.model.ChatRequest
+import com.molagpt.app.core.model.ContextCompactionMark
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.EnabledTools
 import com.molagpt.app.core.model.FileInfo
@@ -38,6 +39,7 @@ import com.molagpt.app.core.storage.ByokMemoryConsolidator
 import com.molagpt.app.core.storage.ByokMemoryProjector
 import com.molagpt.app.core.storage.ByokMemoryRepository
 import com.molagpt.app.core.storage.ChatRepository
+import com.molagpt.app.core.storage.ContextCompactor
 import com.molagpt.app.core.storage.EditSnapshots
 import com.molagpt.app.core.storage.LorebookRepository
 import com.molagpt.app.core.storage.PersonaAvatarStore
@@ -48,6 +50,7 @@ import com.molagpt.app.core.storage.SyncEngine
 import com.molagpt.app.feature.file.AttachmentEncoder
 import com.molagpt.app.feature.file.AttachmentStore
 import com.molagpt.app.feature.file.DocumentTextExtractor
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -56,6 +59,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -108,6 +112,10 @@ class ChatViewModel(
     private val temperature: Double,
     private val throttleMs: Long,
     private val appContext: Context,
+    /** BYOK 上下文压缩：压缩记录与发送前的覆盖范围。 */
+    private val contextCompactor: ContextCompactor? = null,
+    /** 写入「自动压缩」开关（与设置页同一项）。 */
+    private val persistAutoCompaction: suspend (Boolean) -> Unit = {},
 ) : ViewModel() {
 
     private val conversationId = Ids.conversationIdForSession(sessionId)
@@ -185,6 +193,13 @@ class ChatViewModel(
         }
         viewModelScope.launch {
             postProcessFailureFlow.collect { message -> _error.value = message }
+        }
+        contextCompactor?.let { compactor ->
+            viewModelScope.launch {
+                compactor.notices.collect { (noticeSessionId, message) ->
+                    if (noticeSessionId == sessionId) _error.value = message
+                }
+            }
         }
     }
 
@@ -472,8 +487,26 @@ class ChatViewModel(
         )
     }
 
-    private val historyWithSpend = combine(chatRepository.observeMessages(sessionId), _conversationProviderKind) { history, kind ->
-        history to com.molagpt.app.core.storage.ConversationSpendCalculator.from(history, kind)
+    private val compactionMarks = contextCompactor?.observeMarks(sessionId) ?: flowOf(emptyList())
+    private val compactionProgress = contextCompactor?.progress(sessionId) ?: flowOf(null)
+    private val compactionCost = contextCompactor?.observeCostUsd(sessionId) ?: flowOf(0.0)
+
+    private val historyWithSpend = combine(
+        chatRepository.observeMessages(sessionId),
+        _conversationProviderKind,
+        compactionMarks,
+        compactionProgress,
+        compactionCost,
+    ) { history, kind, marks, progress, cost ->
+        // 刚压缩完、记录还没从数据库读回时，由进度里的结果顶上，那一行不会闪一下。
+        val finished = progress?.result?.takeIf { result -> marks.none { it.id == result.id } }
+        HistoryState(
+            messages = history,
+            spend = com.molagpt.app.core.storage.ConversationSpendCalculator.from(history, kind, cost),
+            compactions = if (finished != null) marks + finished else marks,
+            compacting = progress?.takeIf { it.running },
+            compactionCostUsd = cost,
+        )
     }
 
     val uiState: StateFlow<ChatUiState> = combine(
@@ -483,7 +516,7 @@ class ChatViewModel(
         uiMeta,
         modelsFlow,
     ) { historyState, streamState, model, meta, models ->
-        val (history, spend) = historyState
+        val (history, spend, marks, compacting, compactionCost) = historyState
         val controls = meta.controls
         val pending = meta.pendingAttachments
         val visibleModels = models.filter { it.providerKind == meta.providerKind && it.supportsChat }
@@ -497,6 +530,9 @@ class ChatViewModel(
             sessionId = sessionId,
             title = meta.title,
             messages = merged,
+            compactions = marks,
+            compacting = compacting,
+            compactionCostUsd = compactionCost,
             spend = spend,
             models = visibleModels,
             modelGroups = buildModelGroups(models),
@@ -625,6 +661,27 @@ class ChatViewModel(
                 _error.value = e.message ?: "模型列表刷新失败"
             }
         }
+    }
+
+    private var lastModelStatusRefreshAt = System.currentTimeMillis()
+
+    /**
+     * 峰谷计价的档位随时段变，App 常驻后台时列表里的 `$` 会过时。打开模型菜单时，
+     * 距上次刷新超过几分钟就静默重拉一次（与 Web 打开下拉时刷新同理）。失败不打扰用户。
+     */
+    fun refreshModelStatusIfStale() {
+        val now = System.currentTimeMillis()
+        if (!modelConfigLoadedFlow.value || modelRefreshingFlow.value) return
+        if (now - lastModelStatusRefreshAt < MODEL_STATUS_STALE_MS) return
+        lastModelStatusRefreshAt = now
+        viewModelScope.launch {
+            runCatching { withContext(dispatchers.io) { molaModelLoader(true) } }
+        }
+    }
+
+    /** 已跳转登录页，清掉标记，下次再遇到时还能再跳。 */
+    fun consumeAuthExpired() {
+        _authExpired.value = false
     }
 
     fun setWebAccessTools(enabled: Boolean) {
@@ -829,6 +886,8 @@ class ChatViewModel(
         val content = text.trim()
         val hasReadyAttachment = _pendingAttachments.value.any { it.isReadyToSend }
         if ((content.isEmpty() && !hasReadyAttachment) || backgroundStreams.isStreaming(sessionId)) return
+        // 手动压缩还没写完检查点时发送，两边会各自压一遍。
+        if (_manualCompacting.value) return
         val visibleModels = modelsFlow.value.filter { it.providerKind == _conversationProviderKind.value && it.supportsChat }
         val selectedModel = selectedModelFor(_selectedModel.value, _conversationProviderId.value, visibleModels)
             ?: return
@@ -846,6 +905,11 @@ class ChatViewModel(
             settingsFlow.value?.visionProxyEnabled != true
         ) {
             _error.value = "当前 BYOK 模型不支持视觉输入，请在「BYOK 工具」设置中开启外挂视觉，或切换到支持视觉的模型"
+            return
+        }
+        // 服务端关了游客聊天：不发出去（发了只会落库一条用户消息再吃 403），直接去登录。
+        if (selectedModel.loginRequired) {
+            _authExpired.value = true
             return
         }
 
@@ -1083,7 +1147,7 @@ class ChatViewModel(
     /** 重发：保留旧答案为一个版本，重新生成一版并切到新版本（可在版本间切换）。
      *  [overrideModelId] 非空表示换模型重试（对齐 Web 的 startRegenerate(overrideModelKey)）。 */
     fun regenerateLast(overrideModelId: String? = null) {
-        if (backgroundStreams.isStreaming(sessionId)) return
+        if (backgroundStreams.isStreaming(sessionId) || _manualCompacting.value) return
         val msgs = uiState.value.messages
         // MolaGPT 对齐 Web：只有停在最新编辑版本时才能重试（对应 Web 的「只能重试最新一条回答」）。
         // 历史快照是冻结的，在其上重生成会在切换分支后丢失（改动无处保存）。BYOK 无此限制——
@@ -1230,6 +1294,86 @@ class ChatViewModel(
         backgroundStreams.stop(sessionId)
     }
 
+    // ── 上下文用量与手动压缩（仅 BYOK） ──
+
+    private val _manualCompacting = MutableStateFlow(false)
+    private var compactJob: Job? = null
+
+    /** 输入框旁的上下文用量；非 BYOK 或还没有任何可显示的数字时为 null。 */
+    val contextUsage: StateFlow<ContextUsage?> = combine(uiState, settingsFlow, _manualCompacting) { state, settings, manual ->
+        contextUsageOf(state, settings ?: AppSettings(), manual)
+    }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    private fun contextUsageOf(state: ChatUiState, settings: AppSettings, manual: Boolean): ContextUsage? {
+        if (contextCompactor == null || state.providerKind != ProviderKind.BYOK) return null
+        val model = state.selectedModel?.takeIf { it.providerKind == ProviderKind.BYOK } ?: return null
+        val window = com.molagpt.app.core.model.ModelContextWindows.resolveOrDefault(model.id, model.contextWindow)
+        val measured = state.messages.lastOrNull { message ->
+            message.role == Role.ASSISTANT &&
+                message.status == MessageStatus.COMPLETE &&
+                message.metadata[ChatMessageMetadataKeys.CONTEXT_TOKENS] != null
+        }
+        val latest = state.compactions.maxByOrNull { it.createdAt }
+        // 压缩发生在最近一次实测之后：实测值描述的是已被替换掉的上下文，改用压缩时的估算。
+        val (tokens, approximate) = when {
+            latest != null && latest.createdAt > (measured?.updatedAt ?: 0L) -> latest.tokensAfter to true
+            measured != null -> measured.metadata[ChatMessageMetadataKeys.CONTEXT_TOKENS]?.toIntOrNull() to false
+            else -> null to false
+        }
+        val compacting = manual || state.compacting != null
+        if (tokens == null && !compacting) return null
+        return ContextUsage(
+            tokens = tokens,
+            window = window,
+            approximate = approximate,
+            autoCompaction = settings.contextCompactionEnabled,
+            compactions = state.compactions,
+            latestCoveredMessages = latest?.let { mark ->
+                state.messages.indexOfFirst { it.messageId == mark.anchorMessageId }.takeIf { it >= 0 }?.plus(1)
+            },
+            compactionCostUsd = state.compactionCostUsd,
+            compacting = compacting,
+            progress = state.compacting,
+            manualCompacting = manual,
+            replying = state.isStreaming,
+        )
+    }
+
+    /** 手动压缩较早的对话。失败原因经压缩器的提示流显示在输入框上方。 */
+    fun compactContext() {
+        val compactor = contextCompactor ?: return
+        if (_manualCompacting.value || backgroundStreams.isStreaming(sessionId)) return
+        val model = uiState.value.selectedModel?.takeIf { it.providerKind == ProviderKind.BYOK } ?: return
+        val history = uiState.value.messages
+        val rolePlay = activePersona.value?.isRolePlay == true
+        _error.value = null
+        _manualCompacting.value = true
+        compactJob = viewModelScope.launch {
+            try {
+                compactor.compactNow(sessionId, model.providerId, model.id, history, rolePlay)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = "对话压缩失败：${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                _manualCompacting.value = false
+                compactJob = null
+            }
+        }
+    }
+
+    /** 停止正在进行的压缩。发送前的自动压缩被停止时，这条消息照原样发送。 */
+    fun cancelCompaction() {
+        contextCompactor?.cancel(sessionId)
+        compactJob?.cancel()
+    }
+
+    fun setAutoCompaction(enabled: Boolean) {
+        viewModelScope.launch { runCatching { persistAutoCompaction(enabled) } }
+    }
+
     private fun startStream(
         modelId: String,
         latestUserMessage: ChatMessage? = null,
@@ -1263,11 +1407,20 @@ class ChatViewModel(
             // 角色注入：仅 BYOK 模型，把当前角色的 system prompt（插值后）作为首条 system 消息 prepend。
             // 官方账号模型不注入（服务端已有系统提示 + 个性化记忆）。该 system 消息不落库，仅用于本次请求。
             val effectiveKind = providerModel?.providerKind ?: _conversationProviderKind.value
+            // 已被压缩的消息不会发出去，附件也就不必重新编码。
+            val coverage = if (effectiveKind == ProviderKind.BYOK) {
+                runCatching { contextCompactor?.coverage(sessionId, history) }.getOrNull()
+            } else {
+                null
+            }
             val requestHistory = if (effectiveKind == ProviderKind.BYOK) {
                 withContext(dispatchers.io) {
                     history.map { message ->
-                        if (message.attachments.isEmpty()) message
-                        else message.copy(attachments = hydrateByokAttachments(message.attachments))
+                        if (message.attachments.isEmpty() || coverage?.coveredIds?.contains(message.messageId) == true) {
+                            message
+                        } else {
+                            message.copy(attachments = hydrateByokAttachments(message.attachments))
+                        }
                     }
                 }
             } else {
@@ -1326,6 +1479,8 @@ class ChatViewModel(
                 useThinking = _useThinking.value || alwaysOnThinking,
                 reasoningEffort = effectiveEffort,
                 enabledTools = requestTools,
+                rolePlay = effectiveKind == ProviderKind.BYOK && activePersona.value?.isRolePlay == true,
+                contextCheckpointId = coverage?.checkpointId,
             )
             backgroundStreams.start(request, assistantId, throttleMs, priorAttempts, generateTitleOnFinish)
             // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，
@@ -1572,6 +1727,9 @@ class ChatViewModel(
         /** 单个附件内联进提示词的字符上限；超出部分按 `truncated` 属性如实告知模型。 */
         const val MAX_INLINE_TEXT_CHARS = 12_000
 
+        /** 打开模型菜单时，模型状态超过这么久没刷新就静默重拉（峰谷档位按小时级变化）。 */
+        const val MODEL_STATUS_STALE_MS = 5 * 60_000L
+
         /**
          * 无条件附在附件提示词末尾。哪怕这次文字抽取完全成功也要说——带文字层的 PDF 和
          * Word 里照样有图表、公式截图、复杂表格排版是抽不出来的，模型必须知道自己看到的
@@ -1617,4 +1775,12 @@ private data class ChatUiMeta(
 private data class ConversationProviderState(
     val providerId: String?,
     val providerKind: ProviderKind,
+)
+
+private data class HistoryState(
+    val messages: List<ChatMessage>,
+    val spend: com.molagpt.app.core.storage.ConversationSpend,
+    val compactions: List<ContextCompactionMark>,
+    val compacting: com.molagpt.app.core.model.ContextCompactionProgress?,
+    val compactionCostUsd: Double,
 )

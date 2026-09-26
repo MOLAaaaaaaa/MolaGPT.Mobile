@@ -32,5 +32,6 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.telephoto.zoomable.image.coil)
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.activity.compose) // 预览打开时返回键先关预览
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

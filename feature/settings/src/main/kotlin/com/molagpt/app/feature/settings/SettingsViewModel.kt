@@ -14,10 +14,6 @@ import com.molagpt.app.core.model.ThinkingKinds
 import com.molagpt.app.core.model.webSearchApiKeyKey
 import com.molagpt.app.core.model.withoutToken
 import com.molagpt.app.core.network.AccountStatusCache
-import com.molagpt.app.core.network.ByokImageApi
-import com.molagpt.app.core.network.ByokImageAttachment
-import com.molagpt.app.core.network.ByokImageWorkbenchConfig
-import com.molagpt.app.core.network.ByokImageWorkbenchResult
 import com.molagpt.app.core.network.ByokModelApi
 import com.molagpt.app.core.network.McpToolListApi
 import com.molagpt.app.core.network.MolaApiException
@@ -47,7 +43,6 @@ class SettingsViewModel(
     private val byokProviders: ByokProviderRepository,
     private val byokModelApi: ByokModelApi,
     private val modelsDevCatalog: com.molagpt.app.core.network.ModelsDevCatalog,
-    private val byokImageApi: ByokImageApi,
     private val mcpToolListApi: McpToolListApi,
     private val credentialStore: CredentialStore,
     private val dispatchers: DispatcherProvider,
@@ -168,8 +163,26 @@ class SettingsViewModel(
             val fetched = byokModelApi.fetchModels(provider)
             applyByokPrices(provider.id, fetched.mapNotNull { m -> m.pricing?.let { m.id to it } }.toMap())
             applyByokThinkingConfigs(provider.id, fetched)
+            applyByokContextWindows(provider.id, fetched)
             fetched
         }
+
+    /**
+     * 把服务商声明的上下文窗口补到**已添加**的模型上。只补空缺：
+     * 用户手动填过、或从超长报错里得知的窗口比声明更可信。
+     */
+    private suspend fun applyByokContextWindows(
+        providerId: String,
+        fetched: List<com.molagpt.app.core.model.ProviderModel>,
+    ) {
+        val provider = byokProviders.get(providerId) ?: return
+        val declared = fetched.mapNotNull { m -> m.contextWindow?.let { m.id to it } }.toMap()
+        if (declared.isEmpty()) return
+        val models = provider.models.map { model ->
+            if (model.contextWindow != null) model else declared[model.id]?.let { model.copy(contextWindow = it) } ?: model
+        }
+        if (models != provider.models) byokProviders.upsert(provider.copy(models = models))
+    }
 
     /**
      * 把服务商能力表里的推理声明同步到**已添加**的模型上。
@@ -332,6 +345,14 @@ class SettingsViewModel(
         store.setAutoTitle(enabled, modelKey)
     }
 
+    fun setContextCompaction(enabled: Boolean, modelKey: String?) = viewModelScope.launch {
+        store.setContextCompaction(enabled, modelKey)
+    }
+
+    fun setContextSlimming(enabled: Boolean) = viewModelScope.launch {
+        store.setContextSlimming(enabled)
+    }
+
     fun setImageGenConfig(
         enabled: Boolean,
         modelKey: String?,
@@ -453,35 +474,6 @@ class SettingsViewModel(
             .onFailure { e ->
                 _byokStatus.value = e.message ?: "模型获取失败"
             }
-    }
-
-    suspend fun runImageWorkbenchRequest(
-        providerId: String,
-        modelId: String,
-        prompt: String,
-        config: ByokImageWorkbenchConfig,
-        attachments: List<ByokImageAttachment>,
-    ): ByokImageWorkbenchResult {
-        val provider = byokProviders.get(providerId)
-            ?: throw MolaApiException(400, "请选择服务")
-        if (!provider.enabled) {
-            throw MolaApiException(400, "服务已停用")
-        }
-        if (provider.purpose != com.molagpt.app.core.model.ByokPurpose.IMAGE) {
-            throw MolaApiException(400, "请选择图像用途的服务")
-        }
-        if (provider.models.none { it.id == modelId && it.supportsImageGeneration }) {
-            throw MolaApiException(400, "请选择图像模型")
-        }
-        return withContext(dispatchers.io) {
-            byokImageApi.runWorkbench(
-                provider = provider,
-                modelId = modelId,
-                prompt = prompt,
-                config = config,
-                attachments = attachments,
-            )
-        }
     }
 
     val byokPresets: List<ByokProvider> get() = ByokProviderPresets.defaults

@@ -9,6 +9,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.molagpt.app.core.storage.dao.ByokMemoryDao
 import com.molagpt.app.core.storage.dao.ConversationDao
 import com.molagpt.app.core.storage.dao.ByokProviderDao
+import com.molagpt.app.core.storage.dao.ContextCheckpointDao
+import com.molagpt.app.core.storage.dao.ImageTaskDao
 import com.molagpt.app.core.storage.dao.LorebookDao
 import com.molagpt.app.core.storage.dao.MessageDao
 import com.molagpt.app.core.storage.dao.PersonaDao
@@ -19,7 +21,12 @@ import com.molagpt.app.core.storage.entity.ByokMemoryEvidenceEntity
 import com.molagpt.app.core.storage.entity.ByokMemorySuppressionEntity
 import com.molagpt.app.core.storage.entity.ByokMemoryTopicEntity
 import com.molagpt.app.core.storage.entity.ByokProviderEntity
+import com.molagpt.app.core.storage.entity.ContextCheckpointEntity
+import com.molagpt.app.core.storage.entity.ContextCompactionUsageEntity
 import com.molagpt.app.core.storage.entity.ConversationEntity
+import com.molagpt.app.core.storage.entity.ImageRunEntity
+import com.molagpt.app.core.storage.entity.ImageTaskEntity
+import com.molagpt.app.core.storage.entity.ImageVersionEntity
 import com.molagpt.app.core.storage.entity.LorebookEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
 import com.molagpt.app.core.storage.entity.PersonaEntity
@@ -38,8 +45,13 @@ import com.molagpt.app.core.storage.entity.StreamTaskEntity
         ByokMemorySuppressionEntity::class,
         ByokMemoryTopicEntity::class,
         LorebookEntity::class,
+        ContextCheckpointEntity::class,
+        ContextCompactionUsageEntity::class,
+        ImageTaskEntity::class,
+        ImageRunEntity::class,
+        ImageVersionEntity::class,
     ],
-    version = 16,
+    version = 19,
     exportSchema = false,
 )
 abstract class MolaDatabase : RoomDatabase() {
@@ -50,11 +62,13 @@ abstract class MolaDatabase : RoomDatabase() {
     abstract fun personaDao(): PersonaDao
     abstract fun lorebookDao(): LorebookDao
     abstract fun byokMemoryDao(): ByokMemoryDao
+    abstract fun contextCheckpointDao(): ContextCheckpointDao
+    abstract fun imageTaskDao(): ImageTaskDao
 
     companion object {
         fun build(context: Context): MolaDatabase =
             Room.databaseBuilder(context.applicationContext, MolaDatabase::class.java, "mola.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19)
                 .build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -442,6 +456,113 @@ abstract class MolaDatabase : RoomDatabase() {
                     "CREATE INDEX IF NOT EXISTS index_byok_memory_topics_scope_groupName " +
                         "ON byok_memory_topics(scope, groupName)",
                 )
+            }
+        }
+
+        private val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS context_checkpoints (
+                        id TEXT NOT NULL,
+                        sessionId TEXT NOT NULL,
+                        anchorMessageId TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        coveredDigest TEXT NOT NULL,
+                        tokensBefore INTEGER NOT NULL,
+                        tokensAfter INTEGER NOT NULL,
+                        reason TEXT NOT NULL,
+                        providerId TEXT,
+                        modelId TEXT,
+                        inputTokens INTEGER,
+                        outputTokens INTEGER,
+                        stale INTEGER NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_context_checkpoints_sessionId " +
+                        "ON context_checkpoints(sessionId)",
+                )
+            }
+        }
+
+        private val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS context_compaction_usage (
+                        id TEXT NOT NULL,
+                        sessionId TEXT NOT NULL,
+                        costUsd REAL NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_context_compaction_usage_sessionId " +
+                        "ON context_compaction_usage(sessionId)",
+                )
+            }
+        }
+
+        /** 画图工作台从 SharedPreferences 里的一整段 JSON 搬进库：任务 / 轮 / 版本三张表。 */
+        private val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS image_tasks (
+                        taskId TEXT NOT NULL,
+                        providerId TEXT NOT NULL,
+                        modelId TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        PRIMARY KEY(taskId)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS image_runs (
+                        id TEXT NOT NULL,
+                        taskId TEXT NOT NULL,
+                        prompt TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        providerId TEXT NOT NULL,
+                        modelId TEXT NOT NULL,
+                        size TEXT NOT NULL,
+                        count INTEGER NOT NULL,
+                        paramsJson TEXT NOT NULL,
+                        refsJson TEXT NOT NULL,
+                        activeVersionId TEXT,
+                        createdAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_image_runs_taskId ON image_runs(taskId)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS image_versions (
+                        id TEXT NOT NULL,
+                        runId TEXT NOT NULL,
+                        taskId TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        startedAt INTEGER NOT NULL,
+                        endedAt INTEGER,
+                        outputsJson TEXT NOT NULL,
+                        error TEXT,
+                        raw TEXT,
+                        note TEXT,
+                        createdAt INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_image_versions_runId ON image_versions(runId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_image_versions_taskId ON image_versions(taskId)")
             }
         }
     }

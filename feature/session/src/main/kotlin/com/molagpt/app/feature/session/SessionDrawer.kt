@@ -77,6 +77,7 @@ import androidx.paging.compose.itemContentType
 import androidx.paging.compose.itemKey
 import com.molagpt.app.core.model.Conversation
 import com.molagpt.app.core.model.ProviderKind
+import com.molagpt.app.core.model.isImageTask
 import com.molagpt.app.core.render.ImeDismissBackHandler
 import kotlinx.coroutines.launch
 
@@ -90,6 +91,8 @@ fun SessionDrawer(
     drawerOpen: Boolean,
     onNewChat: () -> Unit,
     onSelect: (String) -> Unit,
+    /** 画图任务的行：不在聊天页打开，交给画图工作台。 */
+    onOpenImageTask: (String) -> Unit,
     onDelete: (sessionId: String, nextSessionId: String?) -> Unit,
     onDeleteMany: (sessionIds: Set<String>, nextSessionId: String?) -> Unit,
     /** 「全选」向数据层取全量可见会话 id（不止 Paging 已加载的那部分）。 */
@@ -239,6 +242,8 @@ fun SessionDrawer(
                                             } else {
                                                 selectedIds + sessionId
                                             }
+                                        } else if (item.conversation.isImageTask) {
+                                            onOpenImageTask(sessionId)
                                         } else {
                                             onSelect(sessionId)
                                         }
@@ -263,8 +268,16 @@ fun SessionDrawer(
     if (deleteTarget != null) {
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("删除对话") },
-            text = { Text("确定删除「${deleteTarget.title}」吗？该对话的全部消息将一并移除，此操作不可撤销。") },
+            title = { Text(if (deleteTarget.isImageTask) "删除画图任务" else "删除对话") },
+            text = {
+                Text(
+                    if (deleteTarget.isImageTask) {
+                        "删除「${deleteTarget.title}」及其图片？此操作不可撤销。"
+                    } else {
+                        "确定删除「${deleteTarget.title}」吗？该对话的全部消息将一并移除，此操作不可撤销。"
+                    },
+                )
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -634,7 +647,10 @@ private fun SessionRow(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                if (conversation.providerKind == ProviderKind.BYOK) {
+                if (conversation.isImageTask) {
+                    Spacer(Modifier.width(6.dp))
+                    SourceBadge("图像")
+                } else if (conversation.providerKind == ProviderKind.BYOK) {
                     Spacer(Modifier.width(6.dp))
                     SourceBadge("BYOK", detail = personaLabel)
                 }
@@ -720,8 +736,10 @@ private fun LazyPagingItems<SessionListItem>.nextSessionIdAfterDelete(
     deletedSessionIds: Set<String>,
     currentSessionId: String?,
 ): String? = nextSessionIdAfterDelete(
+    // 画图任务不能作为「删除后落到的聊天」。
     loadedSessionIds = itemSnapshotList.items
         .filterIsInstance<SessionListItem.Row>()
+        .filterNot { it.conversation.isImageTask }
         .map { it.conversation.sessionId },
     deletedSessionIds = deletedSessionIds,
     currentSessionId = currentSessionId,

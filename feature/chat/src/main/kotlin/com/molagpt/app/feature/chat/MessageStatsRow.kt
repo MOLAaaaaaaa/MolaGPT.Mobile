@@ -162,7 +162,7 @@ private fun StatsDetailCard(stats: MessageStats, spend: ConversationSpend?, modi
                 stats.costModel?.let { model -> Text(model, style = MaterialTheme.typography.labelSmall) }
             }
             spend?.let {
-                StatsDetailLine(Icons.Filled.Bolt, "当前对话累计花费", if (it.byModel.isEmpty()) "未统计" else formatCost(it.costUsd))
+                StatsDetailLine(Icons.Filled.Bolt, "当前对话累计花费", if (it.byModel.isEmpty() && it.costUsd == 0.0) "未统计" else formatCost(it.costUsd))
             }
             if (stats.pricingMissing) {
                 Text("该模型未配置价格", style = MaterialTheme.typography.labelSmall)

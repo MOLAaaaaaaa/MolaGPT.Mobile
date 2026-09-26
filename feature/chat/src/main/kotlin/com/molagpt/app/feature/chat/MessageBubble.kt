@@ -35,57 +35,46 @@ import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.UploadStatus
+import com.molagpt.app.core.render.ActionChip
 import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.render.SkeletonLines
+import com.molagpt.app.core.render.UserBubble
 import com.molagpt.app.feature.file.AttachmentStore
 import com.molagpt.app.feature.file.AttachmentStrip
 
 /** 用户气泡（助手消息由 MessageList 按块/片段成行渲染，不走这里）。 */
 @Composable
 fun MessageBubble(message: ChatMessage, modifier: Modifier = Modifier) {
-    Box(modifier = modifier, contentAlignment = Alignment.CenterEnd) {
-        // 用户气泡使用淡品牌底色、细边框与非对称圆角。
-        val bubbleShape = RoundedCornerShape(
-            topStart = 16.dp, topEnd = 4.dp, bottomEnd = 16.dp, bottomStart = 16.dp,
-        )
-        Column(
-            modifier = Modifier
-                .widthIn(max = 320.dp)
-                .clip(bubbleShape)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
-                .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.22f), bubbleShape)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-        ) {
-            val context = androidx.compose.ui.platform.LocalContext.current
-            val files = message.attachments.map { attachment ->
-                // 托管副本只存相对路径，显示用的 file:// 绝对路径在这里现算——不落库，
-                // 免得 App 数据目录变动后库里留一堆失效的绝对路径。
-                val localUrl = AttachmentStore.displayUrl(context, attachment.localPath)
-                val missing = attachment.unavailable ||
-                    (attachment.localPath != null && localUrl == null)
-                FileInfo(
-                    id = attachment.id,
-                    name = attachment.name,
-                    mimeType = attachment.mimeType,
-                    sizeBytes = attachment.sizeBytes,
-                    url = localUrl ?: attachment.thumbnailUrl ?: attachment.remoteUrl,
-                    localPath = attachment.localPath,
-                    sandboxPath = attachment.sandboxPath,
-                    uploadStatus = if (missing) UploadStatus.MISSING else UploadStatus.UPLOADED,
+    UserBubble(modifier = modifier) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val files = message.attachments.map { attachment ->
+            // 托管副本只存相对路径，显示用的 file:// 绝对路径在这里现算——不落库，
+            // 免得 App 数据目录变动后库里留一堆失效的绝对路径。
+            val localUrl = AttachmentStore.displayUrl(context, attachment.localPath)
+            val missing = attachment.unavailable ||
+                (attachment.localPath != null && localUrl == null)
+            FileInfo(
+                id = attachment.id,
+                name = attachment.name,
+                mimeType = attachment.mimeType,
+                sizeBytes = attachment.sizeBytes,
+                url = localUrl ?: attachment.thumbnailUrl ?: attachment.remoteUrl,
+                localPath = attachment.localPath,
+                sandboxPath = attachment.sandboxPath,
+                uploadStatus = if (missing) UploadStatus.MISSING else UploadStatus.UPLOADED,
+            )
+        }
+        if (files.isNotEmpty()) {
+            AttachmentStrip(files = files)
+        }
+        val text = message.rawText.orEmpty()
+        if (text.isNotBlank()) {
+            SelectionContainer {
+                Text(
+                    text = text,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.bodyLarge,
                 )
-            }
-            if (files.isNotEmpty()) {
-                AttachmentStrip(files = files)
-            }
-            val text = message.rawText.orEmpty()
-            if (text.isNotBlank()) {
-                SelectionContainer {
-                    Text(
-                        text = text,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
-                }
             }
         }
     }
@@ -175,59 +164,4 @@ fun MessageActionBar(
             }
         }
     }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ActionChip(text: String, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier
-            .clip(RoundedCornerShape(50))
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-    )
-}
-
-/** 重试版本切换栏：‹ n/m ›。 */
-@Composable
-fun RetryBar(
-    current: Int,
-    total: Int,
-    onPrev: () -> Unit,
-    onNext: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        RetryArrow("‹", enabled = current > 0, onClick = onPrev)
-        Text(
-            text = "${current + 1}/$total",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        RetryArrow("›", enabled = current < total - 1, onClick = onNext)
-    }
-}
-
-@Composable
-private fun RetryArrow(glyph: String, enabled: Boolean, onClick: () -> Unit) {
-    Text(
-        text = glyph,
-        style = MaterialTheme.typography.titleMedium,
-        color = if (enabled) {
-            MaterialTheme.colorScheme.onSurfaceVariant
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
-        },
-        modifier = Modifier
-            .clip(RoundedCornerShape(50))
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-    )
 }

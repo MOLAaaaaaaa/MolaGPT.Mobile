@@ -92,6 +92,7 @@ class MainActivity : ComponentActivity() {
     private fun handleOpenNotificationIntent(intent: Intent?) {
         val sessionId = intent?.getStringExtra(NotificationController.EXTRA_OPEN_SESSION)
         if (!sessionId.isNullOrBlank()) container.requestOpenConversation(sessionId)
+        container.requestOpenImageTask(intent?.getStringExtra(NotificationController.EXTRA_OPEN_IMAGE_TASK))
         val agentSessionId = intent?.getStringExtra(AgentNotificationController.EXTRA_OPEN_AGENT_SESSION)
         if (!agentSessionId.isNullOrBlank()) container.requestOpenAgentSession(agentSessionId)
     }

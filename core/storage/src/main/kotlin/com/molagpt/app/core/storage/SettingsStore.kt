@@ -37,7 +37,7 @@ data class AppSettings(
     /** 是否在聊天页顶栏显示 Agent 控制快捷按钮。 */
     val showAgentControlShortcut: Boolean = false,
     /** 是否在聊天页顶栏显示图像工作台快捷按钮。 */
-    val showImageWorkbenchShortcut: Boolean = false,
+    val showImageWorkbenchShortcut: Boolean = true,
     val temperature: Double = 0.7,
     val useThinking: Boolean = false,
     val reasoningEffort: String = "medium",
@@ -70,6 +70,12 @@ data class AppSettings(
     val autoTitleEnabled: Boolean = true,
     /** 标题模型 "<providerId>::<modelId>"；null = 跟随当前对话模型。 */
     val titleModelKey: String? = null,
+    /** 自动压缩上下文：上下文接近模型窗口时总结较早的对话（消耗用户自己的额度）。 */
+    val contextCompactionEnabled: Boolean = true,
+    /** 摘要模型 "<providerId>::<modelId>"；null = 跟随当前对话模型。 */
+    val compactionModelKey: String? = null,
+    /** 精简较早轮次：过长的工具结果只留开头、图片改发文字占位。 */
+    val contextSlimmingEnabled: Boolean = true,
     /** 云同步开关（个人中心）。 */
     val cloudSyncEnabled: Boolean = false,
     /** MolaGPT Tracks（个性化记忆）开关。 */
@@ -143,7 +149,7 @@ class SettingsStore(private val context: Context) {
             throttleMs = p[Keys.THROTTLE_MS] ?: 16L,
             enterToSend = p[Keys.ENTER_TO_SEND] ?: false,
             showAgentControlShortcut = p[Keys.SHOW_AGENT_CONTROL_SHORTCUT] ?: false,
-            showImageWorkbenchShortcut = p[Keys.SHOW_IMAGE_WORKBENCH_SHORTCUT] ?: false,
+            showImageWorkbenchShortcut = p[Keys.SHOW_IMAGE_WORKBENCH_SHORTCUT] ?: true,
             temperature = p[Keys.TEMPERATURE] ?: 0.7,
             useThinking = p[Keys.USE_THINKING] ?: false,
             reasoningEffort = p[Keys.REASONING_EFFORT] ?: "medium",
@@ -167,6 +173,9 @@ class SettingsStore(private val context: Context) {
             imageGenReasoningEffort = p[Keys.IMAGE_GEN_REASONING_EFFORT] ?: "medium",
             autoTitleEnabled = p[Keys.AUTO_TITLE_ENABLED] ?: true,
             titleModelKey = p[Keys.TITLE_MODEL_KEY],
+            contextCompactionEnabled = p[Keys.CONTEXT_COMPACTION_ENABLED] ?: true,
+            compactionModelKey = p[Keys.COMPACTION_MODEL_KEY],
+            contextSlimmingEnabled = p[Keys.CONTEXT_SLIMMING_ENABLED] ?: true,
             byokMemoryMasterEnabled = p[Keys.BYOK_MEMORY_MASTER] ?: false,
             byokMemoryEnabled = p[Keys.BYOK_MEMORY_ENABLED] ?: true,
             byokConversationRecallEnabled = p[Keys.BYOK_MEMORY_RECALL] ?: true,
@@ -247,6 +256,12 @@ class SettingsStore(private val context: Context) {
         it[Keys.AUTO_TITLE_ENABLED] = enabled
         if (modelKey.isNullOrBlank()) it.remove(Keys.TITLE_MODEL_KEY) else it[Keys.TITLE_MODEL_KEY] = modelKey
     }
+    suspend fun setContextCompaction(enabled: Boolean, modelKey: String?) = edit {
+        it[Keys.CONTEXT_COMPACTION_ENABLED] = enabled
+        if (modelKey.isNullOrBlank()) it.remove(Keys.COMPACTION_MODEL_KEY) else it[Keys.COMPACTION_MODEL_KEY] = modelKey
+    }
+    suspend fun setContextCompactionEnabled(enabled: Boolean) = edit { it[Keys.CONTEXT_COMPACTION_ENABLED] = enabled }
+    suspend fun setContextSlimming(enabled: Boolean) = edit { it[Keys.CONTEXT_SLIMMING_ENABLED] = enabled }
     suspend fun setByokMemoryMasterEnabled(v: Boolean) = edit { it[Keys.BYOK_MEMORY_MASTER] = v }
     suspend fun setByokMemoryEnabled(v: Boolean) = edit { it[Keys.BYOK_MEMORY_ENABLED] = v }
     suspend fun setByokMemoryFullScan(v: Boolean) = edit { it[Keys.BYOK_MEMORY_FULL_SCAN] = v }
@@ -379,6 +394,9 @@ class SettingsStore(private val context: Context) {
         val IMAGE_GEN_REASONING_EFFORT = stringPreferencesKey("image_gen_reasoning_effort")
         val AUTO_TITLE_ENABLED = booleanPreferencesKey("auto_title_enabled")
         val TITLE_MODEL_KEY = stringPreferencesKey("title_model_key")
+        val CONTEXT_COMPACTION_ENABLED = booleanPreferencesKey("context_compaction_enabled")
+        val COMPACTION_MODEL_KEY = stringPreferencesKey("compaction_model_key")
+        val CONTEXT_SLIMMING_ENABLED = booleanPreferencesKey("context_slimming_enabled")
         val BYOK_MEMORY_MASTER = booleanPreferencesKey("byok_memory_master_enabled")
         val BYOK_MEMORY_ENABLED = booleanPreferencesKey("byok_memory_enabled")
         val BYOK_MEMORY_FULL_SCAN = booleanPreferencesKey("byok_memory_full_scan")

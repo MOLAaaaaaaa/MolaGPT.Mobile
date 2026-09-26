@@ -11,6 +11,7 @@ import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.common.Logger
 import com.molagpt.app.core.model.byokMcpServerTokenKey
 import com.molagpt.app.core.model.ImageGenerationConfig
+import com.molagpt.app.core.model.ModelContextWindows
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.WebSearchOptions
 import com.molagpt.app.core.model.WebSearchProvider
@@ -42,9 +43,12 @@ import com.molagpt.app.core.storage.ByokMemoryConsolidator
 import com.molagpt.app.core.storage.ByokMemoryRepository
 import com.molagpt.app.core.storage.ByokProviderRepository
 import com.molagpt.app.core.storage.ChatRepository
+import com.molagpt.app.core.storage.ContextCompactor
 import com.molagpt.app.core.storage.ConversationRecallRepository
 import com.molagpt.app.core.storage.ConversationTitler
 import com.molagpt.app.core.storage.CredentialStore
+import com.molagpt.app.core.storage.ImageFileStore
+import com.molagpt.app.core.storage.ImageTaskRepository
 import com.molagpt.app.core.storage.MolaDatabase
 import com.molagpt.app.core.storage.LorebookRepository
 import com.molagpt.app.core.storage.PersonaAvatarStore
@@ -57,6 +61,7 @@ import com.molagpt.app.core.storage.allModels
 import com.molagpt.app.feature.auth.MolaGptAuthService
 import com.molagpt.app.feature.chat.BackgroundStreamManager
 import com.molagpt.app.feature.file.AttachmentStore
+import com.molagpt.app.feature.imagegen.ImageTaskManager
 import com.molagpt.app.core.markdown.ResponsePostProcessor
 import com.molagpt.app.core.model.ResponseTextProcessor
 import kotlinx.coroutines.CoroutineScope
@@ -70,6 +75,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -163,13 +169,15 @@ class AppContainer(
 
     private val altchaSolver = AltchaSolver(http.json)
 
-    val shortTokenManager = ShortTokenManager(
+    // 显式类型：失效回调引用了下面的 authService，而 authService 又引用这里，互相推断会成环。
+    val shortTokenManager: ShortTokenManager = ShortTokenManager(
         http = http,
         altchaSolver = altchaSolver,
         dispatchers = dispatchers,
         longTokenProvider = { credentialStore.jwt },
         onRenewedLongToken = { credentialStore.jwt = it },
-        onLoginInvalidated = { credentialStore.clear() },
+        // 走完整登出：只清凭据的话账号页还显示已登录，模型列表也还是注册用户的可用性。
+        onLoginInvalidated = { authService.logout() },
     )
 
     val modelApi = ModelApi(http, modelRegistry, shortTokenManager, authApi)
@@ -192,7 +200,7 @@ class AppContainer(
         },
     )
 
-    val authService = MolaGptAuthService(
+    val authService: MolaGptAuthService = MolaGptAuthService(
         authApi = authApi,
         credentials = credentialStore,
         userAgent = userAgent,
@@ -317,6 +325,53 @@ class AppContainer(
         dispatchers = dispatchers,
     )
 
+    /**
+     * BYOK 上下文压缩。摘要走用户自己的 provider，默认用当前对话模型，
+     * 设置里可以另指定一个（通常挂个便宜、窗口大的模型）。
+     */
+    val contextCompactor = ContextCompactor(
+        checkpointDao = database.contextCheckpointDao(),
+        messageDao = database.messageDao(),
+        dispatchers = dispatchers,
+        scope = applicationScope,
+        windowOf = { providerId, modelId ->
+            val declared = byokProviderRepository.get(providerId)
+                ?.models
+                ?.firstOrNull { it.id == modelId }
+                ?.contextWindow
+            ModelContextWindows.resolveOrDefault(modelId, declared)
+        },
+        summarize = { providerId, modelId, system, prompt, maxOutputTokens ->
+            byokChatService.summarize(providerId, modelId, system, prompt, maxOutputTokens)
+        },
+        autoEnabled = { currentSettings.contextCompactionEnabled },
+        slimEnabled = { currentSettings.contextSlimmingEnabled },
+        summaryModel = {
+            currentSettings.compactionModelKey
+                ?.takeIf { it.contains("::") }
+                ?.let { key ->
+                    val providerId = key.substringBefore("::")
+                    val modelId = key.substringAfter("::")
+                    byokProviderRepository.get(providerId)
+                        ?.takeIf { it.enabled }
+                        ?.let { providerId to modelId }
+                }
+        },
+        pricingOf = { providerId, modelId ->
+            byokProviderRepository.get(providerId)?.models?.firstOrNull { it.id == modelId }?.pricing
+        },
+        onWindowDiscovered = { providerId, modelId, window ->
+            // 服务商在报错里写明了窗口：记到模型上，下次在超长之前就压缩。
+            byokProviderRepository.get(providerId)?.let { provider ->
+                val models = provider.models.map { model ->
+                    val known = model.contextWindow
+                    if (model.id == modelId && (known == null || known > window)) model.copy(contextWindow = window) else model
+                }
+                if (models != provider.models) byokProviderRepository.upsert(provider.copy(models = models))
+            }
+        },
+    )
+
     /** 唯一对话服务。按会话来源路由到 MolaGPT 账户或 BYOK。 */
     private val chatService: ChatService = RoutingChatService(
         molaGpt = molaGptChatService,
@@ -328,6 +383,7 @@ class AppContainer(
         messageDao = database.messageDao(),
         dispatchers = dispatchers,
         cloudSyncEnabled = { currentSettings.cloudSyncEnabled },
+        contextCheckpointDao = database.contextCheckpointDao(),
     )
 
     /**
@@ -360,6 +416,7 @@ class AppContainer(
         dispatchers = dispatchers,
         postProcessor = responseTextProcessor,
         pricingResolver = { providerId, modelId -> byokProviderRepository.get(providerId)?.models?.firstOrNull { it.id == modelId }?.pricing },
+        contextCompactor = contextCompactor,
     )
 
     /** 云同步底层调用（会话同步 / 用户设置写入 update_setting）。 */
@@ -459,6 +516,33 @@ class AppContainer(
         memoryConsolidator = { sessionId -> byokMemoryConsolidator.onTurnFinished(sessionId) },
     )
 
+    /** 画图任务：记录在会话表 + image_* 表，图片在 filesDir/image_workbench。 */
+    val imageTaskRepository = ImageTaskRepository(
+        database = database,
+        files = ImageFileStore(java.io.File(appContext.filesDir, "image_workbench")),
+        dispatchers = dispatchers,
+    )
+
+    /** 画图任务的执行者。应用级，页面关掉也跑完；结果按版本 id 写回。 */
+    val imageTaskManager = ImageTaskManager(
+        appContext = appContext,
+        repository = imageTaskRepository,
+        providers = byokProviderRepository,
+        api = byokImageApi,
+        scope = applicationScope,
+        dispatchers = dispatchers,
+    )
+
+    /** 通知、主侧边栏、画廊请求打开的画图任务；工作台消费后清空。 */
+    val pendingOpenImageTaskId = MutableStateFlow<String?>(null)
+
+    /** 当前可见的画图任务，用于完成通知抑制。 */
+    val foregroundImageTaskId = MutableStateFlow<String?>(null)
+
+    fun requestOpenImageTask(taskId: String?) {
+        if (!taskId.isNullOrBlank()) pendingOpenImageTaskId.value = taskId
+    }
+
     /** App 是否在前台（MainActivity onStart/onStop 维护），用于完成通知抑制。 */
     val appForeground = MutableStateFlow(false)
 
@@ -477,11 +561,13 @@ class AppContainer(
     private val notificationController = NotificationController(
         appContext = appContext,
         manager = backgroundStreamManager,
+        imageTasks = imageTaskManager,
         sessionRepository = sessionRepository,
         scope = applicationScope,
         notifyEnabled = { currentSettings.completionNotify },
         appForeground = { appForeground.value },
         foregroundSessionId = { foregroundSessionId.value },
+        foregroundImageTaskId = { foregroundImageTaskId.value },
     )
 
     private val agentNotificationController = AgentNotificationController(
@@ -587,20 +673,20 @@ class AppContainer(
             }
         }
 
-        // 活跃流计数 >0 时拉起前台服务保活，归零即停。
+        // 有在途的回复或画图时拉起前台服务保活，都结束即停。
         applicationScope.launch {
-            var serviceRunning = false
-            backgroundStreamManager.activeCount
-                .collect { count ->
-                    val shouldRun = count > 0
-                    if (shouldRun && !serviceRunning) {
-                        StreamForegroundService.start(appContext)
-                        serviceRunning = true
-                    } else if (!shouldRun && serviceRunning) {
-                        StreamForegroundService.stop(appContext)
-                        serviceRunning = false
-                    }
+            var shown: StreamForegroundService.Kind? = null
+            combine(backgroundStreamManager.activeCount, imageTaskManager.activeCount) { chats, images ->
+                when {
+                    chats > 0 -> StreamForegroundService.Kind.REPLY
+                    images > 0 -> StreamForegroundService.Kind.IMAGE
+                    else -> null
                 }
+            }.collect { kind ->
+                if (kind == shown) return@collect
+                if (kind == null) StreamForegroundService.stop(appContext) else StreamForegroundService.start(appContext, kind)
+                shown = kind
+            }
         }
 
         // 每轮对话正常完成 → 增量推送该会话到云端。

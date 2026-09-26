@@ -170,6 +170,16 @@ fun ByokToolsScreen(
                 onOpenByokProviders = onOpenByokProviders,
             )
 
+            ContextCompactionCard(
+                enabled = s.contextCompactionEnabled,
+                modelKey = s.compactionModelKey,
+                slimming = s.contextSlimmingEnabled,
+                options = titleOptions,
+                onChange = viewModel::setContextCompaction,
+                onSlimmingChange = viewModel::setContextSlimming,
+                onOpenByokProviders = onOpenByokProviders,
+            )
+
             Box(Modifier.padding(bottom = 16.dp))
         }
     }
@@ -454,6 +464,70 @@ private fun AutoTitleCard(
                 }
                 androidx.compose.material3.DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                     // 首项＝不指定，回退到会话自己的模型（零配置即可用）。
+                    DropdownMenuItem(
+                        text = { Text(followChatModel) },
+                        onClick = { onChange(true, null); expanded = false },
+                    )
+                    options.forEach { opt ->
+                        DropdownMenuItem(
+                            text = { Text(opt.label) },
+                            onClick = { onChange(true, opt.key); expanded = false },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── 上下文压缩（默认跟随当前对话模型；可指定窗口更大或更便宜的模型写摘要） ──
+
+@Composable
+private fun ContextCompactionCard(
+    enabled: Boolean,
+    modelKey: String?,
+    slimming: Boolean,
+    options: List<SettingsViewModel.ModelOption>,
+    onChange: (enabled: Boolean, modelKey: String?) -> Unit,
+    onSlimmingChange: (Boolean) -> Unit,
+    onOpenByokProviders: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val followChatModel = "跟随当前对话模型"
+    val selectedLabel = options.firstOrNull { it.key == modelKey }?.label ?: followChatModel
+    SectionTitle("上下文压缩")
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+            ToggleRow(
+                "自动压缩",
+                enabled,
+                subtitle = "接近上下文上限时压缩较早对话，会增加模型用量",
+                onChange = { onChange(it, modelKey) },
+            )
+            ToggleRow(
+                "精简历史内容",
+                slimming,
+                subtitle = "缩短较早的工具结果，历史图片以文字标记保留",
+                onChange = onSlimmingChange,
+            )
+            if (enabled) {
+                Text(
+                    "摘要模型",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = { expanded = true }, modifier = Modifier.weight(1f)) {
+                        Text(selectedLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    TextButton(onClick = onOpenByokProviders) { Text("模型管理") }
+                }
+                androidx.compose.material3.DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                     DropdownMenuItem(
                         text = { Text(followChatModel) },
                         onClick = { onChange(true, null); expanded = false },

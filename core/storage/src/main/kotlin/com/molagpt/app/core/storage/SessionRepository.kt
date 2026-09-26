@@ -24,6 +24,7 @@ class SessionRepository(
     private val dispatchers: DispatcherProvider,
     /** 云同步开启时删除走墓碑（待 push delete），否则直接硬删（游客无需保留墓碑）。 */
     private val cloudSyncEnabled: () -> Boolean = { false },
+    private val contextCheckpointDao: com.molagpt.app.core.storage.dao.ContextCheckpointDao? = null,
 ) {
     fun pagedSessions(searchQuery: String = ""): Flow<PagingData<SessionHit>> {
         val query = searchQuery.trim().take(MAX_SEARCH_QUERY_CHARS).takeIf { it.isNotEmpty() }
@@ -180,6 +181,8 @@ class SessionRepository(
      */
     private suspend fun deleteOne(conversation: ConversationEntity?, sessionId: String) {
         messageDao.deleteBySession(sessionId)
+        contextCheckpointDao?.deleteBySession(sessionId)
+        contextCheckpointDao?.deleteUsageBySession(sessionId)
         if (cloudSyncEnabled() && conversation?.providerKind == ProviderKind.MOLAGPT.name) {
             conversationDao.tombstone(sessionId, System.currentTimeMillis())
         } else {

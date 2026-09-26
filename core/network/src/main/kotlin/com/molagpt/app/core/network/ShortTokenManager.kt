@@ -86,9 +86,11 @@ class ShortTokenManager(
             ?: throw MolaApiException(null, "服务端未返回令牌")
 
         // 登录失效降级：本地带了长 token，但服务端没认（UA 不符或非 registered）→ 清登录、继续用游客短 token。
+        // 服务端关了游客聊天时，降级后什么都发不出去，直接让用户重新登录。
         if (!longToken.isNullOrBlank() && (body.uaMismatch || body.userType != "registered")) {
             Logger.w("ShortToken", "login downgraded to guest (uaMismatch=${body.uaMismatch}, type=${body.userType})")
             onLoginInvalidated()
+            if (!body.guestChatEnabled) throw MolaAuthExpiredException()
         } else if (!body.renewedLoginToken.isNullOrBlank()) {
             onRenewedLongToken(body.renewedLoginToken!!)
         }

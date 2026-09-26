@@ -45,13 +45,17 @@ import com.molagpt.app.feature.agentcontrol.AgentControlViewModel
 import com.molagpt.app.feature.auth.AuthViewModel
 import com.molagpt.app.feature.auth.LoginScreen
 import com.molagpt.app.feature.chat.ChatScreen
+import com.molagpt.app.feature.imagegen.Base64ToolScreen
+import com.molagpt.app.feature.imagegen.ImageGalleryScreen
+import com.molagpt.app.feature.imagegen.ImageGalleryViewModel
+import com.molagpt.app.feature.imagegen.ImageWorkbenchScreen
+import com.molagpt.app.feature.imagegen.ImageWorkbenchViewModel
 import com.molagpt.app.feature.session.SessionDrawer
 import com.molagpt.app.feature.session.SessionViewModel
 import com.molagpt.app.feature.settings.AboutScreen
 import com.molagpt.app.feature.settings.ByokProviderDetailScreen
 import com.molagpt.app.feature.settings.ByokProvidersScreen
 import com.molagpt.app.feature.settings.ByokToolsScreen
-import com.molagpt.app.feature.settings.ImageWorkbenchScreen
 import com.molagpt.app.feature.settings.LorebookScreen
 import com.molagpt.app.feature.settings.McpServerDetailScreen
 import com.molagpt.app.feature.settings.MolaAccountScreen
@@ -78,6 +82,8 @@ private object Routes {
     const val PERSONALIZATION = "personalization"
     const val ABOUT = "about"
     const val IMAGE_WORKBENCH = "image_workbench"
+    const val IMAGE_GALLERY = "image_gallery"
+    const val IMAGE_BASE64 = "image_base64"
     const val AGENT_CONTROL = "agent_control"
     const val BYOK_PROVIDERS = "byok_providers"
     const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
@@ -109,6 +115,21 @@ fun MolaNavHost(
     LaunchedEffect(pendingAgentOpen) {
         if (!pendingAgentOpen.isNullOrBlank()) {
             openAgentControl()
+        }
+    }
+    // 通知、主侧边栏、画廊要打开某个画图任务：确保工作台在最上面，任务由工作台自己接走。
+    val openImageWorkbench = {
+        val onStack = runCatching { navController.getBackStackEntry(Routes.IMAGE_WORKBENCH) }.isSuccess
+        if (onStack) {
+            navController.popBackStack(Routes.IMAGE_WORKBENCH, inclusive = false)
+        } else {
+            navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
+        }
+    }
+    val pendingImageOpen by container.pendingOpenImageTaskId.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingImageOpen) {
+        if (!pendingImageOpen.isNullOrBlank() && navController.currentDestination?.route != Routes.IMAGE_WORKBENCH) {
+            openImageWorkbench()
         }
     }
     // 游客可直接进入聊天；登录入口由设置页提供。
@@ -200,6 +221,10 @@ fun MolaNavHost(
                         navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
                     }
                 },
+                onOpenImageTask = { taskId ->
+                    container.requestOpenImageTask(taskId)
+                    openImageWorkbench()
+                },
                 onOpenPersonaManagement = {
                     if (navController.currentDestination?.route != Routes.PERSONA_MANAGEMENT) {
                         navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
@@ -211,7 +236,11 @@ fun MolaNavHost(
                     }
                 },
                 onAuthExpired = {
-                    // 游客模式无「登录过期」概念；短 token 失败已由聊天错误条提示，不强制跳登录。
+                    // 只在服务端关了游客聊天时才会走到这里（点了需登录的模型，或登录已失效）。
+                    // 游客聊天开放时短 token 失败只由聊天错误条提示，不会触发跳转。
+                    if (navController.currentDestination?.route != Routes.LOGIN) {
+                        navController.navigate(Routes.LOGIN) { launchSingleTop = true }
+                    }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -315,19 +344,54 @@ fun MolaNavHost(
         }
 
         composable(Routes.IMAGE_WORKBENCH) {
-            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+            val vm: ImageWorkbenchViewModel = viewModel(factory = ViewModelFactories.imageWorkbench(container))
             ImageWorkbenchScreen(
                 viewModel = vm,
                 onBack = {
                     if (navController.currentDestination?.route == Routes.IMAGE_WORKBENCH) {
                         if (!navController.popBackStack()) {
-                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                            navController.navigate(Routes.CHAT) { launchSingleTop = true }
                         }
                     }
                 },
                 onManageModels = { providerId ->
                     val target = if (!providerId.isNullOrBlank()) "${Routes.BYOK_PROVIDER_DETAIL}/$providerId" else Routes.BYOK_PROVIDERS
                     navController.navigate(target) { launchSingleTop = true }
+                },
+                onOpenGallery = {
+                    if (navController.currentDestination?.route != Routes.IMAGE_GALLERY) {
+                        navController.navigate(Routes.IMAGE_GALLERY) { launchSingleTop = true }
+                    }
+                },
+                onOpenBase64 = {
+                    if (navController.currentDestination?.route != Routes.IMAGE_BASE64) {
+                        navController.navigate(Routes.IMAGE_BASE64) { launchSingleTop = true }
+                    }
+                },
+                onVisibleTaskChange = { container.foregroundImageTaskId.value = it },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.IMAGE_GALLERY) {
+            val vm: ImageGalleryViewModel = viewModel(factory = ViewModelFactories.imageGallery(container))
+            ImageGalleryScreen(
+                viewModel = vm,
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.IMAGE_GALLERY) navController.popBackStack()
+                },
+                onOpenTask = { taskId ->
+                    container.requestOpenImageTask(taskId)
+                    openImageWorkbench()
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.IMAGE_BASE64) {
+            Base64ToolScreen(
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.IMAGE_BASE64) navController.popBackStack()
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -631,6 +695,7 @@ private fun ChatHost(
     onOpenByokModelSettings: (providerId: String, modelId: String) -> Unit,
     onOpenAgentControl: () -> Unit,
     onOpenImageWorkbench: () -> Unit,
+    onOpenImageTask: (String) -> Unit,
     onOpenPersonaManagement: () -> Unit,
     onOpenByokMemory: () -> Unit,
     onAuthExpired: () -> Unit,
@@ -775,6 +840,8 @@ private fun ChatHost(
                     currentSessionId = id
                     drawerOpen = false
                 },
+                // 抽屉保持打开：从工作台返回时还在原处。
+                onOpenImageTask = onOpenImageTask,
                 onDelete = { id, nextSessionId ->
                     scope.launch {
                         // delete() 在 viewModelScope 里跑，join 后再提示，避免「已删除」早于落库。
@@ -783,6 +850,8 @@ private fun ChatHost(
                             currentSessionId = nextSessionId ?: Ids.newSessionId()
                         }
                         container.syncEngine.schedulePush(id)
+                        // 删的若是画图任务，这里只删了会话行；记录、图片和在途生成交给画图那边收尾。
+                        container.imageTaskManager.onConversationsDeleted()
                         snackbar.showSnackbar("已删除 1 个对话")
                     }
                 },
@@ -793,6 +862,7 @@ private fun ChatHost(
                             currentSessionId = nextSessionId ?: Ids.newSessionId()
                         }
                         deleted.forEach { container.syncEngine.schedulePush(it) }
+                        container.imageTaskManager.onConversationsDeleted()
                         snackbar.showSnackbar("已删除 ${deleted.size} 个对话")
                     }
                 },

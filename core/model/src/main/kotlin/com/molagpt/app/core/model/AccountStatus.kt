@@ -151,9 +151,19 @@ data class QuotaItem(
     val creditMultiplier: Double? = null,
     /** 档位符号：`""`=免费，`"$"`..`"$$$$"`，null=未定价。 */
     val creditSymbol: String? = null,
+    /** 峰谷计价的当前时段：`peak` / `off_peak`；平价模型为 null。 */
+    val pricingPeriod: String? = null,
     /** 不可用时的服务端文案。 */
     val message: String? = null,
 ) {
+    /** 「峰时」/「谷时」，平价模型为 null。 */
+    val pricingPeriodLabel: String?
+        get() = when (pricingPeriod) {
+            "peak" -> "峰时"
+            "off_peak" -> "谷时"
+            else -> null
+        }
+
     val unlimited: Boolean get() = remaining == null
     /** 已用占比（0..1）；仅当 limit/used 均已知且 limit>0 时有意义，否则 null（不画进度条）。 */
     val usedFraction: Float?

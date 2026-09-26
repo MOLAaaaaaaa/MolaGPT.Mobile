@@ -68,6 +68,9 @@ class ModelApi(
 
         // 按当前用户可用性过滤；statuses == null 表示 status 拿不到 → 不过滤（降级显示全部）。
         val statuses = fetchModelStatuses()
+        // 服务端关了游客聊天时，未登录用户的每个模型都是 login_required。路由器（auto）没有
+        // 状态条目，得跟着一起置灰，否则它是唯一能点的，点了只会拿到 403。
+        val loginRequired = statuses?.values?.any { it.reason == LOGIN_REQUIRED } == true
         var blocked = 0
         val list = cfg.models.entries
             .mapNotNull { (configKey, entry) ->
@@ -96,9 +99,15 @@ class ModelApi(
                     supportsThinking = entry.supportsThinking,
                     supportsReasoningEffort = entry.supportsReasoningEffort,
                     group = entry.group,
-                    quotaBlocked = quota?.available == false,
-                    quotaMessage = if (quota?.available == false) quota.message else null,
+                    quotaBlocked = quota?.available == false || loginRequired,
+                    quotaMessage = when {
+                        quota?.available == false -> quota.message
+                        loginRequired -> LOGIN_REQUIRED_MESSAGE
+                        else -> null
+                    },
+                    loginRequired = loginRequired,
                     creditSymbol = quota?.creditSymbol,
+                    pricingPeriod = quota?.pricingPeriod,
                 )
             }
         Logger.d(
@@ -123,6 +132,7 @@ class ModelApi(
                     reason = o?.get("reason")?.jsonPrimitive?.contentOrNull,
                     message = o?.get("message")?.jsonPrimitive?.contentOrNull,
                     creditSymbol = o?.get("credit_symbol")?.jsonPrimitive?.contentOrNull,
+                    pricingPeriod = o?.get("pricing_period")?.jsonPrimitive?.contentOrNull,
                 )
             }
         }.getOrNull()
@@ -134,6 +144,7 @@ class ModelApi(
         val reason: String?,
         val message: String?,
         val creditSymbol: String?,
+        val pricingPeriod: String?,
     )
 
     private companion object {
@@ -145,6 +156,9 @@ class ModelApi(
          * 其余原因（model_disabled / donor_only / unpriced / 未知）一律移除，
          * 与改造前的「不可用即隐藏」保持一致，未知原因按保守侧处理。
          */
-        val KEEP_BUT_DISABLE_REASONS = setOf("limit_exceeded", "tokens_limit_exceeded", "risk_restricted")
+        val KEEP_BUT_DISABLE_REASONS = setOf("limit_exceeded", "tokens_limit_exceeded", "risk_restricted", "login_required")
+
+        const val LOGIN_REQUIRED = "login_required"
+        const val LOGIN_REQUIRED_MESSAGE = "请登录后使用。"
     }
 }

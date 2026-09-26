@@ -2,6 +2,7 @@ package com.molagpt.app.feature.chat
 
 import androidx.compose.runtime.Immutable
 import com.molagpt.app.core.model.ChatMessage
+import com.molagpt.app.core.model.ContextCompactionMark
 import com.molagpt.app.core.model.EnabledTools
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.ProviderKind
@@ -21,6 +22,12 @@ data class ChatUiState(
     val title: String = "新对话",
     val spend: com.molagpt.app.core.storage.ConversationSpend = com.molagpt.app.core.storage.ConversationSpend(),
     val messages: List<ChatMessage> = emptyList(),
+    /** 上下文压缩记录，显示在各自发生的时间点。 */
+    val compactions: List<ContextCompactionMark> = emptyList(),
+    /** 正在进行的压缩（仅 BYOK）。 */
+    val compacting: com.molagpt.app.core.model.ContextCompactionProgress? = null,
+    /** 本对话生成摘要的花费（美元）。 */
+    val compactionCostUsd: Double = 0.0,
     val models: List<ProviderModel> = emptyList(),
     /** 全量模型按阵营分组（MolaGPT 一组；每个 BYOK provider 一组），供选择器分组展示与跨阵营切换。 */
     val modelGroups: List<ModelGroup> = emptyList(),

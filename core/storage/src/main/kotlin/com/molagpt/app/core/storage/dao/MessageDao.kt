@@ -66,6 +66,10 @@ interface MessageDao {
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun count(sessionId: String): Int
 
+    /** 会话里已落库的消息 id。请求里其余消息（角色提示、示例对话）是临时拼的，不参与上下文压缩。 */
+    @Query("SELECT messageId FROM messages WHERE sessionId = :sessionId")
+    suspend fun idsBySession(sessionId: String): List<String>
+
     /**
      * 用户说过几句。角色扮演会话一开场就有一条助手开场白，
      * 「这是不是第一轮」不能再用总条数判断，否则自动标题会被开场白顶掉。

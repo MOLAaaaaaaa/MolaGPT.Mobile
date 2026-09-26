@@ -101,7 +101,7 @@ import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.feature.chat.persona.PersonaPickerSheet
 import com.molagpt.app.feature.chat.persona.PersonaWelcome
 import com.molagpt.app.feature.file.CameraCapture
-import com.molagpt.app.feature.file.ImagePreviewOverlay
+import com.molagpt.app.feature.file.ImagePreviewHost
 import com.molagpt.app.feature.file.LocalAnimatedVisibilityScope
 import com.molagpt.app.feature.file.LocalImagePreviewUrl
 import com.molagpt.app.feature.file.LocalSharedTransitionScope
@@ -150,6 +150,7 @@ fun ChatScreen(
     val memoryAvailable by viewModel.memoryAvailable.collectAsStateWithLifecycle()
     val memoryProjection by viewModel.memoryProjection.collectAsStateWithLifecycle()
     val memoryHint by viewModel.memoryHint.collectAsStateWithLifecycle()
+    val contextUsage by viewModel.contextUsage.collectAsStateWithLifecycle()
     var modelMenuOpen by remember { mutableStateOf(false) }
     var personaSheetOpen by remember { mutableStateOf(false) }
     /** 正在改写的助手消息 id。编辑回答走独立弹层而不是输入框——输入框的按钮是「发送」，语义不同。 */
@@ -215,7 +216,10 @@ fun ChatScreen(
     }
 
     if (state.authExpired) {
-        androidx.compose.runtime.LaunchedEffect(Unit) { onAuthExpired() }
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            onAuthExpired()
+            viewModel.consumeAuthExpired()
+        }
     }
 
     BackHandler(enabled = !drawerOpen && (imeVisible || modelMenuOpen || isActiveConversation)) {
@@ -286,16 +290,9 @@ fun ChatScreen(
         )
     }
 
-    // SharedTransitionLayout 包在最外层（Scaffold 外），使图片全屏 overlay 能覆盖顶栏/输入框区域，
-    // 缩略图（RemoteImage 内各自 AnimatedVisibility）与全屏图用同 key（img-$url）在两端 bounds 间非线性过渡。
-    SharedTransitionLayout(modifier = modifier.fillMaxSize()) {
-        val sharedScope = this
-        val previewHolder = rememberPreviewUrlHolder()
-        CompositionLocalProvider(
-            LocalSharedTransitionScope provides sharedScope,
-            LocalImagePreviewUrl provides previewHolder,
-            LocalVisualHost provides visualHost,
-        ) {
+    // 图片预览宿主包在最外层（Scaffold 外），全屏 overlay 才能盖住顶栏和输入框。
+    ImagePreviewHost(modifier = modifier.fillMaxSize()) {
+        CompositionLocalProvider(LocalVisualHost provides visualHost) {
             Box(modifier = Modifier.fillMaxSize()) {
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
@@ -324,6 +321,8 @@ fun ChatScreen(
                                         !state.isMolaModelConfigLoaded
                                     ) {
                                         viewModel.ensureMolaModelsLoaded()
+                                    } else {
+                                        viewModel.refreshModelStatusIfStale()
                                     }
                                 }
                                 .padding(end = 4.dp),
@@ -425,6 +424,15 @@ fun ChatScreen(
                                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                         )
                                                     }
+                                                    // 峰谷计价的模型标出当前时段，档位随时段变化（与 Web 一致）。
+                                                    model.pricingPeriodLabel?.let { period ->
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Text(
+                                                            period,
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                        )
+                                                    }
                                                     if (selected) {
                                                         Spacer(Modifier.width(12.dp))
                                                         Icon(
@@ -444,7 +452,12 @@ fun ChatScreen(
                                                         Text(
                                                             msg,
                                                             style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.error,
+                                                            // 「请登录后使用」不是故障，不用错误色
+                                                            color = if (model.loginRequired) {
+                                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                                            } else {
+                                                                MaterialTheme.colorScheme.error
+                                                            },
                                                             maxLines = 1,
                                                             overflow = TextOverflow.Ellipsis,
                                                         )
@@ -453,10 +466,13 @@ fun ChatScreen(
                                         },
                                         // 额度/风控挡住的模型留在列表里但不可选（与 Web 一致）。
                                         // 直接从列表删掉会让「点数用完」表现为模型凭空消失。
-                                        enabled = !model.quotaBlocked,
+                                        // 需要登录的例外：点了直接去登录页。
+                                        enabled = !model.quotaBlocked || model.loginRequired,
                                         onClick = {
                                             modelMenuOpen = false
-                                            if (sameKind || isBlankConversation) {
+                                            if (model.loginRequired) {
+                                                onAuthExpired()
+                                            } else if (sameKind || isBlankConversation) {
                                                 // 同阵营直接切换；空白会话跨阵营切换也直接生效，不弹新建确认。
                                                 viewModel.selectModel(model.id, model.providerId)
                                             } else {
@@ -585,7 +601,7 @@ fun ChatScreen(
                 }
                 HorizontalDivider()
                 Composer(
-                    enabled = state.inputEnabled,
+                    enabled = state.inputEnabled && contextUsage?.manualCompacting != true,
                     isStreaming = state.isStreaming,
                     enterToSend = enterToSend,
                     enabledTools = state.enabledTools,
@@ -642,6 +658,19 @@ fun ChatScreen(
                             onOpenByokModelSettings(model.providerId, model.id)
                         }
                     },
+                    contextGauge = contextUsage?.let { usage ->
+                        {
+                            ContextGaugeButton(
+                                usage = usage,
+                                onCompact = viewModel::compactContext,
+                                onCancelCompact = viewModel::cancelCompaction,
+                                onSetAutoCompaction = viewModel::setAutoCompaction,
+                                onOpenModelSettings = state.selectedModel
+                                    ?.takeIf { it.providerKind == ProviderKind.BYOK }
+                                    ?.let { model -> { onOpenByokModelSettings(model.providerId, model.id) } },
+                            )
+                        }
+                    },
                 )
             }
         },
@@ -669,6 +698,9 @@ fun ChatScreen(
                     canEditAssistant = !state.isStreaming && state.providerKind == ProviderKind.BYOK,
                     onNavVersion = viewModel::navVersion,
                     onNavEditSnapshot = viewModel::navEditSnapshot,
+                    compactions = state.compactions,
+                    compacting = state.compacting,
+                    onCancelCompaction = viewModel::cancelCompaction,
                 )
             }
             if (state.isLoadingHistory && state.messages.isEmpty()) {
@@ -684,31 +716,6 @@ fun ChatScreen(
             }
         }
     } // Scaffold content lambda
-
-                // ── 全屏图片预览 overlay ──
-                // 位于 SharedTransitionLayout 的顶层 Box 中、Scaffold 外 → 覆盖顶栏/输入框区域的全屏沉浸。
-                // AnimatedVisibility 驱动显隐；其 scope（this@AnimatedVisibility）下发给 overlay 内的全屏图，
-                // 与缩略图（RemoteImage 内各自的 AnimatedVisibility）用同 key（img-$url）配对过渡。
-                val previewUrl = previewHolder.current
-                with(sharedScope) {
-                    AnimatedVisibility(
-                        visible = previewUrl != null,
-                        enter = fadeIn(),
-                        exit = fadeOut(),
-                    ) {
-                        CompositionLocalProvider(
-                            LocalAnimatedVisibilityScope provides this@AnimatedVisibility,
-                        ) {
-                            previewUrl?.let { url ->
-                                sharedScope.ImagePreviewOverlay(
-                                    url = url,
-                                    onDismiss = { previewHolder.request(null) },
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                            }
-                        }
-                    }
-                }
 
                 // ── 网页运行 / 组件全屏 overlay ──
                 // 与图片预览同一层：盖住顶栏和输入框。容器自己接住触摸，点空白处不会落到下面的列表上。
@@ -737,20 +744,8 @@ fun ChatScreen(
                 }
             } // outer Box
         } // CompositionLocalProvider
-    } // SharedTransitionLayout
+    } // ImagePreviewHost
 }
-@Composable
-private fun rememberPreviewUrlHolder(): com.molagpt.app.feature.file.ImagePreviewUrlHolder {
-    var url by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
-    BackHandler(enabled = url != null) { url = null }
-    return androidx.compose.runtime.remember(url) {
-        object : com.molagpt.app.feature.file.ImagePreviewUrlHolder {
-            override val current: String? get() = url
-            override fun request(value: String?) { url = value }
-        }
-    }
-}
-
 /** 推理开关与实际结果对不上时的自校正卡片，两个方向共用。 */
 @Composable
 private fun ReasoningMismatchCard(

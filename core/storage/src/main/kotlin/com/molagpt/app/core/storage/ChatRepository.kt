@@ -4,6 +4,7 @@ import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatMessageMetadataKeys
 import com.molagpt.app.core.model.ChatRequest
+import com.molagpt.app.core.model.ContextOverflow
 import com.molagpt.app.core.model.DeltaCommand
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
@@ -21,6 +22,7 @@ import com.molagpt.app.core.network.webTypingPaced
 import com.molagpt.app.core.storage.dao.ConversationDao
 import com.molagpt.app.core.storage.dao.MessageDao
 import com.molagpt.app.core.storage.dao.StreamTaskDao
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -46,6 +48,8 @@ class ChatRepository(
     private val pricingResolver: suspend (String, String) -> com.molagpt.app.core.model.ModelPricing? = { _, _ -> null },
     /** 回答后处理（设置 → 后处理）。默认原样返回，测试与预览可以不接。 */
     private val postProcessor: ResponseTextProcessor = ResponseTextProcessor { it },
+    /** BYOK 上下文压缩。为 null 时请求原样发出。 */
+    private val contextCompactor: ContextCompactor? = null,
 ) {
     private val controller = ChatStreamController()
 
@@ -200,29 +204,90 @@ class ChatRepository(
         var pricing: com.molagpt.app.core.model.ModelPricing? = null
         val usage = AtomicReference<Usage?>(null)
         var processed = false
+        var checkpointId: String? = null
+        var slimTurns = 0
         try {
             if (request.providerKind == ProviderKind.BYOK) pricing = pricingResolver(request.providerId, request.modelId)
-            chatService.sendMessage(request).onEach { event ->
-                // 在打字动画排队之前保存用量，停止显示时仍保留上游已完成请求的费用。
-                when (event) {
-                    is com.molagpt.app.core.model.StreamEvent.UsageUpdate -> usage.set(event.usage)
-                    is com.molagpt.app.core.model.StreamEvent.Finish -> event.usage?.let { usage.set(it) }
-                    else -> Unit
+            // 压缩进度不写进这条回答：对话页从压缩器读，显示在回答上方。
+            val compactor = contextCompactor.takeIf { request.providerKind == ProviderKind.BYOK }
+            var outgoing = request
+            if (compactor != null) {
+                // 压缩出任何意外都不该挡住这次发送：退回原样发出。
+                val prepared = try {
+                    compactor.prepare(request)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    ContextCompactor.Prepared(request, null)
                 }
-            }.webTypingPaced().collect { event ->
-                controller.toCommands(event).forEach { cmd -> msg = applyCommand(msg, cmd) }
-                // 首个 fragment 落地 = 用户看到第一个字，作为 TTFT 的终点。
-                if (firstTokenAt == null && msg.fragments.isNotEmpty()) {
-                    firstTokenAt = System.currentTimeMillis()
+                outgoing = prepared.request
+                checkpointId = prepared.checkpointId
+                slimTurns = prepared.slimTurns
+            }
+            // 被以超长拒绝时压缩一次再重试。只在回答还没有任何内容时重试：
+            // 工具循环中途超长的话，已经执行过的工具不能再跑一遍。
+            var overflowRetried = false
+            while (true) {
+                var overflow: String? = null
+                chatService.sendMessage(outgoing).onEach { event ->
+                    // 在打字动画排队之前保存用量，停止显示时仍保留上游已完成请求的费用。
+                    when (event) {
+                        is com.molagpt.app.core.model.StreamEvent.UsageUpdate -> usage.set(event.usage)
+                        is com.molagpt.app.core.model.StreamEvent.Finish -> event.usage?.let { usage.set(it) }
+                        else -> Unit
+                    }
+                }.webTypingPaced().collect { event ->
+                    if (
+                        event is com.molagpt.app.core.model.StreamEvent.Failed &&
+                        compactor != null &&
+                        msg.fragments.isEmpty() &&
+                        ContextOverflow.matches(event.message)
+                    ) {
+                        if (!overflowRetried) {
+                            overflow = event.message
+                            return@collect
+                        }
+                        controller.toCommands(
+                            com.molagpt.app.core.model.StreamEvent.Failed(OVERFLOW_NOTICE + "\n\n" + event.message),
+                        ).forEach { cmd -> msg = applyCommand(msg, cmd) }
+                        emit(msg.copy(updatedAt = System.currentTimeMillis()))
+                        return@collect
+                    }
+                    controller.toCommands(event).forEach { cmd -> msg = applyCommand(msg, cmd) }
+                    // 首个 fragment 落地 = 用户看到第一个字，作为 TTFT 的终点。
+                    if (firstTokenAt == null && msg.fragments.isNotEmpty()) {
+                        firstTokenAt = System.currentTimeMillis()
+                    }
+                    emit(msg.copy(updatedAt = System.currentTimeMillis()))
+                }
+                val error = overflow ?: break
+                overflowRetried = true
+                val recovered = try {
+                    compactor?.recoverFromOverflow(request, error)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
+                if (recovered == null) {
+                    controller.toCommands(
+                        com.molagpt.app.core.model.StreamEvent.Failed(OVERFLOW_NOTICE + "\n\n" + error),
+                    ).forEach { cmd -> msg = applyCommand(msg, cmd) }
+                    emit(msg.copy(updatedAt = System.currentTimeMillis()))
+                    break
                 }
                 emit(msg.copy(updatedAt = System.currentTimeMillis()))
+                outgoing = recovered.request
+                checkpointId = recovered.checkpointId
+                slimTurns = recovered.slimTurns
+                usage.set(null)
             }
             if (msg.status == MessageStatus.STREAMING) msg = msg.copy(status = MessageStatus.COMPLETE)
             // 后处理必须赶在版本快照之前：晚一步，存进 retryAttempts 的就是没改写过的原文，
             // 切回这一版时替换会凭空消失。
             msg = withContext(NonCancellable) { applyPostProcessing(msg) }
             processed = true
-            msg = msg.withRequestStats(request.providerKind, usage.get(), start, firstTokenAt, pricing)
+            msg = msg.withRequestStats(request.providerKind, usage.get(), start, firstTokenAt, pricing, checkpointId, slimTurns)
             // 重生成：把本次答案追加为新版本，让 in-flight 帧立即带上版本信息(切换栏才会显示)。
             if (priorAttempts.isNotEmpty()) msg = msg.withAttempts(priorAttempts)
             emit(msg)
@@ -235,7 +300,7 @@ class ChatRepository(
                 updatedAt = System.currentTimeMillis(),
                 metadata = msg.metadata - "pending",
             )
-            if (!processed) finalMsg = finalMsg.withRequestStats(request.providerKind, usage.get(), start, firstTokenAt, pricing)
+            if (!processed) finalMsg = finalMsg.withRequestStats(request.providerKind, usage.get(), start, firstTokenAt, pricing, checkpointId, slimTurns)
             // 用户停止时上面的 success 分支未跑到，这里兜底补版本，避免丢失旧版本。
             if (priorAttempts.isNotEmpty() && !finalMsg.metadata.containsKey(RetryAttempts.KEY_ATTEMPTS)) {
                 finalMsg = finalMsg.withAttempts(priorAttempts)
@@ -340,6 +405,8 @@ class ChatRepository(
         startedAt: Long,
         firstTokenAt: Long?,
         pricing: com.molagpt.app.core.model.ModelPricing?,
+        checkpointId: String? = null,
+        slimTurns: Int = 0,
     ): ChatMessage {
         if (providerKind != ProviderKind.BYOK) return this
         val stats = buildMap {
@@ -357,6 +424,9 @@ class ChatRepository(
             usage?.cachedTokens?.let { put(ChatMessageMetadataKeys.CACHED_TOKENS, it.toString()) }
             put(ChatMessageMetadataKeys.DURATION_MS, (System.currentTimeMillis() - startedAt).toString())
             firstTokenAt?.let { put(ChatMessageMetadataKeys.TTFT_MS, (it - startedAt).toString()) }
+            usage?.contextSize?.let { put(ChatMessageMetadataKeys.CONTEXT_TOKENS, it.toString()) }
+            checkpointId?.let { put(ChatMessageMetadataKeys.CONTEXT_CHECKPOINT, it) }
+            if (slimTurns > 0) put(ChatMessageMetadataKeys.CONTEXT_SLIM, slimTurns.toString())
         }
         return copy(metadata = metadata + stats)
     }
@@ -465,6 +535,10 @@ class ChatRepository(
      */
     private suspend fun applyPostProcessing(msg: ChatMessage): ChatMessage =
         runCatching { ResponseRewrite.apply(msg) { postProcessor.process(it) } }.getOrDefault(msg)
+
+    private companion object {
+        const val OVERFLOW_NOTICE = "对话超出模型上下文长度"
+    }
 
     private fun visibleText(msg: ChatMessage): String = buildString {
         msg.fragments.forEach { frag ->

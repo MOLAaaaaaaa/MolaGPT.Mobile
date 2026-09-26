@@ -8,7 +8,7 @@ data class ConversationSpend(val costUsd: Double = 0.0, val byModel: List<ModelS
 }
 
 object ConversationSpendCalculator {
-    fun from(messages: List<ChatMessage>, providerKind: ProviderKind): ConversationSpend {
+    fun from(messages: List<ChatMessage>, providerKind: ProviderKind, compactionCostUsd: Double = 0.0): ConversationSpend {
         if (providerKind != ProviderKind.BYOK) return ConversationSpend()
         val all = messages + messages.flatMap { EditSnapshots.archivedMessages(it.sessionId, it.metadata[EditSnapshots.KEY]) }
         val seen = mutableSetOf<String>()
@@ -24,6 +24,6 @@ object ConversationSpendCalculator {
         val byModel = entries.groupBy { it.first }.map { (model, costs) ->
             ModelSpend(model, costs.sumOf { it.second }, costs.size)
         }.sortedByDescending { it.costUsd }
-        return ConversationSpend(byModel.sumOf { it.costUsd }, byModel)
+        return ConversationSpend(byModel.sumOf { it.costUsd } + compactionCostUsd, byModel)
     }
 }

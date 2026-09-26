@@ -84,6 +84,7 @@ fun JsonObject.toAccountStatus(displayNameOf: (String) -> String? = { null }): A
                 ?: sameDayTokens(tokensUsage, mid),
             creditMultiplier = s["credit_multiplier"]?.prim()?.doubleOrNull,
             creditSymbol = s["credit_symbol"]?.prim()?.contentOrNull,
+            pricingPeriod = s["pricing_period"]?.prim()?.contentOrNull,
             message = s["message"]?.prim()?.contentOrNull,
         )
     }.orEmpty()

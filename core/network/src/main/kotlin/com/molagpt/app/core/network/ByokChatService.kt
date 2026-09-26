@@ -8,6 +8,7 @@ import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ChatMessageMetadataKeys
 import com.molagpt.app.core.model.ChatRequest
+import com.molagpt.app.core.model.ContextOverflow
 import com.molagpt.app.core.model.CustomBodyParam
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
@@ -179,6 +180,144 @@ class ByokChatService(
             withContext(dispatchers.io) { requestText(provider, target, prompt, maxTokens, temperature) }
         }.getOrNull()
     }
+
+    /**
+     * 上下文摘要：非流式、关思考、不带工具与角色提示。
+     *
+     * 与 [completeText] 的区别是它要把失败原因带回去——摘要本身也可能超长，调用方要据此
+     * 把输入切小再试；以及要带回用量，摘要花的是用户的额度。
+     * 请求可被取消：用户点停止时连接立刻断开，不会在后台跑完一个大请求。
+     */
+    suspend fun summarize(
+        providerId: String,
+        modelId: String,
+        system: String,
+        prompt: String,
+        maxOutputTokens: Int,
+    ): TextCompletion {
+        val provider = providerResolver(providerId)?.takeIf { it.enabled }
+            ?: return TextCompletion.Failure("BYOK 服务不可用", overflow = false)
+        val target = modelId.trim().ifBlank { return TextCompletion.Failure("未指定模型", overflow = false) }
+        val body = buildSummaryBody(provider, target, system, prompt, maxOutputTokens)
+        val url = if (provider.type == ByokProviderType.GEMINI) {
+            geminiEndpoint(provider, target, stream = false)
+        } else {
+            provider.endpoint(provider.chatPath)
+        }
+        val req = Request.Builder()
+            .url(url)
+            .apply {
+                if (provider.type != ByokProviderType.GEMINI) {
+                    provider.applyAuthHeaders { name, value -> header(name, value) }
+                }
+                if (provider.type == ByokProviderType.ANTHROPIC) header("anthropic-version", "2023-06-01")
+            }
+            .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
+            .build()
+        val (code, text) = try {
+            http.okHttp.executeCancellable(req)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return TextCompletion.Failure("上下文压缩请求失败：${e.message ?: e.javaClass.simpleName}", overflow = false)
+        }
+        if (code !in 200..299) {
+            return TextCompletion.Failure(
+                serverResponseError("上下文压缩请求失败", code, text),
+                overflow = ContextOverflow.matches(text),
+            )
+        }
+        val summary = parseTitleResponse(provider.type, http.json, text)
+            ?.replace(THINK_BLOCK, "")
+            ?.trim()
+            .orEmpty()
+        if (summary.isEmpty()) return TextCompletion.Failure("模型未返回摘要", overflow = false)
+        val root = runCatching { http.json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+        val usage = root?.let {
+            when (provider.type) {
+                ByokProviderType.OPENAI_COMPAT -> parseOpenAiUsage(it)
+                ByokProviderType.OPENAI_RESPONSE -> parseOpenAiResponseUsage(it)
+                ByokProviderType.ANTHROPIC -> parseAnthropicUsage(it)
+                ByokProviderType.GEMINI -> geminiUsage(it)
+            }
+        }
+        return TextCompletion.Success(summary, usage)
+    }
+
+    private fun buildSummaryBody(
+        provider: ByokProvider,
+        modelId: String,
+        system: String,
+        prompt: String,
+        maxOutputTokens: Int,
+    ): JsonObject =
+        when (provider.type) {
+            ByokProviderType.OPENAI_COMPAT -> buildJsonObject {
+                put("model", modelId)
+                put("stream", false)
+                put("temperature", TITLE_TEMPERATURE)
+                putJsonArray("messages") {
+                    addJsonObject {
+                        put("role", "system")
+                        put("content", system)
+                    }
+                    addJsonObject {
+                        put("role", "user")
+                        put("content", prompt)
+                    }
+                }
+                addOpenAiThinking(provider, modelId, requestedThinking = false, reasoningEffort = "")
+                applyModelCustomBody(provider, modelId)
+            }
+
+            ByokProviderType.OPENAI_RESPONSE -> buildJsonObject {
+                put("model", modelId)
+                put("stream", false)
+                put("instructions", system)
+                putJsonArray("input") {
+                    addJsonObject {
+                        put("role", "user")
+                        putJsonArray("content") {
+                            addJsonObject {
+                                put("type", "input_text")
+                                put("text", prompt)
+                            }
+                        }
+                    }
+                }
+                applyModelCustomBody(provider, modelId)
+            }
+
+            ByokProviderType.ANTHROPIC -> buildJsonObject {
+                put("model", modelId)
+                put("max_tokens", maxOutputTokens)
+                put("temperature", TITLE_TEMPERATURE)
+                put("stream", false)
+                put("system", system)
+                putJsonArray("messages") {
+                    addJsonObject {
+                        put("role", "user")
+                        put("content", prompt)
+                    }
+                }
+                applyModelCustomBody(provider, modelId)
+            }
+
+            ByokProviderType.GEMINI -> buildJsonObject {
+                putJsonObject("systemInstruction") {
+                    putJsonArray("parts") { addJsonObject { put("text", system) } }
+                }
+                putJsonArray("contents") {
+                    addJsonObject {
+                        put("role", "user")
+                        putJsonArray("parts") {
+                            addJsonObject { put("text", prompt) }
+                        }
+                    }
+                }
+                applyModelCustomBody(provider, modelId)
+            }
+        }
 
     private fun requestTitle(provider: ByokProvider, modelId: String, prompt: String): String? =
         requestText(provider, modelId, prompt, ANTHROPIC_TITLE_MAX_TOKENS, TITLE_TEMPERATURE)
@@ -2659,6 +2798,9 @@ class ByokChatService(
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
         const val TITLE_TEMPERATURE = 0.3
         const val ANTHROPIC_TITLE_MAX_TOKENS = 2048
+
+        /** 部分部署把思考内联在正文里；摘要里不该出现。 */
+        val THINK_BLOCK = Regex("(?s)<think>.*?</think>")
     }
 
     private data class ToolCall(
@@ -3125,7 +3267,8 @@ private fun syntheticResponsesMessage(text: String): JsonObject = buildJsonObjec
     }
 }
 
-private val com.molagpt.app.core.model.EnabledTools.hasByokTools: Boolean
+/** 本次请求是否会带上工具定义。 */
+val com.molagpt.app.core.model.EnabledTools.hasByokTools: Boolean
     get() = network || steelBrowser || vision || imageGeneration || mcp || memory || conversationRecall
 
 internal fun selectByokVisionModel(provider: ByokProvider, fallbackModelId: String): String {

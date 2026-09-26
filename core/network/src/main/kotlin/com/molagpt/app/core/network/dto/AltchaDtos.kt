@@ -43,6 +43,8 @@ data class AuthTokenResponse(
     val username: String? = null,
     @SerialName("ua_mismatch") val uaMismatch: Boolean = false,
     @SerialName("renewed_login_token") val renewedLoginToken: String? = null,
+    /** 服务端是否开放游客聊天。旧版服务端不下发，按开放处理（保持原来的降级行为）。 */
+    @SerialName("guest_chat_enabled") val guestChatEnabled: Boolean = true,
     /** 错误分支：altcha_required / altcha_invalid 等。 */
     val error: String? = null,
 )

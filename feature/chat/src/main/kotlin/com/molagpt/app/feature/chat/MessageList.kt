@@ -46,10 +46,13 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import com.molagpt.app.core.render.RetryBar
 import com.molagpt.app.core.render.MolaMotion
 import kotlinx.coroutines.launch
 import com.molagpt.app.core.markdown.MdBlock
 import com.molagpt.app.core.model.ChatMessage
+import com.molagpt.app.core.model.ContextCompactionMark
+import com.molagpt.app.core.model.ContextCompactionProgress
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStats
 import com.molagpt.app.core.model.MessageStatus
@@ -85,6 +88,11 @@ fun MessageList(
     models: List<ProviderModel> = emptyList(),
     onNavVersion: (String, Int) -> Unit = { _, _ -> },
     onNavEditSnapshot: (String, Int) -> Unit = { _, _ -> },
+    /** 上下文压缩记录，显示在各自发生的时间点。 */
+    compactions: List<ContextCompactionMark> = emptyList(),
+    /** 正在进行的压缩。 */
+    compacting: ContextCompactionProgress? = null,
+    onCancelCompaction: () -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -92,7 +100,7 @@ fun MessageList(
     var autoFollow by remember { mutableStateOf(true) }
     StreamRenderPacingEffect(messages.any(ChatMessage::isStreaming))
     val renderRequests = remember { Channel<MessageRenderRequest>(Channel.CONFLATED) }
-    val renderRequest = MessageRenderRequest(messages, models, canEdit, canEditAssistant)
+    val renderRequest = MessageRenderRequest(messages, models, canEdit, canEditAssistant, compactions, compacting)
     SideEffect {
         renderRequests.trySend(renderRequest)
     }
@@ -108,6 +116,8 @@ fun MessageList(
             modelDisplayNameOf = initialModelNameOf,
             canEditUser = canEdit,
             canEditAssistant = canEditAssistant,
+            compactions = compactions,
+            compacting = compacting,
         )
     }
     val rows by produceState(
@@ -126,6 +136,8 @@ fun MessageList(
                     modelDisplayNameOf = modelNameOf,
                     canEditUser = latest.canEdit,
                     canEditAssistant = latest.canEditAssistant,
+                    compactions = latest.compactions,
+                    compacting = latest.compacting,
                 )
             }
             renderedRequest = latest
@@ -136,6 +148,17 @@ fun MessageList(
     // 贴底判定的容差。原来写死 48 **像素**——在 3x 屏上只有 16dp，手指停在离底一点点的地方
     // 就判成「没贴底」，跟随再也不恢复。改成按密度换算的 dp，手感才和屏幕无关。
     val bottomThresholdPx = with(LocalDensity.current) { 32.dp.roundToPx() }
+
+    var openedCompaction by remember { mutableStateOf<ContextCompactionMark?>(null) }
+    openedCompaction?.let { mark ->
+        ContextCompactionSheet(
+            mark = mark,
+            coveredMessages = messages.indexOfFirst { it.messageId == mark.anchorMessageId }
+                .takeIf { it >= 0 }
+                ?.plus(1),
+            onDismiss = { openedCompaction = null },
+        )
+    }
 
     // 跟随判定必须绑在**用户手势**上。别拿 isScrollInProgress 当手势的代理——它由
     // ScrollableState.scroll{} 的互斥锁驱动，程序滚动同样会置位（scrollToBottom 自己、统计卡展开时的
@@ -285,6 +308,13 @@ fun MessageList(
                             onNext = { onNavEditSnapshot(row.messageId, 1) },
                         )
                     }
+                    is MessageListRow.Compaction -> ContextCompactionLine(
+                        mark = row.mark,
+                        progress = row.progress,
+                        onOpen = { openedCompaction = it },
+                        onCancel = onCancelCompaction,
+                        modifier = rowModifier,
+                    )
                 }
             }
         }
@@ -368,6 +398,8 @@ private data class MessageRenderRequest(
     val models: List<ProviderModel>,
     val canEdit: Boolean,
     val canEditAssistant: Boolean,
+    val compactions: List<ContextCompactionMark>,
+    val compacting: ContextCompactionProgress?,
 )
 
 internal sealed interface MessageListRow {
@@ -483,6 +515,20 @@ internal sealed interface MessageListRow {
         override val key = "$messageId:branch"
         override val contentType = "branch"
     }
+
+    /**
+     * 上下文压缩：进行中时 [mark] 为 null、[progress] 非空，完成后换成记录。
+     * 两种状态共用同一个 key（即检查点 id），完成时这一行原地变化，而不是换一行。
+     */
+    data class Compaction(
+        val id: String,
+        val mark: ContextCompactionMark?,
+        val progress: ContextCompactionProgress?,
+        override val topPaddingDp: Int,
+    ) : MessageListRow {
+        override val key = "compaction:$id"
+        override val contentType = "compaction"
+    }
 }
 
 internal fun List<ChatMessage>.toMessageRows(
@@ -490,8 +536,16 @@ internal fun List<ChatMessage>.toMessageRows(
     modelDisplayNameOf: (String) -> String,
     canEditUser: Boolean = true,
     canEditAssistant: Boolean = false,
+    compactions: List<ContextCompactionMark> = emptyList(),
+    compacting: ContextCompactionProgress? = null,
 ): List<MessageListRow> {
     val rows = ArrayList<MessageListRow>()
+    val slots = placeCompactions(this, compactions)
+    // 回答开始前的自动压缩：进度显示在这条回答的位置，回答本身等压缩完再出现。
+    val compactingBefore = compacting
+        ?.takeIf { it.running && it.reason.duringReply }
+        ?.let { lastOrNull()?.takeIf { last -> last.role == Role.ASSISTANT && last.isStreaming } }
+    var compactingPlaced = compacting == null || !compacting.running
     val lastAssistantId = lastOrNull { it.role == Role.ASSISTANT }?.messageId
     val lastUserId = lastOrNull { it.role == Role.USER }?.messageId
     val lastEditedUserId = lastOrNull {
@@ -510,12 +564,34 @@ internal fun List<ChatMessage>.toMessageRows(
         firstRowInList = false
     }
 
+    fun addCompactionRow(mark: ContextCompactionMark) {
+        addRow(startsMessage = true) { top -> MessageListRow.Compaction(mark.id, mark, null, top) }
+    }
+
+    fun addCompactionProgressRow(progress: ContextCompactionProgress) {
+        addRow(startsMessage = true) { top -> MessageListRow.Compaction(progress.id, null, progress, top) }
+    }
+
+    slots.leading.forEach { mark -> addCompactionRow(mark) }
+
     forEach { message ->
         var emittedForMessage = false
 
         fun addMessageRow(row: (Int) -> MessageListRow) {
             addRow(startsMessage = !emittedForMessage, row = row)
             emittedForMessage = true
+        }
+
+        // 压缩记录排在这条消息的全部行（含操作栏）之后：它标的是「之后」，不属于这条消息。
+        fun addCompactions() {
+            slots.after[message.messageId]?.forEach { mark -> addCompactionRow(mark) }
+        }
+
+        slots.before[message.messageId]?.forEach { mark -> addCompactionRow(mark) }
+        if (compacting != null && message.messageId == compactingBefore?.messageId) {
+            addCompactionProgressRow(compacting)
+            compactingPlaced = true
+            if (message.fragments.isEmpty()) return@forEach
         }
 
         if (message.role == Role.USER) {
@@ -549,6 +625,7 @@ internal fun List<ChatMessage>.toMessageRows(
                     )
                 }
             }
+            addCompactions()
             return@forEach
         }
 
@@ -689,9 +766,47 @@ internal fun List<ChatMessage>.toMessageRows(
                 }
             }
         }
+        addCompactions()
     }
+    if (!compactingPlaced && compacting != null) addCompactionProgressRow(compacting)
 
     return rows
+}
+
+/** [placeCompactions] 的结果：记录挂在哪条消息之前或之后。 */
+internal class CompactionSlots(
+    val leading: List<ContextCompactionMark>,
+    val before: Map<String, List<ContextCompactionMark>>,
+    val after: Map<String, List<ContextCompactionMark>>,
+)
+
+/**
+ * 压缩记录显示在压缩发生的时间点：压缩时已有的最后一条消息之后。
+ * 例外是回答开始前的自动压缩——那条回答在压缩前就建好了（正在生成中），
+ * 记录要放在它前面，也就是用户消息和回答之间。
+ */
+internal fun placeCompactions(
+    messages: List<ChatMessage>,
+    marks: List<ContextCompactionMark>,
+): CompactionSlots {
+    if (marks.isEmpty()) return CompactionSlots(emptyList(), emptyMap(), emptyMap())
+    val leading = ArrayList<ContextCompactionMark>()
+    val before = HashMap<String, MutableList<ContextCompactionMark>>()
+    val after = HashMap<String, MutableList<ContextCompactionMark>>()
+    for (mark in marks.sortedBy { it.createdAt }) {
+        val index = messages.indexOfLast { it.createdAt <= mark.createdAt }
+        if (index < 0) {
+            leading += mark
+            continue
+        }
+        val message = messages[index]
+        val duringThisReply = mark.reason.duringReply &&
+            message.role == Role.ASSISTANT &&
+            (message.isStreaming || message.updatedAt >= mark.createdAt)
+        val slot = if (duringThisReply) before else after
+        slot.getOrPut(message.messageId) { ArrayList() } += mark
+    }
+    return CompactionSlots(leading, before, after)
 }
 
 /**

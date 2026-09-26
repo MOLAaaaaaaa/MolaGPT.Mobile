@@ -81,6 +81,24 @@ object ChatMessageMetadataKeys {
     const val COST_MODEL = "costModel"
     const val PRICING_SOURCE = "pricingSource"
     const val PRICING_MISSING = "pricingMissing"
+
+    /**
+     * 本轮最后一次请求的上下文大小（prompt + completion，服务商实测）。
+     * 工具循环的 [PROMPT_TOKENS] 是各轮之和，不能拿来衡量上下文有多满。
+     */
+    const val CONTEXT_TOKENS = "contextTokens"
+
+    /** 发出本轮请求时生效的上下文压缩检查点 id；未压缩时不写。 */
+    const val CONTEXT_CHECKPOINT = "contextCheckpoint"
+
+    /** 发出本轮请求时精简到了第几个用户轮（见 ContextPlanner.slimTurns）。 */
+    const val CONTEXT_SLIM = "contextSlim"
+
+    /**
+     * 仅存在于请求副本：这条消息的图片以 `[图片#N]` 文字占位发送，不再附带图片本身。
+     * 序号照常占用，`view_image` 仍能按序号取到原图。
+     */
+    const val IMAGES_AS_TEXT = "imagesAsText"
 }
 
 enum class MessageStatus {

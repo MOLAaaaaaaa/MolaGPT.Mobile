@@ -49,28 +49,48 @@ class ByokImageApi(private val http: MolaHttp) {
         prompt: String,
         config: ByokImageWorkbenchConfig,
         attachments: List<ByokImageAttachment>,
+        gate: ImageCallGate? = null,
     ): ByokImageWorkbenchResult {
         if (prompt.isBlank()) throw MolaApiException(400, "请填写 Prompt")
         if (modelId.isBlank()) throw MolaApiException(400, "请选择模型")
         return when (provider.type) {
-            ByokProviderType.GEMINI -> runGeminiWorkbench(provider, modelId, prompt, config, attachments)
+            ByokProviderType.GEMINI -> runGeminiWorkbench(provider, modelId, prompt, config, attachments, gate)
             ByokProviderType.ANTHROPIC -> throw MolaApiException(400, "${provider.name} 暂未配置图像生成端点")
             ByokProviderType.OPENAI_RESPONSE,
             ByokProviderType.OPENAI_COMPAT -> when {
-                provider.imageFormat == ByokImageFormat.OPENAI_CHAT_IMAGE -> runChatImageWorkbench(provider, modelId, prompt, config, attachments)
-                attachments.isEmpty() -> runOpenAiImageGenerations(provider, modelId, prompt, config)
-                config.batchMode && attachments.size >= 2 -> runOpenAiBatchEdits(provider, modelId, prompt, config, attachments)
-                attachments.size == 1 -> runOpenAiSingleEdit(provider, modelId, prompt, config, attachments.first())
-                else -> runChatImageWorkbench(provider, modelId, prompt, config, attachments)
+                provider.imageFormat == ByokImageFormat.OPENAI_CHAT_IMAGE -> runChatImageWorkbench(provider, modelId, prompt, config, attachments, gate)
+                attachments.isEmpty() -> runOpenAiImageGenerations(provider, modelId, prompt, config, gate)
+                config.batchMode && attachments.size >= 2 -> runOpenAiBatchEdits(provider, modelId, prompt, config, attachments, gate)
+                attachments.size == 1 -> runOpenAiSingleEdit(provider, modelId, prompt, config, attachments.first(), gate)
+                else -> runChatImageWorkbench(provider, modelId, prompt, config, attachments, gate)
             }
         }
     }
+
+    /**
+     * 把结果里的远程图片下载成字节。服务商给的 URL 多半有时效，不落地的话过几天历史里就只剩裂图。
+     * 失败返回 null，由调用方退回保存原 URL。
+     */
+    fun download(url: String, gate: ImageCallGate? = null): ByteArray? = runCatching {
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", UserAgentProvider.BROWSER_UA)
+            .get()
+            .build()
+        val call = http.okHttp.newCall(req)
+        gate?.register(call)
+        call.execute().use { resp ->
+            if (!resp.isSuccessful) return@runCatching null
+            resp.body?.bytes()
+        }
+    }.getOrNull()
 
     private fun runOpenAiImageGenerations(
         provider: ByokProvider,
         modelId: String,
         prompt: String,
         config: ByokImageWorkbenchConfig,
+        gate: ImageCallGate?,
     ): ByokImageWorkbenchResult {
         val hits = mutableListOf<ByokImageHit>()
         val raws = mutableListOf<String>()
@@ -84,7 +104,7 @@ class ByokImageApi(private val http: MolaHttp) {
                 put("response_format", "b64_json")
                 putOpenAiImageExtras(config)
             }
-            val raw = executeJson(provider, provider.imagePath.ifBlank { "v1/images/generations" }, body, config.timeoutSeconds)
+            val raw = executeJson(provider, provider.imagePath.ifBlank { "v1/images/generations" }, body, config.timeoutSeconds, gate)
             hits += extractImageHits(raw).mapIndexed { hitIndex, hit ->
                 hit.copy(label = if (count > 1) "${index + 1}.${hitIndex + 1}" else hit.label)
             }
@@ -104,6 +124,7 @@ class ByokImageApi(private val http: MolaHttp) {
         prompt: String,
         config: ByokImageWorkbenchConfig,
         attachment: ByokImageAttachment,
+        gate: ImageCallGate?,
     ): ByokImageWorkbenchResult {
         val bypassEdits = modelId.contains("pro", ignoreCase = true) && config.sizeMaxEdge >= 1600
         val primary = if (bypassEdits) {
@@ -124,7 +145,7 @@ class ByokImageApi(private val http: MolaHttp) {
             body = buildChatEditBody(modelId, prompt, config, listOf(attachment)),
             timeoutSeconds = config.timeoutSeconds,
         )
-        val result = executeEndpointWithFallback(provider, primary, fallback)
+        val result = executeEndpointWithFallback(provider, primary, fallback, gate)
         val hits = extractImageHits(result.raw)
         return ByokImageWorkbenchResult(
             hits = hits,
@@ -141,6 +162,7 @@ class ByokImageApi(private val http: MolaHttp) {
         prompt: String,
         config: ByokImageWorkbenchConfig,
         attachments: List<ByokImageAttachment>,
+        gate: ImageCallGate?,
     ): ByokImageWorkbenchResult {
         val hits = mutableListOf<ByokImageHit>()
         val raws = mutableListOf<String>()
@@ -152,6 +174,7 @@ class ByokImageApi(private val http: MolaHttp) {
                 prompt = prompt,
                 config = config.copy(n = 1, batchMode = false),
                 attachment = attachment,
+                gate = gate,
             )
             raws += "#${index + 1}\n${result.raw}"
             fallbackUsed = fallbackUsed || result.usedFallback
@@ -172,6 +195,7 @@ class ByokImageApi(private val http: MolaHttp) {
         prompt: String,
         config: ByokImageWorkbenchConfig,
         attachments: List<ByokImageAttachment>,
+        gate: ImageCallGate?,
     ): ByokImageWorkbenchResult {
         val count = if (attachments.isEmpty()) config.n.coerceIn(1, 8) else 1
         val hits = mutableListOf<ByokImageHit>()
@@ -182,7 +206,7 @@ class ByokImageApi(private val http: MolaHttp) {
             } else {
                 buildChatEditBody(modelId, prompt, config, attachments)
             }
-            val raw = executeJson(provider, provider.chatPath.ifBlank { "v1/chat/completions" }, body, config.timeoutSeconds)
+            val raw = executeJson(provider, provider.chatPath.ifBlank { "v1/chat/completions" }, body, config.timeoutSeconds, gate)
             hits += extractImageHits(raw).mapIndexed { hitIndex, hit ->
                 hit.copy(label = if (count > 1) "${index + 1}.${hitIndex + 1}" else hit.label)
             }
@@ -202,6 +226,7 @@ class ByokImageApi(private val http: MolaHttp) {
         prompt: String,
         config: ByokImageWorkbenchConfig,
         attachments: List<ByokImageAttachment>,
+        gate: ImageCallGate?,
     ): ByokImageWorkbenchResult {
         val fullPrompt = if (config.size.isBlank()) prompt else "$prompt\n\nOutput size: ${config.size}."
         val path = provider.imagePath.ifBlank { provider.chatPath }
@@ -250,7 +275,10 @@ class ByokImageApi(private val http: MolaHttp) {
             .url(url)
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
-        http.okHttp.newCall(req).execute().use { resp ->
+        val client = http.okHttp.newBuilder()
+            .callTimeout(config.timeoutSeconds.coerceIn(10, 3600).toLong(), TimeUnit.SECONDS)
+            .build()
+        client.newCall(req).also { gate?.register(it) }.execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 throw MolaApiException(resp.code, serverResponseError("图像生成失败", resp.code, text))
@@ -269,22 +297,24 @@ class ByokImageApi(private val http: MolaHttp) {
         provider: ByokProvider,
         primary: WorkbenchEndpoint,
         fallback: WorkbenchEndpoint?,
+        gate: ImageCallGate?,
     ): EndpointResult {
-        val primaryResult = runCatching { executeEndpoint(provider, primary) }
+        val primaryResult = runCatching { executeEndpoint(provider, primary, gate) }
         val raw = primaryResult.getOrElse { error ->
-            if (fallback == null) throw error
-            return EndpointResult(raw = executeEndpoint(provider, fallback), usedFallback = true)
+            // 用户已经停止时不再去试次选路径。
+            if (fallback == null || gate?.cancelled == true) throw error
+            return EndpointResult(raw = executeEndpoint(provider, fallback, gate), usedFallback = true)
         }
         return EndpointResult(raw = raw, usedFallback = false)
     }
 
-    private fun executeEndpoint(provider: ByokProvider, endpoint: WorkbenchEndpoint): String =
+    private fun executeEndpoint(provider: ByokProvider, endpoint: WorkbenchEndpoint, gate: ImageCallGate?): String =
         when (endpoint) {
-            is WorkbenchEndpoint.Json -> executeJson(provider, endpoint.path, endpoint.body, endpoint.timeoutSeconds)
-            is WorkbenchEndpoint.Multipart -> executeMultipart(provider, endpoint.path, endpoint.body, endpoint.timeoutSeconds)
+            is WorkbenchEndpoint.Json -> executeJson(provider, endpoint.path, endpoint.body, endpoint.timeoutSeconds, gate)
+            is WorkbenchEndpoint.Multipart -> executeMultipart(provider, endpoint.path, endpoint.body, endpoint.timeoutSeconds, gate)
         }
 
-    private fun executeJson(provider: ByokProvider, path: String, body: JsonObject, timeoutSeconds: Int = 600): String {
+    private fun executeJson(provider: ByokProvider, path: String, body: JsonObject, timeoutSeconds: Int = 600, gate: ImageCallGate? = null): String {
         val req = Request.Builder()
             .url(provider.endpoint(path))
             .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
@@ -293,7 +323,7 @@ class ByokImageApi(private val http: MolaHttp) {
         val client = http.okHttp.newBuilder()
             .callTimeout(timeoutSeconds.coerceIn(10, 3600).toLong(), TimeUnit.SECONDS)
             .build()
-        client.newCall(req).execute().use { resp ->
+        client.newCall(req).also { gate?.register(it) }.execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 throw MolaApiException(resp.code, serverResponseError("图像请求失败", resp.code, text))
@@ -302,7 +332,7 @@ class ByokImageApi(private val http: MolaHttp) {
         }
     }
 
-    private fun executeMultipart(provider: ByokProvider, path: String, body: MultipartBody, timeoutSeconds: Int = 600): String {
+    private fun executeMultipart(provider: ByokProvider, path: String, body: MultipartBody, timeoutSeconds: Int = 600, gate: ImageCallGate? = null): String {
         val req = Request.Builder()
             .url(provider.endpoint(path))
             .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
@@ -311,7 +341,7 @@ class ByokImageApi(private val http: MolaHttp) {
         val client = http.okHttp.newBuilder()
             .callTimeout(timeoutSeconds.coerceIn(10, 3600).toLong(), TimeUnit.SECONDS)
             .build()
-        client.newCall(req).execute().use { resp ->
+        client.newCall(req).also { gate?.register(it) }.execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 throw MolaApiException(resp.code, serverResponseError("图像编辑失败", resp.code, text))
@@ -889,4 +919,27 @@ private data class EndpointResult(
 private sealed interface WorkbenchEndpoint {
     data class Json(val path: String, val body: JsonObject, val timeoutSeconds: Int) : WorkbenchEndpoint
     data class Multipart(val path: String, val body: MultipartBody, val timeoutSeconds: Int) : WorkbenchEndpoint
+}
+
+/**
+ * 一次工作台请求里发出的全部 HTTP 调用。阻塞的 `execute()` 不响应协程取消，
+ * 停止时靠 [cancel] 直接掐断连接，调用线程随即抛 IOException 退出。
+ * 取消之后才登记的调用（循环里的下一张）会被立即掐掉。
+ */
+class ImageCallGate {
+    private val calls = java.util.concurrent.CopyOnWriteArrayList<okhttp3.Call>()
+
+    @Volatile
+    var cancelled: Boolean = false
+        private set
+
+    fun register(call: okhttp3.Call) {
+        calls += call
+        if (cancelled) call.cancel()
+    }
+
+    fun cancel() {
+        cancelled = true
+        calls.forEach { it.cancel() }
+    }
 }

@@ -278,7 +278,8 @@ class MolaGptChatService(
             if (resp.code == 401) throw MolaAuthExpiredException()
             val text = resp.body?.string().orEmpty().trimStart('\uFEFF')
             if (!resp.isSuccessful) {
-                throw MolaApiException(resp.code, "MolaGPT Routes 请求失败：HTTP ${resp.code} ${text.take(160)}")
+                val detail = molaServerErrorMessage(resp.code, text)
+                throw MolaApiException(resp.code, detail ?: "MolaGPT Routes 请求失败：HTTP ${resp.code} ${text.take(160)}")
             }
             val root = runCatching { http.json.parseToJsonElement(text).jsonObject }.getOrElse {
                 throw MolaApiException(resp.code, "MolaGPT Routes 返回无法解析：${text.take(160)}")
@@ -413,7 +414,11 @@ class MolaGptChatService(
         try {
             call.execute().use { resp ->
                 if (resp.code == 401) throw MolaAuthExpiredException()
-                if (!resp.isSuccessful) throw MolaApiException(resp.code, "$operationName 失败：HTTP ${resp.code}")
+                if (!resp.isSuccessful) {
+                    // 服务端给了原因（请登录后使用 / 该模型暂不可用 / 人数较多）就直接说原因
+                    val detail = molaServerErrorMessage(resp.code, resp.body?.string().orEmpty())
+                    throw MolaApiException(resp.code, detail ?: "$operationName 失败：HTTP ${resp.code}")
+                }
                 val source = resp.body?.source() ?: throw MolaApiException(resp.code, "$operationName 响应为空")
                 var finished = false
                 sseFlow { source.readUtf8Line() }.collect { payload ->

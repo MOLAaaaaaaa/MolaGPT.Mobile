@@ -91,6 +91,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.CustomBodyParam
+import com.molagpt.app.core.model.ModelContextWindows
 import com.molagpt.app.core.model.ModelPricing
 import com.molagpt.app.core.model.ModelsDevPrice
 import com.molagpt.app.core.model.ModelsDevPricing
@@ -934,6 +935,7 @@ private fun ModelEditSheet(
     var customEffortInput by remember { mutableStateOf("") }
     var tools by remember { mutableStateOf(draft.tools) }
     var customBody by remember { mutableStateOf(draft.customBody) }
+    var contextWindowText by remember { mutableStateOf(draft.contextWindow?.toString().orEmpty()) }
     var pricing by remember { mutableStateOf(draft.pricing) }
     var priceCandidates by remember { mutableStateOf<List<ModelsDevPrice>?>(null) }
     var fetchingPrice by remember { mutableStateOf(false) }
@@ -1286,6 +1288,22 @@ private fun ModelEditSheet(
                 }
             }
 
+            if (!isImage) {
+                OutlinedTextField(
+                    value = contextWindowText,
+                    onValueChange = { v -> contextWindowText = v.filter { it.isDigit() }.take(8) },
+                    label = { Text("上下文窗口（Token）") },
+                    placeholder = {
+                        Text("自动：" + ModelContextWindows.resolveOrDefault(modelId.trim(), null).toString().reversed().chunked(3).joinToString(",").reversed())
+                    },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
             Text("参数覆写（高级）", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             customBody.forEachIndexed { index, param ->
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1338,6 +1356,7 @@ private fun ModelEditSheet(
                                 offIneffective = offIneffective,
                                 tools = tools,
                                 customBody = customBody,
+                                contextWindow = contextWindowText.toIntOrNull()?.takeIf { it > 0 },
                                 pricing = if (customPrice) {
                                     ModelPricing(
                                         inputPrice.toDouble(),
@@ -1947,6 +1966,7 @@ private data class ModelDraft(
     val tools: Boolean = true,
     val customBody: List<CustomBodyParam> = emptyList(),
     val pricing: com.molagpt.app.core.model.ModelPricing? = null,
+    val contextWindow: Int? = null,
     val isExisting: Boolean = false,
 ) {
     fun toModel(provider: ByokProvider): ProviderModel = ProviderModel(
@@ -1978,6 +1998,7 @@ private data class ModelDraft(
         } else null,
         pricing = pricing,
         customBody = customBody.filter { it.key.isNotBlank() },
+        contextWindow = contextWindow.takeIf { !isImage },
     )
 
     companion object {
@@ -2000,6 +2021,7 @@ private data class ModelDraft(
                 tools = model.supportsToolCalling,
                 customBody = model.customBody,
                 pricing = model.pricing,
+                contextWindow = model.contextWindow,
                 isExisting = true,
             )
         }

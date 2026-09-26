@@ -36,3 +36,6 @@ data class Conversation(
      */
     val byokMemoryWatermarkAt: Long = 0L,
 )
+
+/** 这一行是画图任务（见 [ProviderIds.IMAGE_WORKBENCH]），点开应进画图工作台而不是聊天页。 */
+val Conversation.isImageTask: Boolean get() = providerId == ProviderIds.IMAGE_WORKBENCH

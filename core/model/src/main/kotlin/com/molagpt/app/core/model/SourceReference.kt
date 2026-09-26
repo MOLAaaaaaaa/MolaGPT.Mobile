@@ -42,4 +42,13 @@ data class Usage(
     val cacheWriteTokens: Int? = null,
     /** 多轮中有请求未上报完整用量时，不能据已知部分生成整单费用。 */
     val costComplete: Boolean = true,
-)
+    /**
+     * 最近一次请求的上下文大小。单轮请求为 null，由 [contextSize] 从 prompt + completion 得出；
+     * 多轮累加后其余字段是各轮之和，只有这一项保留最后一轮。
+     */
+    val contextTokens: Int? = null,
+) {
+    /** 这份用量对应的上下文有多大；没有上报 prompt 时为 null。 */
+    val contextSize: Int?
+        get() = contextTokens ?: promptTokens?.let { it + (completionTokens ?: 0) }
+}

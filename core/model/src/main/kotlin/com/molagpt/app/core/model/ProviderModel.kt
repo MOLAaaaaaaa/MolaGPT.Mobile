@@ -32,6 +32,11 @@ data class ProviderModel(
     /** BYOK: 覆盖该模型请求体顶层字段（type: string|number|boolean|json）。 */
     val customBody: List<CustomBodyParam> = emptyList(),
     /**
+     * BYOK: 上下文窗口（token）。用户填写或服务商 `/models` 声明的值；null 时由
+     * [ModelContextWindows] 按模型 ID 推断。决定何时自动压缩上下文。
+     */
+    val contextWindow: Int? = null,
+    /**
      * MolaGPT 点数额度/风控暂时挡住了这个模型。模型仍留在列表里置灰不可选（与 Web 一致），
      * 不从列表移除：点数是全站共享的，耗尽时所有计费模型都会被挡，按可用性硬过滤
      * 会把整个模型选择器清空。BYOK 模型恒为 false。
@@ -39,10 +44,25 @@ data class ProviderModel(
     val quotaBlocked: Boolean = false,
     /** [quotaBlocked] 时展示给用户的原因，直接用服务端 `status.php` 的 message。 */
     val quotaMessage: String? = null,
+    /**
+     * 服务端关了游客聊天、当前又没登录：模型置灰，点发送直接去登录，
+     * 不让消息先落库再吃一个 403。
+     */
+    val loginRequired: Boolean = false,
     /** 点数档位符号：`""`=免费，`"$"`..`"$$$$"`，null=未定价或不适用（BYOK）。 */
     val creditSymbol: String? = null,
+    /** 峰谷计价模型当前所处时段：`peak` / `off_peak`；平价模型为 null。档位已是当前时段的。 */
+    val pricingPeriod: String? = null,
     val pricing: ModelPricing? = null,
-)
+) {
+    /** 「峰时」/「谷时」，平价模型为 null。 */
+    val pricingPeriodLabel: String?
+        get() = when (pricingPeriod) {
+            "peak" -> "峰时"
+            "off_peak" -> "谷时"
+            else -> null
+        }
+}
 
 /** 用户自定义请求体覆写项。[type] ∈ string|number|boolean|json，决定 [value] 如何解析成 JSON 值。 */
 @Serializable
@@ -78,4 +98,10 @@ enum class ProviderKind {
 
 object ProviderIds {
     const val MOLAGPT = "molagpt"
+
+    /**
+     * 画图任务在会话表里的占位来源。任务借会话行进侧边栏（标题、置顶、排序、搜索都复用），
+     * 但没有消息，不走聊天、同步、记忆和回溯；打开时改道画图工作台。
+     */
+    const val IMAGE_WORKBENCH = "image-workbench"
 }

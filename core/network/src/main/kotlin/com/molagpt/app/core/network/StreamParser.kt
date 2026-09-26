@@ -268,6 +268,8 @@ internal fun Usage?.accumulate(next: Usage?): Usage? {
         cacheWriteTokens = add(cacheWriteTokens, next.cacheWriteTokens),
         costComplete = costComplete && next.costComplete && promptTokens != null && completionTokens != null &&
             next.promptTokens != null && next.completionTokens != null,
+        // 上下文大小不是求和：最后一轮请求已经包含前面各轮的全部内容。
+        contextTokens = next.contextSize ?: contextSize,
     )
 }
 

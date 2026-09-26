@@ -92,8 +92,26 @@ class ByokModelApi(private val http: MolaHttp) {
                 providerKind = ProviderKind.BYOK,
                 thinkingConfig = thinkingConfig,
                 pricing = com.molagpt.app.core.model.readEndpointPricing(obj),
+                contextWindow = parseContextWindow(obj),
             )
         }.sortedWith(compareByDescending<ProviderModel> { it.supportsToolCalling }.thenBy { it.id })
+    }
+
+    /**
+     * 服务商声明的上下文窗口。各家字段名不同：OpenRouter/Together 用 `context_length`
+     * （OpenRouter 另有 `top_provider.context_length`），Groq 用 `context_window`，
+     * vLLM 用 `max_model_len`，Anthropic 用 `max_input_tokens`，Gemini 用 `inputTokenLimit`。
+     * 没有声明返回 null，交给模型 ID 推断。
+     */
+    private fun parseContextWindow(obj: JsonObject): Int? {
+        fun intOf(node: JsonObject?, key: String): Int? =
+            (node?.get(key) as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+                ?.toDoubleOrNull()
+                ?.toInt()
+                ?.takeIf { it > 0 }
+        val keys = listOf("context_length", "context_window", "max_context_length", "max_model_len", "max_input_tokens", "inputTokenLimit")
+        keys.forEach { key -> intOf(obj, key)?.let { return it } }
+        return intOf(obj["top_provider"] as? JsonObject, "context_length")
     }
 
     /** 解析 OpenRouter 等返回的 supported_parameters 数组；无该字段返回 null（表示未知，非「不支持」）。 */
@@ -144,6 +162,7 @@ class ByokModelApi(private val http: MolaHttp) {
                 providerKind = ProviderKind.BYOK,
                 thinkingConfig = thinkingConfig,
                 pricing = com.molagpt.app.core.model.readEndpointPricing(obj),
+                contextWindow = parseContextWindow(obj),
             )
         }
     }
@@ -183,6 +202,7 @@ class ByokModelApi(private val http: MolaHttp) {
                 providerKind = ProviderKind.BYOK,
                 thinkingConfig = thinkingConfig,
                 pricing = com.molagpt.app.core.model.readEndpointPricing(obj),
+                contextWindow = parseContextWindow(obj),
             )
         }
     }

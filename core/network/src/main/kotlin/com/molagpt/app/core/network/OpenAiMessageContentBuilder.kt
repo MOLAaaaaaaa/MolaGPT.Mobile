@@ -35,6 +35,7 @@ object OpenAiMessageContentBuilder {
         }
         val text = message.plainText()
         val images = AttachmentParts.orderedImages(message)
+        val omitted = AttachmentParts.imagesAsText(message)
         // OpenAI 的 file_data 只接受 data URL，远程 URL 形态的 PDF 在这里发不出去。
         val files = if (includeFileParts) {
             AttachmentParts.binaryDocuments(message)
@@ -56,11 +57,11 @@ object OpenAiMessageContentBuilder {
                 // 每张图都消耗一个序号，不论这次是否真的发得出去——序号必须与
                 // AttachmentParts.orderedImages 的下标严格对应，view_image 才能按 N 取到正确的图。
                 val n = imageOrdinal.incrementAndGet()
-                if (replaceImagesWithText || img.unavailable) {
+                if (replaceImagesWithText || img.unavailable || omitted) {
                     add(
                         buildJsonObject {
                             put("type", "text")
-                            put("text", AttachmentParts.imageLabel(n, img))
+                            put("text", AttachmentParts.imageLabel(n, img, omitted = omitted && !replaceImagesWithText))
                         },
                     )
                 } else {
