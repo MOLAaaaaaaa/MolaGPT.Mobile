@@ -440,6 +440,7 @@ private fun ConfigSection(
     var purpose by remember(provider.id) { mutableStateOf(provider.purpose) }
     var imageFormat by remember(provider.id) { mutableStateOf(provider.imageFormat) }
     var baseUrl by remember(provider.id) { mutableStateOf(provider.baseUrl) }
+    var httpsEnabled by remember(provider.id) { mutableStateOf(!provider.baseUrl.startsWith("http://", ignoreCase = true)) }
     var apiKey by remember(provider.id) { mutableStateOf(provider.apiKey.orEmpty()) }
     var chatPath by remember(provider.id) { mutableStateOf(provider.chatPath) }
     var modelsPath by remember(provider.id) { mutableStateOf(provider.modelsPath) }
@@ -584,8 +585,24 @@ private fun ConfigSection(
             label = { Text("显示名称") }, singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        ToggleRow(label = "使用 HTTPS 传输", checked = httpsEnabled, onChange = { enabled ->
+            httpsEnabled = enabled
+            baseUrl = when {
+                baseUrl.startsWith("https://", ignoreCase = true) ->
+                    (if (enabled) "https://" else "http://") + baseUrl.substring(8)
+                baseUrl.startsWith("http://", ignoreCase = true) ->
+                    (if (enabled) "https://" else "http://") + baseUrl.substring(7)
+                else -> baseUrl
+            }
+            reportDraft()
+        })
         OutlinedTextField(
-            value = baseUrl, onValueChange = { baseUrl = it; reportDraft() },
+            value = baseUrl, onValueChange = {
+                baseUrl = it
+                if (it.startsWith("http://", ignoreCase = true)) httpsEnabled = false
+                if (it.startsWith("https://", ignoreCase = true)) httpsEnabled = true
+                reportDraft()
+            },
             label = { Text("API 地址 (Base URL)") }, singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
