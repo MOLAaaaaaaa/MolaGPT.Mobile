@@ -1,8 +1,18 @@
 # MolaGPT Mobile
 
-MolaGPT Mobile 是 [MolaGPT](https://chatgpt.wljay.cn) 的原生 Android 客户端，使用 Kotlin 与 Jetpack Compose 构建。除了连接 MolaGPT 账户，也支持接入 OpenAI 兼容、OpenAI Responses、Anthropic 和 Gemini 等自定义模型服务，并在移动端管理对话、工具、记忆、角色、世界书和图像工作台，还可以远程接管桌面端 Agent 会话。
+<p align="left">
+  <a href="https://chatgpt.wljay.cn/v2">MolaGPT Web</a>
+  ·
+  <a href="https://linux.do/">LINUX DO 论坛</a>
+  ·
+  <a href="https://github.com/MOLAaaaaaaa/MolaGPT.Mobile/releases">下载</a>
+  ·
+  <a href="https://github.com/MOLAaaaaaaa/MolaGPT.Desktop">MolaGPT Mobile</a>
+  ·
+  <a href="./LICENSE">License</a>
+</p>
 
-安装包可在 [Releases](https://github.com/MOLAaaaaaaa/MolaGPT.Mobile/releases) 下载，支持 Android 6.0 及以上的 arm64 设备。
+MolaGPT Mobile 是 [MolaGPT](https://chatgpt.wljay.cn/v2) 的原生 Android 客户端，使用 Kotlin 与 Jetpack Compose 构建。除了连接 MolaGPT 账户，也支持接入 OpenAI 兼容、OpenAI Responses、Anthropic 和 Gemini 等自定义模型服务，并在移动端管理对话、工具、记忆、角色、世界书和图像工作台，还可以远程接管桌面端 Agent 会话。
 
 ## 截图
 
