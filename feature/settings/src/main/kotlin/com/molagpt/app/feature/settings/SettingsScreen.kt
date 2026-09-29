@@ -177,14 +177,14 @@ fun SettingsScreen(
                         label = "可视化回答",
                         checked = s.visualAnswersEnabled,
                         onChange = viewModel::setVisualAnswersEnabled,
-                        subtitle = "自定义模型可用函数图像、图表、表格和网页作答",
+                        subtitle = "BYOK 模型可利用函数图像、图表、表格和网页辅助回答",
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
                     ToggleRow(
                         label = "网页以卡片显示",
                         checked = s.htmlAsCard,
                         onChange = viewModel::setHtmlAsCard,
-                        subtitle = "关闭后显示为代码，仍可点「运行」",
+                        subtitle = "关闭后 HTML 内容默认显示为代码，仍可本地运行",
                     )
                 }
             }

@@ -105,11 +105,26 @@ internal fun DataTableView(spec: DataTableSpec, modifier: Modifier = Modifier) {
     val rows = view.drop(current * spec.pageSize).take(spec.pageSize)
 
     val count = if (needle.isNotEmpty()) "${view.size} / ${spec.rows.size} 行" else "${spec.rows.size} 行"
+    val widths = remember(spec) { columnWidths(spec) }
     VisualFrame(
         title = spec.title?.takeIf { it.isNotBlank() } ?: "表格",
         meta = count,
         imageName = "表格",
         modifier = modifier,
+        // 图片里是当前这一页的所有列：不固定首列、不滑动，按各列估算宽度铺开。
+        wideCapture = WideCapture(widths.fold(0.dp) { acc, w -> acc + w } + 2.dp) {
+            TableBody(spec, widths, rows, "", sortColumn, descending, palette, interactive = false) {}
+            if (pageCount > 1) {
+                Text(
+                    text = "第 ${current + 1} / $pageCount 页",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = palette.muted,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            } else {
+                Spacer(Modifier.height(6.dp))
+            }
+        },
         menu = listOf(
             VisualMenuItem("复制表格") {
                 clipboard.setText(AnnotatedString(tsv(spec, view)))
@@ -145,7 +160,7 @@ internal fun DataTableView(spec: DataTableSpec, modifier: Modifier = Modifier) {
                 .heightIn(min = with(LocalDensity.current) { bodyMin.toDp() })
                 .onSizeChanged { if (it.height > bodyMin) bodyMin = it.height },
         ) {
-            TableBody(spec, rows, needle, sortColumn, descending, palette) { column ->
+            TableBody(spec, widths, rows, needle, sortColumn, descending, palette) { column ->
                 // 升序、降序、再回到模型写的顺序。
                 when {
                     sortColumn != column -> {
@@ -218,20 +233,29 @@ private fun SearchField(query: String, palette: VisualPalette, onChange: (String
 @Composable
 private fun TableBody(
     spec: DataTableSpec,
+    widths: List<Dp>,
     rows: List<List<TableCell>>,
     needle: String,
     sortColumn: Int,
     descending: Boolean,
     palette: VisualPalette,
+    interactive: Boolean = true,
     onSort: (Int) -> Unit,
 ) {
-    val widths = remember(spec) { columnWidths(spec) }
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val available = maxWidth - 2.dp
         val total = widths.fold(0.dp) { acc, w -> acc + w }
         // 放得下就按比例撑满；放不下且列够多时固定首列、其余横向滑动。
-        val fitted = if (total < available) widths.map { it * (available / total) } else widths
         val pin = total > available && spec.columns.size >= 3
+        val fitted = when {
+            total < available -> widths.map { it * (available / total) }
+            pin -> {
+                // 固定的首列最多占四成宽（文字换行），其余列才有地方滑；其余列本就放得下时首列拿走剩下的全部。
+                val rest = total - widths[0]
+                listOf(minOf(widths[0], maxOf(available * 0.4f, available - rest))) + widths.drop(1)
+            }
+            else -> widths
+        }
         val scroll = rememberScrollState()
         Column(modifier = Modifier.fillMaxWidth()) {
             TableRow(
@@ -241,7 +265,7 @@ private fun TableBody(
                 header = true,
                 palette = palette,
             ) { c ->
-                HeaderCell(spec.columns[c], sortColumn == c, descending, palette) { onSort(c) }
+                HeaderCell(spec.columns[c], sortColumn == c, descending, palette, interactive) { onSort(c) }
             }
             if (rows.isEmpty()) {
                 Text(
@@ -288,12 +312,19 @@ private fun TableRow(
 }
 
 @Composable
-private fun HeaderCell(column: TableColumn, sorted: Boolean, descending: Boolean, palette: VisualPalette, onClick: () -> Unit) {
+private fun HeaderCell(
+    column: TableColumn,
+    sorted: Boolean,
+    descending: Boolean,
+    palette: VisualPalette,
+    interactive: Boolean,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .fillMaxHeight()
-            .clickable(onClick = onClick)
+            .clickable(enabled = interactive, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 9.dp),
         horizontalArrangement = when (column.align) {
             TableAlign.END -> Arrangement.End

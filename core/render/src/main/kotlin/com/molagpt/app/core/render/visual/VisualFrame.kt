@@ -1,5 +1,6 @@
 package com.molagpt.app.core.render.visual
 
+import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,13 +35,25 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.ceil
 
 class VisualMenuItem(val label: String, val onClick: () -> Unit)
+
+/**
+ * 比外框宽、在框里横向滑动的内容（宽表格）导出图片时的完整版本：按 [width] 在屏幕外
+ * 重排一遍再录制。屏幕上那一层只画了看得见的一截，直接录会把右边裁掉。
+ */
+class WideCapture(val width: Dp, val content: @Composable ColumnScope.() -> Unit)
 
 /**
  * 内嵌组件的外框：标题、右上角的全屏与更多菜单，内容放在下面。
@@ -57,6 +70,7 @@ fun VisualFrame(
     onFullscreen: (() -> Unit)? = null,
     menu: List<VisualMenuItem> = emptyList(),
     capture: Boolean = true,
+    wideCapture: WideCapture? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val palette = rememberVisualPalette()
@@ -65,20 +79,39 @@ fun VisualFrame(
     val layer = rememberGraphicsLayer()
     val shape = RoundedCornerShape(12.dp)
     var menuOpen by remember { mutableStateOf(false) }
+    val wideLayer = rememberGraphicsLayer()
+    // 非空时在屏幕外排一份完整宽度的内容，录好就完成它。只在导出的那一两帧存在。
+    var wideRequest by remember { mutableStateOf<CompletableDeferred<Unit>?>(null) }
+
+    suspend fun snapshot(): Bitmap {
+        if (wideCapture != null) {
+            val ready = CompletableDeferred<Unit>()
+            wideRequest = ready
+            try {
+                if (withTimeoutOrNull(1_000) { ready.await() } != null) {
+                    // 特别宽的表可能超出位图上限，那就退回只存看得见的部分。
+                    runCatching { wideLayer.toImageBitmap().asAndroidBitmap() }.getOrNull()?.let { return it }
+                }
+            } finally {
+                wideRequest = null
+            }
+        }
+        return layer.toImageBitmap().asAndroidBitmap()
+    }
 
     val items = buildList {
         addAll(menu)
         if (capture) {
             add(VisualMenuItem("保存图片") {
                 scope.launch {
-                    val bitmap = layer.toImageBitmap().asAndroidBitmap()
+                    val bitmap = snapshot()
                     val ok = VisualExport.savePng(context, bitmap)
                     Toast.makeText(context, if (ok) "已保存到相册" else "保存失败", Toast.LENGTH_SHORT).show()
                 }
             })
             add(VisualMenuItem("分享图片") {
                 scope.launch {
-                    val bitmap = layer.toImageBitmap().asAndroidBitmap()
+                    val bitmap = snapshot()
                     runCatching { VisualExport.sharePng(context, bitmap, VisualExport.safeName(title, imageName)) }
                         .onFailure { Toast.makeText(context, "分享失败", Toast.LENGTH_SHORT).show() }
                 }
@@ -103,34 +136,30 @@ fun VisualFrame(
                 .background(palette.surface),
         ) {
             if (!title.isNullOrBlank() || !meta.isNullOrBlank() || tools > 0) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 14.dp, top = 11.dp, end = 8.dp + 40.dp * tools, bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = title?.takeIf { it.isNotBlank() }.orEmpty(),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = palette.text,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    if (!meta.isNullOrBlank()) {
-                        Text(
-                            text = meta,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = palette.muted,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(start = 8.dp),
-                        )
-                    }
-                }
+                FrameHeader(title, meta, palette, end = 8.dp + 40.dp * tools)
             }
             content()
+        }
+
+        val request = wideRequest
+        if (request != null && wideCapture != null) {
+            Column(
+                modifier = Modifier
+                    .layout { measurable, constraints ->
+                        val width = maxOf(constraints.maxWidth, ceil(wideCapture.width.toPx()).toInt())
+                        val placeable = measurable.measure(Constraints.fixedWidth(width))
+                        // 不占位：外框尺寸不变；这一份也从不画上屏幕，只录进 wideLayer。
+                        layout(0, 0) { placeable.place(0, 0) }
+                    }
+                    .drawWithContent {
+                        wideLayer.record { this@drawWithContent.drawContent() }
+                        request.complete(Unit)
+                    }
+                    .background(palette.surface),
+            ) {
+                if (!title.isNullOrBlank() || !meta.isNullOrBlank()) FrameHeader(title, meta, palette, end = 14.dp)
+                wideCapture.content(this)
+            }
         }
 
         if (tools > 0) {
@@ -169,6 +198,36 @@ fun VisualFrame(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun FrameHeader(title: String?, meta: String?, palette: VisualPalette, end: Dp) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 14.dp, top = 11.dp, end = end, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = title?.takeIf { it.isNotBlank() }.orEmpty(),
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = palette.text,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (!meta.isNullOrBlank()) {
+            Text(
+                text = meta,
+                style = MaterialTheme.typography.labelSmall,
+                color = palette.muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 8.dp),
+            )
         }
     }
 }

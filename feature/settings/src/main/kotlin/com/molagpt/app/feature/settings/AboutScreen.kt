@@ -142,7 +142,7 @@ fun AboutScreen(
             DependencyCard(dependencies = Dependencies)
 
             Text(
-                text = "「远程 Agent 控制」的桥接 / 中继架构与 CLI 控制协议设计参考了开源项目 Remodex（Apache-2.0，github.com/Emanuele-web04/remodex），本实现为独立编写，未直接复制其源码，在此一并致谢。",
+                text = "「远程 Agent 控制」的桥接 / 中继架构与 CLI 控制协议设计参考了开源项目 Remodex（Apache-2.0，github.com/Emanuele-web04/remodex），在此致谢。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 8.dp).padding(bottom = 8.dp),
@@ -307,7 +307,7 @@ private fun LicenseExpander() {
             ) {
                 LicenseGlyph(modifier = Modifier.size(19.dp))
                 Text(
-                    text = "查看完整开源许可证",
+                    text = "查看开源许可信息",
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f).padding(start = 10.dp),
@@ -371,12 +371,16 @@ private data class DependencyNotice(
 
 private val Dependencies = listOf(
     DependencyNotice("Jetpack Compose", "声明式 Android UI 框架", "Apache-2.0"),
+    DependencyNotice("AndroidX", "应用基础、导航、分页与加密存储", "Apache-2.0"),
+    DependencyNotice("Kotlin 标准库", "Kotlin 运行时支持", "Apache-2.0"),
     DependencyNotice("Kotlin Coroutines", "异步任务与流式响应处理", "Apache-2.0"),
     DependencyNotice("Room", "本地 SQLite 数据访问层", "Apache-2.0"),
     DependencyNotice("DataStore", "应用偏好与设置存储", "Apache-2.0"),
     DependencyNotice("Ktor + OkHttp", "网络请求、SSE 与代理接口通信", "Apache-2.0"),
     DependencyNotice("kotlinx.serialization", "JSON 序列化与同步数据解析", "Apache-2.0"),
     DependencyNotice("Coil", "图片加载与缓存", "Apache-2.0"),
+    DependencyNotice("AndroidSVG", "SVG 图标解析与渲染", "Apache-2.0"),
+    DependencyNotice("Lobe Icons", "模型服务图标", "MIT"),
     DependencyNotice("Telephoto", "图片缩放与手势预览", "Apache-2.0"),
     DependencyNotice("commonmark", "Markdown 解析与富文本渲染", "BSD-2-Clause"),
     DependencyNotice("JLaTeXMath", "数学公式原生 Canvas 渲染", "GPL-2.0"),
@@ -390,6 +394,8 @@ Apache License 2.0
 ================================================================
 适用组件：
   - Jetpack Compose
+  - AndroidX
+  - Kotlin 标准库
   - Kotlin Coroutines
   - Room
   - DataStore
@@ -397,6 +403,7 @@ Apache License 2.0
   - OkHttp
   - kotlinx.serialization
   - Coil
+  - AndroidSVG
   - Telephoto
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use

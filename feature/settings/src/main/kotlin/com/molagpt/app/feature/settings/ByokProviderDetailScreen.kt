@@ -78,6 +78,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -435,6 +436,7 @@ private fun ConfigSection(
     onTest: (ByokProvider) -> Unit,
     onDelete: () -> Unit,
 ) {
+    val uriHandler = LocalUriHandler.current
     var name by remember(provider.id) { mutableStateOf(provider.name) }
     var type by remember(provider.id) { mutableStateOf(provider.type) }
     var purpose by remember(provider.id) { mutableStateOf(provider.purpose) }
@@ -449,6 +451,14 @@ private fun ConfigSection(
     var keyVisible by remember { mutableStateOf(false) }
     var showAdvanced by remember { mutableStateOf(false) }
     var customHeaders by remember(provider.id) { mutableStateOf(provider.customHeaders) }
+    val keyUrl = when (baseUrl.trim().trimEnd('/').lowercase()) {
+        "https://api.deepseek.com" -> "https://platform.deepseek.com/api_keys"
+        "https://openrouter.ai/api" -> "https://openrouter.ai/"
+        "https://api.moonshot.cn" -> "https://platform.kimi.com/console/api-keys"
+        "https://dashscope.aliyuncs.com/compatible-mode" -> "https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key"
+        "https://open.bigmodel.cn/api/paas" -> "https://www.bigmodel.cn/apikey/platform"
+        else -> null
+    }
 
     val isImage = purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE
     // 图像用途兼容的服务类型：OpenAI 兼容（chat/completions 出图或 /v1/images/generations）与 Gemini（:generateContent 出图）。
@@ -660,6 +670,12 @@ private fun ConfigSection(
             },
             modifier = Modifier.fillMaxWidth(),
         )
+        if (keyUrl != null) {
+            TextButton(
+                onClick = { uriHandler.openUri(keyUrl) },
+                modifier = Modifier.align(Alignment.End),
+            ) { Text("获取 API Key") }
+        }
 
         TextButton(onClick = { showAdvanced = !showAdvanced }) {
             Text(if (showAdvanced) "收起高级设置" else "展开高级设置")

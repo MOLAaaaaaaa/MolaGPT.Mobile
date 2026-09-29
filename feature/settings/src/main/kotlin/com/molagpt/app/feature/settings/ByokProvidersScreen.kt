@@ -48,12 +48,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
+import coil3.compose.AsyncImage
 import java.util.UUID
 
 /**
@@ -340,20 +342,45 @@ private fun PresetRow(preset: ByokProvider, onClick: () -> Unit) {
 
 @Composable
 private fun ProviderAvatar(provider: ByokProvider) {
-    val color = protocolColor(provider.type)
+    val icon = when (provider.baseUrl.trim().trimEnd('/').lowercase()) {
+        "https://openrouter.ai/api" -> R.raw.provider_openrouter
+        "https://api.openai.com" -> R.raw.provider_openai
+        "https://api.deepseek.com" -> R.raw.provider_deepseek
+        "https://api.moonshot.cn" -> R.raw.provider_kimi
+        "https://api.siliconflow.cn" -> R.raw.provider_siliconflow
+        "https://dashscope.aliyuncs.com/compatible-mode" -> R.raw.provider_bailian
+        "https://open.bigmodel.cn/api/paas" -> R.raw.provider_zhipu
+        "https://api.groq.com/openai" -> R.raw.provider_groq
+        "https://api.x.ai" -> R.raw.provider_xai
+        "https://api.together.xyz" -> R.raw.provider_together
+        "https://api.anthropic.com" -> R.raw.provider_anthropic
+        "https://generativelanguage.googleapis.com/v1beta" -> R.raw.provider_gemini
+        else -> null
+    }
     Box(
         modifier = Modifier
             .size(38.dp)
             .clip(RoundedCornerShape(11.dp))
-            .background(color),
+            .background(if (icon == null) protocolColor(provider.type) else Color(0xFF1C2030)),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            provider.name.firstOrNull()?.uppercase() ?: "?",
-            color = Color.White,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-        )
+        if (icon != null) {
+            val monochrome = icon == R.raw.provider_openai || icon == R.raw.provider_groq ||
+                icon == R.raw.provider_xai || icon == R.raw.provider_anthropic
+            AsyncImage(
+                model = icon,
+                contentDescription = null,
+                modifier = Modifier.size(25.dp),
+                colorFilter = if (monochrome) ColorFilter.tint(Color.White) else null,
+            )
+        } else {
+            Text(
+                provider.name.firstOrNull()?.uppercase() ?: "?",
+                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
 }
 

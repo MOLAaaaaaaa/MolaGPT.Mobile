@@ -47,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -194,6 +195,7 @@ private fun SearchServiceCard(
     loadKey: (String) -> String,
     onSave: (provider: String, apiKey: String, maxResults: Int) -> Unit,
 ) {
+    val uriHandler = LocalUriHandler.current
     // 以已保存值 为 key：设置变化后状态同步复位，脏态消失。
     var searchProvider by rememberSaveable(provider) { mutableStateOf(provider) }
     var searchKey by rememberSaveable(searchProvider, provider) { mutableStateOf(loadKey(searchProvider)) }
@@ -240,6 +242,17 @@ private fun SearchServiceCard(
                     label = { Text("${selected.displayName} API Key") },
                     modifier = Modifier.fillMaxWidth(), singleLine = true,
                     visualTransformation = PasswordVisualTransformation())
+                val keyUrl = when (selected) {
+                    WebSearchProvider.EXA -> "https://dashboard.exa.ai/home"
+                    WebSearchProvider.TAVILY -> "https://app.tavily.com/home"
+                    else -> null
+                }
+                if (keyUrl != null) {
+                    TextButton(
+                        onClick = { uriHandler.openUri(keyUrl) },
+                        modifier = Modifier.align(Alignment.End),
+                    ) { Text("获取 API Key") }
+                }
             }
             OutlinedTextField(value = searchMax, onValueChange = { v -> searchMax = v.filter { it.isDigit() }.take(2) },
                 label = { Text("结果数 (1-10)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
