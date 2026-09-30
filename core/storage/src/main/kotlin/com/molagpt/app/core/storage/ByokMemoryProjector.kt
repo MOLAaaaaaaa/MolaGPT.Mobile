@@ -34,20 +34,24 @@ object ByokMemoryProjector {
     /**
      * 设备直接给出的画像字段。这几项不经过模型，因此没有被注入内容污染的可能，
      * 也不需要用户维护。
+     *
+     * 只给日期，不给到分钟：这个块在 system 消息里、整段历史之前，每轮重新计算，
+     * 分钟一变就会让服务商的前缀缓存整段失效。实测跨分钟发出的轮次全部零命中，
+     * 同一分钟内中位数 78%。与角色提示词里 `{{time}}` 的规则相同。
      */
     data class DeviceProfile(
         val language: String?,
         val timezone: String?,
-        val currentTime: String?,
+        val currentDate: String?,
     ) {
         companion object {
             fun current(nowMillis: Long = System.currentTimeMillis()): DeviceProfile {
                 val tz = TimeZone.getDefault()
-                val formatter = SimpleDateFormat("EEE yy-MM-dd HH:mm", Locale.US).apply { timeZone = tz }
+                val formatter = SimpleDateFormat("EEE yy-MM-dd", Locale.US).apply { timeZone = tz }
                 return DeviceProfile(
                     language = Locale.getDefault().toLanguageTag().takeIf { it.isNotBlank() && it != "und" },
                     timezone = tz.id.takeIf { it.isNotBlank() },
-                    currentTime = formatter.format(Date(nowMillis)),
+                    currentDate = formatter.format(Date(nowMillis)),
                 )
             }
         }
@@ -142,7 +146,7 @@ object ByokMemoryProjector {
             }
             device.language?.let { add("preferred_language: $it") }
             device.timezone?.let { add("timezone: $it") }
-            device.currentTime?.let { add("current_time: $it") }
+            device.currentDate?.let { add("current_date: $it") }
         }
         if (lines.isEmpty()) return ""
         return "<user_profile>\n${lines.joinToString("\n")}\n</user_profile>"

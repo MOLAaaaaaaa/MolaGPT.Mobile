@@ -319,15 +319,18 @@ object ThinkingKinds {
     }
 
     /**
-     * Composer / 设置页实际使用的档位列表，按精确度从高到低：
-     * 模型上持久化的 [ThinkingConfig.effortLevels]（来自服务商能力表或用户覆写）→
+     * Composer / 设置页实际使用的档位列表，按强度从低到高排列。
+     * 配置优先级：模型上持久化的 [ThinkingConfig.effortLevels]（来自服务商能力表或用户覆写）→
      * 服务商方言表声明的档位 → 参数形状的通用档位。
      */
     fun resolveEffortLevels(config: ThinkingConfig, baseUrl: String = ""): List<String> {
         val custom = normalizeEffortLevels(config.effortLevels)
-        if (custom.isNotEmpty()) return custom
-        ReasoningDialects.forBaseUrl(baseUrl).effortLevels?.let { return it }
-        return effortLevelsFor(wireKind(config.kind, baseUrl))
+        val levels = custom.ifEmpty {
+            ReasoningDialects.forBaseUrl(baseUrl).effortLevels
+                ?: effortLevelsFor(wireKind(config.kind, baseUrl))
+        }
+        val order = effortLevelsFor(ThinkingParamKind.OPENAI_REASONING_EFFORT)
+        return levels.sortedBy { order.indexOf(it).takeIf { index -> index >= 0 } ?: order.size }
     }
 
     /** 清洗档位列表：去空白、小写、去重，保持用户输入顺序。 */

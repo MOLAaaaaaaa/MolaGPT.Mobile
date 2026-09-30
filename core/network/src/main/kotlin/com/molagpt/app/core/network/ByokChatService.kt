@@ -810,12 +810,13 @@ class ByokChatService(
             put("stream", stream)
             if (systemText != null) put("instructions", systemText)
             putJsonArray("input") { inputItems.forEach { add(it) } }
-            // Responses API 推理：reasoning:{effort}；关闭同样要显式发，与 chat/completions 一致。
+            // Responses API 推理：reasoning:{effort,summary}；关闭同样要显式发，与 chat/completions 一致。
             val thinkingOn = request.useThinking || isAlwaysOnThinking(provider, request.modelId)
             if (effectiveThinkingKind(provider, request.modelId) != ThinkingParamKind.NONE) {
                 if (thinkingOn) {
                     putJsonObject("reasoning") {
                         put("effort", request.reasoningEffort.ifBlank { ThinkingKinds.HIGH })
+                        put("summary", "auto")
                     }
                 } else {
                     addReasoningOff(provider, request.modelId)
@@ -1362,7 +1363,10 @@ class ByokChatService(
             messages.forEach { add(it) }
         }
         if (includeTools && request.enabledTools.hasByokTools) put("tools", toolDefinitions(provider, request))
-        addOpenAiThinking(provider, request.modelId, request.useThinking, request.reasoningEffort)
+        addOpenAiThinking(
+            provider, request.modelId, request.useThinking, request.reasoningEffort,
+            includeReasoningText = true,
+        )
         applyModelCustomBody(provider, request.modelId)
     }
 
@@ -1424,6 +1428,7 @@ class ByokChatService(
         modelId: String,
         requestedThinking: Boolean,
         reasoningEffort: String,
+        includeReasoningText: Boolean = false,
     ) {
         val kind = effectiveThinkingKind(provider, modelId)
         if (kind == ThinkingParamKind.NONE) return
@@ -1441,7 +1446,10 @@ class ByokChatService(
         when (kind) {
             ThinkingParamKind.OPENAI_REASONING_EFFORT -> {
                 if (ThinkingKinds.isAggregatingGateway(provider.baseUrl)) {
-                    putJsonObject("reasoning") { put("effort", effort) }
+                    putJsonObject("reasoning") {
+                        put("effort", effort)
+                        if (includeReasoningText) put("exclude", false)
+                    }
                 } else {
                     put("reasoning_effort", effort)
                 }
@@ -1464,6 +1472,15 @@ class ByokChatService(
                 }
             }
             else -> {}
+        }
+        if (includeReasoningText && ThinkingKinds.hostInferredKind(provider.baseUrl) == ThinkingParamKind.GEMINI) {
+            putJsonObject("extra_body") {
+                putJsonObject("google") {
+                    putJsonObject("thinking_config") {
+                        put("include_thoughts", true)
+                    }
+                }
+            }
         }
     }
 
@@ -2622,13 +2639,23 @@ class ByokChatService(
         put("temperature", request.temperature)
         put("stream", stream)
         putJsonArray("messages") {
-            messages.forEach { add(it) }
+            withAnthropicCacheBreakpoint(messages).forEach { add(it) }
         }
         val systemText = request.messages
             .filter { it.role == com.molagpt.app.core.model.Role.SYSTEM && !it.isRoleInjection }
             .joinToString("\n") { it.rawText.orEmpty() }
             .trim()
-        if (systemText.isNotBlank()) put("system", systemText)
+        // Anthropic 不自动缓存前缀，两个断点：system（连同它前面的工具定义）一个，
+        // 消息末尾一个，随请求前移，下一轮工具或下一轮对话从这里往前命中。
+        if (systemText.isNotBlank()) {
+            putJsonArray("system") {
+                addJsonObject {
+                    put("type", "text")
+                    put("text", systemText)
+                    put("cache_control", ANTHROPIC_EPHEMERAL)
+                }
+            }
+        }
         // Anthropic 推理：adaptive（Claude 3.7/4.x）/ budget_tokens（预算式），按 kind 分派。
         val kind = effectiveThinkingKind(provider, request.modelId)
         val useThinking = request.useThinking || isAlwaysOnThinking(provider, request.modelId)
@@ -2704,6 +2731,7 @@ class ByokChatService(
                 val effort = request.reasoningEffort.ifBlank { ThinkingKinds.MEDIUM }
                 putJsonObject("thinkingConfig") {
                     put("thinkingBudget", ThinkingKinds.budgetFor(kind, effort))
+                    put("includeThoughts", true)
                 }
             }
         })
@@ -2984,6 +3012,34 @@ internal fun buildAnthropicToolResultMessage(results: List<NativeToolResult>): J
             }
         }
     }
+}
+
+private val ANTHROPIC_EPHEMERAL = buildJsonObject { put("type", "ephemeral") }
+
+private val ANTHROPIC_CACHEABLE_BLOCKS = setOf("text", "image", "document", "tool_use", "tool_result")
+
+/**
+ * 在最后一条消息的最后一个可缓存块上打断点，返回新列表。
+ *
+ * 只能打在发出去的副本上：工具循环的消息会原样存进 wire history 供下一轮回放，
+ * 打在原件上断点会逐轮累积，超过 4 个即 400。空文本块和 thinking 块不接受断点。
+ */
+internal fun withAnthropicCacheBreakpoint(messages: List<JsonObject>): List<JsonObject> {
+    val last = messages.lastOrNull() ?: return messages
+    val content = last["content"] as? JsonArray ?: return messages
+    val index = content.indexOfLast { block ->
+        val obj = block as? JsonObject ?: return@indexOfLast false
+        val type = (obj["type"] as? JsonPrimitive)?.contentOrNull
+        type in ANTHROPIC_CACHEABLE_BLOCKS &&
+            (type != "text" || !(obj["text"] as? JsonPrimitive)?.contentOrNull.isNullOrBlank())
+    }
+    if (index < 0) return messages
+    val marked = JsonArray(
+        content.mapIndexed { i, block ->
+            if (i == index) JsonObject(block.jsonObject + ("cache_control" to ANTHROPIC_EPHEMERAL)) else block
+        },
+    )
+    return messages.dropLast(1) + JsonObject(last + ("content" to marked))
 }
 
 /** Gemini 3 要求 functionResponse.id 与 functionCall.id 对应；并行响应必须集中在一个 user content。 */

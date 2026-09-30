@@ -20,11 +20,12 @@ fun calculateCostUsd(usage: Usage?, pricing: ModelPricing?): Double? {
     if (pricing == null || !pricing.isValid || usage == null || !usage.costComplete) return null
     val prompt = usage.promptTokens?.takeIf { it >= 0 } ?: return null
     val completion = usage.completionTokens?.takeIf { it >= 0 } ?: return null
-    // 缓存写入尚未纳入计费；不能把不完整金额显示成整单费用。
-    if ((usage.cacheWriteTokens ?: 0) > 0) return null
     val cached = (usage.cachedTokens ?: 0).coerceIn(0, prompt)
-    return ((prompt - cached) * pricing.input + cached * (pricing.cacheRead ?: pricing.input) +
-        completion * pricing.output) / 1_000_000.0
+    val written = (usage.cacheWriteTokens ?: 0).coerceIn(0, prompt - cached)
+    // 缓存写入比普通输入贵（Anthropic 为 1.25 倍）；没有写入价就不能把不完整金额显示成整单费用。
+    val writePrice = if (written > 0) pricing.cacheWrite ?: return null else 0.0
+    return ((prompt - cached - written) * pricing.input + cached * (pricing.cacheRead ?: pricing.input) +
+        written * writePrice + completion * pricing.output) / 1_000_000.0
 }
 
 fun formatCost(usd: Double): String = when {
