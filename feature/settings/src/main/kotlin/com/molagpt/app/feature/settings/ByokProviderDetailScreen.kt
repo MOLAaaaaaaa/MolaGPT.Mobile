@@ -60,13 +60,13 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -184,11 +184,11 @@ fun ByokProviderDetailScreen(
         return p
     }
 
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text(provider?.name ?: "服务详情", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -217,7 +217,7 @@ fun ByokProviderDetailScreen(
             Box(Modifier.fillMaxSize().padding(inner), contentAlignment = Alignment.Center) {
                 Text("服务不存在或已删除", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            return@Scaffold
+            return@MolaScaffold
         }
         Column(
             modifier = Modifier

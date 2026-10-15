@@ -160,6 +160,7 @@ fun AssistantStreamingPlaceholder(modifier: Modifier = Modifier) {
 @Composable
 fun MessageActionBar(
     onCopy: () -> Unit,
+    onSelect: (() -> Unit)? = null,
     onRegenerate: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
     /** 长按「重新生成」可换模型重试（对齐 Web 的重试模型下拉）；为空则只保留普通重试。 */
@@ -170,6 +171,7 @@ fun MessageActionBar(
     var modelMenuOpen by remember { mutableStateOf(false) }
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         ActionChip("复制", onCopy)
+        if (onSelect != null) ActionChip("选择", onSelect)
         if (onEdit != null) ActionChip("编辑", onEdit)
         if (onRegenerate != null) {
             Box {

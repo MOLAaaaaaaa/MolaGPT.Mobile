@@ -1,6 +1,5 @@
 package com.molagpt.app.feature.chat
 
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.runtime.rememberUpdatedState
@@ -13,13 +12,20 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,8 +41,10 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.systemGestures
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -57,10 +65,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
@@ -80,11 +88,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -98,6 +112,8 @@ import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.render.MolaMotion
+import com.molagpt.app.core.render.MolaBottomEdge
 import com.molagpt.app.feature.chat.persona.PersonaPickerSheet
 import com.molagpt.app.feature.chat.persona.PersonaWelcome
 import com.molagpt.app.feature.file.CameraCapture
@@ -105,6 +121,7 @@ import com.molagpt.app.feature.file.ImagePreviewHost
 import com.molagpt.app.feature.file.LocalAnimatedVisibilityScope
 import com.molagpt.app.feature.file.LocalImagePreviewUrl
 import com.molagpt.app.feature.file.LocalSharedTransitionScope
+import kotlin.math.abs
 
 /**
  * 一次多选图片的上限。系统 Photo Picker 自身也有平台上限
@@ -143,6 +160,10 @@ fun ChatScreen(
     val appContext = LocalContext.current.applicationContext
     val htmlAsCardState = rememberUpdatedState(htmlAsCard)
     val visualHost = remember { ChatVisualHost(appContext, htmlAsCardState) }
+    val reader = remember { AssistantReaderState() }
+    val visualOverlayTransition = updateTransition(visualHost.overlay, label = "chatVisualOverlay")
+    val visualOverlayVisible = visualOverlayTransition.currentState != null ||
+        visualOverlayTransition.targetState != null
     visualHost.sessionId = state.sessionId
     val activePersona by viewModel.activePersona.collectAsStateWithLifecycle()
     val personas by viewModel.personas.collectAsStateWithLifecycle()
@@ -159,6 +180,12 @@ fun ChatScreen(
     var pendingCrossModel by remember { mutableStateOf<ProviderModel?>(null) }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
+    val textToolbar = LocalTextToolbar.current
+    val closeVisualOverlay = {
+        textToolbar.hide()
+        focusManager.clearFocus()
+        visualHost.close()
+    }
     val density = LocalDensity.current
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
     // 阵营做成徽章，副标题只留模型名：顶栏 title 区被汉堡和 3~4 个图标夹住，
@@ -290,17 +317,59 @@ fun ChatScreen(
         )
     }
 
+    val currentOnOpenDrawer by rememberUpdatedState(onOpenDrawer)
+    val systemGestureInsets = WindowInsets.systemGestures
+    val layoutDirection = LocalLayoutDirection.current
+    val drawerSwipeEnabled = !drawerOpen && !visualOverlayVisible && !reader.visible
+    val drawerSwipeModifier = Modifier.pointerInput(drawerSwipeEnabled, density, layoutDirection) {
+        if (!drawerSwipeEnabled) return@pointerInput
+        val minimumDeadZone = 32.dp.toPx()
+        val openDistance = 48.dp.toPx()
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val leftDeadZone = maxOf(minimumDeadZone, systemGestureInsets.getLeft(density, layoutDirection).toFloat())
+            val rightDeadZone = maxOf(minimumDeadZone, systemGestureInsets.getRight(density, layoutDirection).toFloat())
+            // 按下位置落在系统返回区域内时，放弃整次手势。
+            if (down.position.x <= leftDeadZone || down.position.x >= size.width - rightDeadZone) {
+                return@awaitEachGesture
+            }
+            var draggingRight = false
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (event.changes.size != 1 || change.isConsumed || !change.pressed) break
+                val movement = change.position - down.position
+                if (!draggingRight) {
+                    if (movement.getDistance() <= viewConfiguration.touchSlop) continue
+                    if (movement.x <= abs(movement.y)) break
+                    draggingRight = true
+                }
+                change.consume()
+                if (movement.x >= openDistance) {
+                    currentOnOpenDrawer()
+                    break
+                }
+            }
+        }
+    }
+
     // 图片预览宿主包在最外层（Scaffold 外），全屏 overlay 才能盖住顶栏和输入框。
     ImagePreviewHost(modifier = modifier.fillMaxSize()) {
         CompositionLocalProvider(LocalVisualHost provides visualHost) {
             Box(modifier = Modifier.fillMaxSize()) {
-                Scaffold(
-                    modifier = Modifier.fillMaxSize(),
+                MolaScaffold(
+                    modifier = Modifier.fillMaxSize().then(drawerSwipeModifier).then(
+                        if (visualOverlayVisible || reader.visible) Modifier.clearAndSetSemantics { } else Modifier,
+                    ),
                     contentWindowInsets = WindowInsets.systemBars.only(
                         WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
                     ),
                     topBar = {
-                        TopAppBar(
+                        MolaTopBar(
+                overlap = reader::listOverlap,
+                modifier = Modifier
+                    .graphicsLayer { alpha = reader.chromeAlpha() }
+                    .onGloballyPositioned { reader.chromeTop = it.positionInRoot().y + it.size.height },
                 title = {
                     Column {
                         Text(
@@ -545,6 +614,18 @@ fun ChatScreen(
             )
         },
         bottomBar = {
+          // 输入框浮在消息上方：背后一段软边缘铺到屏幕底，滚过手势条的正文渐隐而不是被色带切断。
+          // 全屏阅读打开时随之淡出、下沉。
+          Box(
+              Modifier
+                  .onGloballyPositioned { reader.chromeBottom = it.positionInRoot().y }
+                  .graphicsLayer {
+                      val a = reader.chromeAlpha()
+                      alpha = a
+                      translationY = (1f - a) * 24.dp.toPx()
+                  },
+          ) {
+            MolaBottomEdge(Modifier.matchParentSize())
             // 底栏内边距 = ime 与 navigationBars 的**并集**（取较大者），再用 windowInsetsPadding 一次性消费：
             //  - 无键盘：等于导航栏高度，输入框浮在导航栏上方；
             //  - 键盘弹出：ime 已含底部系统栏区域，union 取 ime，逐帧跟随键盘动画，零额外动画层。
@@ -599,8 +680,8 @@ fun ChatScreen(
                         onDismiss = viewModel::dismissReasoningMismatchHint,
                     )
                 }
-                HorizontalDivider()
                 Composer(
+                    glass = true,
                     enabled = state.inputEnabled && contextUsage?.manualCompacting != true,
                     isStreaming = state.isStreaming,
                     enterToSend = enterToSend,
@@ -673,20 +754,28 @@ fun ChatScreen(
                     },
                 )
             }
+          }
         },
     ) { inner ->
-        // 消息列表区域仅撑满 Scaffold 内容区（顶栏/底栏之间的区域），加上 inner 内边距。
-        Box(modifier = Modifier.fillMaxSize().padding(inner)) {
+        // 列表铺满整屏，从顶栏和输入框下方经过；让位的留白放在列表的 contentPadding 里。
+        Box(modifier = Modifier.fillMaxSize()) {
             if (!state.isLoadingHistory && state.messages.isEmpty()) {
                 PersonaWelcome(
                     activePersona = activePersona,
                     isByok = state.providerKind == ProviderKind.BYOK,
                     avatar = viewModel.personaAvatarFile(activePersona),
                     onOpenPersonaPicker = { personaSheetOpen = true },
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().padding(inner),
                 )
             } else {
                 MessageList(
+                    contentPadding = PaddingValues(
+                        start = 16.dp,
+                        end = 16.dp,
+                        top = inner.calculateTopPadding() + 12.dp,
+                        bottom = inner.calculateBottomPadding() + 16.dp,
+                    ),
+                    bottomOverlayPadding = inner.calculateBottomPadding(),
                     messages = state.messages,
                     spend = state.spend.takeIf { state.providerKind == ProviderKind.BYOK },
                     models = state.models,
@@ -701,6 +790,7 @@ fun ChatScreen(
                     compactions = state.compactions,
                     compacting = state.compacting,
                     onCancelCompaction = viewModel::cancelCompaction,
+                    reader = reader,
                 )
             }
             if (state.isLoadingHistory && state.messages.isEmpty()) {
@@ -711,37 +801,56 @@ fun ChatScreen(
             // 仅当前阵营依赖官方列表时显示顶栏进度，避免 BYOK 会话被无关刷新打扰。
             if (state.isModelRefreshing && state.providerKind == ProviderKind.MOLAGPT) {
                 LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .padding(top = inner.calculateTopPadding()),
                 )
             }
         }
     } // Scaffold content lambda
 
                 // ── 网页运行 / 组件全屏 overlay ──
-                // 与图片预览同一层：盖住顶栏和输入框。容器自己接住触摸，点空白处不会落到下面的列表上。
-                visualHost.overlay?.let { overlay ->
-                    // 在这里注册：比页面上其它返回处理更晚组合，返回键先关掉这一层。
-                    BackHandler { visualHost.close() }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.surface)
-                            .pointerInput(Unit) { detectTapGestures { } }
-                            .systemBarsPadding()
-                            .imePadding(),
-                    ) {
-                        when (overlay) {
-                            is VisualOverlay.Html -> HtmlRunner(
-                                source = overlay.request.source,
-                                title = overlay.request.title,
-                                fileName = overlay.request.fileName,
-                                originKey = overlay.originKey,
-                                onClose = visualHost::close,
-                            )
-                            is VisualOverlay.Fullscreen -> overlay.content(visualHost::close)
+                // 与图片预览同一层：盖住顶栏和输入框。空 pointerInput 阻挡触摸穿透，
+                // 不消费子控件的事件，让全屏正文仍能长按选字。
+                // 退场期间也接住返回键；AnimatedContent 保留旧内容直到动画完成。
+                BackHandler(
+                    enabled = visualOverlayVisible,
+                    onBack = closeVisualOverlay,
+                )
+                visualOverlayTransition.AnimatedContent(
+                    modifier = Modifier.fillMaxSize(),
+                    transitionSpec = {
+                        val enter = if (targetState == null) EnterTransition.None else
+                            fadeIn(MolaMotion.standard(180))
+                        val exit = if (initialState == null) ExitTransition.None else
+                            fadeOut(MolaMotion.standard(140))
+                        (enter togetherWith exit).using(null)
+                    },
+                ) { overlay ->
+                    if (overlay != null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.surface)
+                                .pointerInput(Unit) { }
+                                .systemBarsPadding()
+                                .imePadding(),
+                        ) {
+                            when (overlay) {
+                                is VisualOverlay.Html -> HtmlRunner(
+                                    source = overlay.request.source,
+                                    title = overlay.request.title,
+                                    fileName = overlay.request.fileName,
+                                    originKey = overlay.originKey,
+                                    onClose = closeVisualOverlay,
+                                )
+                                is VisualOverlay.Fullscreen -> overlay.content(closeVisualOverlay)
+                            }
                         }
                     }
                 }
+                AssistantReaderOverlay(reader)
             } // outer Box
         } // CompositionLocalProvider
     } // ImagePreviewHost

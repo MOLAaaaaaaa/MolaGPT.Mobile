@@ -99,6 +99,7 @@ object ViewModelFactories {
             personaRepository = container.personaRepository,
             lorebookRepository = container.lorebookRepository,
             byokMemoryRepository = container.byokMemoryRepository,
+            skillRepository = container.skillRepository,
             memoryConsolidatedFlow = container.memoryConsolidated,
             postProcessFailureFlow = container.postProcessFailures,
             syncEngine = container.syncEngine,

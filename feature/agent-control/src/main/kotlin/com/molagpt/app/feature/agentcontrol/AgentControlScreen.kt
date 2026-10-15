@@ -32,11 +32,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -217,12 +216,11 @@ private fun HubScaffold(
     onExit: () -> Unit,
     onNew: () -> Unit,
 ) {
-    Scaffold(
+    MolaScaffold(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+            MolaTopBar(
                 title = { Text("远程 Agent", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = {
                     IconButton(onClick = onExit) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
@@ -265,12 +263,11 @@ private fun SessionScaffold(
     enterToSend: Boolean,
 ) {
     val meta = state.meta
-    Scaffold(
+    MolaScaffold(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+            MolaTopBar(
                 title = {
                     Column {
                         Text(meta?.title?.ifBlank { "会话" } ?: "会话", maxLines = 1, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium)

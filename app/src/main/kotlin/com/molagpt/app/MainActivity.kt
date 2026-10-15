@@ -3,11 +3,13 @@ package com.molagpt.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -16,11 +18,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
-import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.nav.MolaNavHost
 import com.molagpt.app.ui.theme.MolaTheme
@@ -42,18 +43,20 @@ class MainActivity : ComponentActivity() {
             val settings by container.settingsFlow.collectAsStateWithLifecycle()
             val byokModelsReady by container.byokModelsReady.collectAsStateWithLifecycle()
             val themeMode = settings?.themeMode ?: "auto"
-            // App 主题可独立于系统（themeMode），据此同步系统状态栏/导航栏图标明暗，
-            // 否则暗色界面下仍是深色图标看不清。
+            // App 主题可独立于系统（themeMode）：系统栏图标明暗和三键导航的遮罩都按 App 主题来，
+            // 否则 App 深色、系统浅色时图标看不清，三键导航还会盖一条白色遮罩。
             val dark = when (themeMode) {
                 "light" -> false
                 "dark" -> true
                 else -> isSystemInDarkTheme()
             }
-            SideEffect {
-                val controller = WindowCompat.getInsetsController(window, window.decorView)
-                controller.isAppearanceLightStatusBars = !dark
-                controller.isAppearanceLightNavigationBars = !dark
+            DisposableEffect(dark) {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT) { dark },
+                    navigationBarStyle = SystemBarStyle.auto(LIGHT_NAV_SCRIM, DARK_NAV_SCRIM) { dark },
+                )
                 window.setBackgroundDrawable(ColorDrawable(if (dark) 0xFF121212.toInt() else 0xFFFFFFFF.toInt()))
+                onDispose {}
             }
             CompositionLocalProvider(LocalAppContainer provides container) {
                 MolaTheme(themeMode = themeMode) {
@@ -70,6 +73,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private companion object {
+        /** 三键导航的半透明遮罩，与 enableEdgeToEdge 默认值一致。 */
+        val LIGHT_NAV_SCRIM = Color.argb(0xE6, 0xFF, 0xFF, 0xFF)
+        val DARK_NAV_SCRIM = Color.argb(0x80, 0x1B, 0x1B, 0x1B)
     }
 
     /** singleTask：通知点击复用同一实例，新 intent 走这里。 */

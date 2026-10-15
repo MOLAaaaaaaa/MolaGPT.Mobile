@@ -5,14 +5,13 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.baselineprofile)
 }
 
 android {
     namespace = "com.molagpt.app"
-    compileSdk = 36
+    compileSdk = 37
 
     val releaseSigningFile = rootProject.file("signing/release.properties")
     val releaseSigning = Properties()
@@ -34,8 +33,8 @@ android {
         applicationId = "com.molagpt.app"
         minSdk = 23
         targetSdk = 36
-        versionCode = 27
-        versionName = "0.5.3"
+        versionCode = 28
+        versionName = "0.5.4"
         // 开发专用构建时间戳：注入 BuildConfig.BUILD_TIME，设置页底部展示。
         // configuration-cache 已关（见 gradle.properties），每次构建都会重新求值 → 时间会变，
         // 据此可确认装到机器上的是不是刚编译的新包。

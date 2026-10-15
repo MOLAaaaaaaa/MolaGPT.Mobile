@@ -30,9 +30,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,10 +65,10 @@ fun Base64ToolScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
 
     ImeDismissBackHandler()
 
-    Scaffold(
+    MolaScaffold(
         modifier = modifier,
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text("Base64 工具") },
                 navigationIcon = {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
@@ -79,9 +79,9 @@ fun Base64ToolScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
                 .verticalScroll(rememberScrollState())
+                .padding(inner)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {

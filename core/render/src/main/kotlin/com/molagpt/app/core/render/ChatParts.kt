@@ -36,6 +36,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -45,22 +48,30 @@ import androidx.compose.ui.unit.dp
  * 两边任何一处要改，改这里。
  */
 
-/** 输入区外壳：圆角描边卡片，无阴影。 */
+private val ComposerCorner = 22.dp
+
+/**
+ * 输入区外壳：圆角描边卡片，无阴影。
+ * [glass] 为 true 时底由 [molaGlass] 提供（浮在滚动内容上方的页面用），自身不再画底和描边。
+ */
 @Composable
 fun ComposerSurface(
     modifier: Modifier = Modifier,
+    glass: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(ComposerCorner)
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(22.dp),
-        color = colorScheme.surface,
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .then(if (glass) Modifier.molaGlass(shape) else Modifier),
+        shape = shape,
+        color = if (glass) Color.Transparent else colorScheme.surface,
         tonalElevation = 0.dp,
         shadowElevation = 0.dp,
-        border = BorderStroke(1.dp, colorScheme.outline.copy(alpha = 0.34f)),
+        border = if (glass) null else BorderStroke(1.dp, colorScheme.outline.copy(alpha = 0.34f)),
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -114,6 +125,9 @@ fun ToolChip(
             .clip(shape)
             .background(containerColor)
             .border(1.dp, borderColor, shape)
+            .then(if (role == Role.Checkbox) Modifier.semantics {
+                toggleableState = ToggleableState(checked)
+            } else Modifier)
             .clickable(
                 enabled = enabled,
                 role = role,
@@ -237,7 +251,7 @@ fun ActionChip(
         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 1f else 0.4f),
         modifier = modifier
             .clip(RoundedCornerShape(50))
-            .combinedClickable(enabled = enabled, onClick = onClick, onLongClick = onLongClick)
+            .combinedClickable(enabled = enabled, role = Role.Button, onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 10.dp, vertical = 5.dp),
     )
 }

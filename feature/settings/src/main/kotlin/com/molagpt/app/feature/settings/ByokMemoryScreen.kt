@@ -44,13 +44,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -123,11 +123,11 @@ fun ByokMemoryScreen(
 
     ImeDismissBackHandler()
 
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text("本地记忆") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -141,8 +141,8 @@ fun ByokMemoryScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
                 .verticalScroll(rememberScrollState())
+                .padding(inner)
                 .padding(horizontal = 14.dp)
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(4.dp),

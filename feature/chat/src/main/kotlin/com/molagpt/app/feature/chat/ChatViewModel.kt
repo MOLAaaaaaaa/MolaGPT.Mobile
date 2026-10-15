@@ -33,6 +33,8 @@ import com.molagpt.app.core.model.SystemPromptComposer
 import com.molagpt.app.core.model.VisualAnswerPrompt
 import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.core.model.titleFallback
+import com.molagpt.app.core.model.enabledSkills
+import com.molagpt.app.core.model.skillCatalogForPrompt
 import com.molagpt.app.core.network.resolveOpeningModelSelection
 import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.core.storage.ByokMemoryConsolidator
@@ -46,6 +48,7 @@ import com.molagpt.app.core.storage.PersonaAvatarStore
 import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.RetryAttempts
 import com.molagpt.app.core.storage.SessionRepository
+import com.molagpt.app.core.storage.SkillRepository
 import com.molagpt.app.core.storage.SyncEngine
 import com.molagpt.app.feature.file.AttachmentEncoder
 import com.molagpt.app.feature.file.AttachmentStore
@@ -83,6 +86,7 @@ class ChatViewModel(
     private val lorebookRepository: LorebookRepository,
     /** BYOK 本地记忆。仅 BYOK 会话使用；MolaGPT 会话的记忆由服务端 Tracks 负责。 */
     private val byokMemoryRepository: ByokMemoryRepository,
+    private val skillRepository: SkillRepository,
     /** 记忆整理完成的通知。application scope 发出，页面存活时才展示。 */
     private val memoryConsolidatedFlow: SharedFlow<Pair<String, ByokMemoryConsolidator.Result>>,
     /** 后处理规则跑挂了的提示。规则是用户写的，出错要说出来，但不该看着像模型失败。 */
@@ -1403,7 +1407,11 @@ class ChatViewModel(
                 it.id == modelId && it.providerKind == _conversationProviderKind.value
             }
             val modelDisplayName = providerModel?.displayName ?: modelId
-            val requestTools = resolveRequestTools(providerModel)
+            val settings = settingsFlow.value ?: AppSettings()
+            val skills = if (_conversationProviderKind.value == ProviderKind.BYOK && providerModel?.supportsToolCalling == true) {
+                enabledSkills(skillRepository.skills.value, settings.disabledSkillIds)
+            } else emptyList()
+            val requestTools = resolveRequestTools(providerModel).copy(skills = skills.isNotEmpty())
             // 角色注入：仅 BYOK 模型，把当前角色的 system prompt（插值后）作为首条 system 消息 prepend。
             // 官方账号模型不注入（服务端已有系统提示 + 个性化记忆）。该 system 消息不落库，仅用于本次请求。
             val effectiveKind = providerModel?.providerKind ?: _conversationProviderKind.value
@@ -1444,6 +1452,7 @@ class ChatViewModel(
                 val sysText = listOfNotNull(
                     personaText?.takeIf { it.isNotBlank() },
                     buildMemoryContext(requestTools),
+                    skillCatalogForPrompt(skills),
                     VisualAnswerPrompt.TEXT.takeIf { visualAnswers },
                 ).joinToString("\n\n").takeIf { it.isNotBlank() }
                 val body = applyRolePlan(requestHistory, role?.plan)
@@ -1481,6 +1490,7 @@ class ChatViewModel(
                 enabledTools = requestTools,
                 rolePlay = effectiveKind == ProviderKind.BYOK && activePersona.value?.isRolePlay == true,
                 contextCheckpointId = coverage?.checkpointId,
+                availableSkills = skills,
             )
             backgroundStreams.start(request, assistantId, throttleMs, priorAttempts, generateTitleOnFinish)
             // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，

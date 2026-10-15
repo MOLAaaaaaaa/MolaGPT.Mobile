@@ -22,6 +22,8 @@ import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
 import com.molagpt.app.core.model.Role
+import com.molagpt.app.core.model.ThinkingKinds
+import com.molagpt.app.core.model.ThinkingParamKind
 import com.molagpt.app.core.model.normalizeMemoryKey
 import com.molagpt.app.core.storage.entity.ByokMemoryCandidateEntity
 import com.molagpt.app.core.storage.entity.ByokMemoryEntryEntity
@@ -33,6 +35,7 @@ import com.molagpt.app.core.storage.entity.MessageEntity
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.net.URI
 
 internal fun MessageEntity.toDomain(): ChatMessage {
     val meta = MessageJson.decodeMeta(metadataJson)
@@ -278,7 +281,44 @@ internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvi
         imageEditPath = imageEditPath,
         enabled = enabled,
         models = models.map {
-            it.copy(providerId = id, providerName = name, providerKind = ProviderKind.BYOK)
+            val model = it.copy(providerId = id, providerName = name, providerKind = ProviderKind.BYOK)
+            val current = model.thinkingConfig
+            val detected = if (
+                (type == ByokProviderType.GEMINI ||
+                    URI(baseUrl).host.equals("generativelanguage.googleapis.com", ignoreCase = true)) &&
+                    !ThinkingKinds.isAggregatingGateway(baseUrl) &&
+                    !(current?.kind == ThinkingParamKind.NONE && current.manualOverride)
+            ) {
+                ThinkingKinds.geminiConfigFor(model.id)?.takeIf { it.kind == ThinkingParamKind.GEMINI_LEVEL }
+            } else {
+                null
+            }
+            if (detected == null) return@map model
+
+            val levels = current?.effortLevels
+                ?.let(ThinkingKinds::normalizeEffortLevels)
+                ?.filter { it in detected.effortLevels }
+                .orEmpty()
+                .ifEmpty { detected.effortLevels }
+            val preferredDefault = current
+                ?.takeIf { it.manualOverride || it.kind == ThinkingParamKind.GEMINI_LEVEL }
+                ?.defaultEffort
+                ?.trim()
+                ?.lowercase()
+            val defaultEffort = preferredDefault?.takeIf { it in levels }
+                ?: detected.defaultEffort.takeIf { it in levels }
+                ?: levels.first()
+            model.copy(
+                supportsThinking = true,
+                supportsReasoningEffort = levels.isNotEmpty(),
+                thinkingConfig = detected.copy(
+                    effortLevels = levels,
+                    defaultEffort = defaultEffort,
+                    detectSource = current?.detectSource ?: detected.detectSource,
+                    manualOverride = current?.manualOverride == true,
+                    offIneffective = current?.offIneffective == true,
+                ),
+            )
         },
         customHeaders = customHeaders,
     )

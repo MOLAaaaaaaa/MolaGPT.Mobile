@@ -127,6 +127,8 @@ fun Composer(
     onOpenModelReasoningSettings: (() -> Unit)? = null,
     /** 发送键左侧的上下文用量环；没有时不占位。 */
     contextGauge: (@Composable () -> Unit)? = null,
+    /** 浮在消息列表上方时用玻璃底。 */
+    glass: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
@@ -175,7 +177,7 @@ fun Composer(
         }
     }
 
-    ComposerSurface(modifier = modifier) {
+    ComposerSurface(modifier = modifier, glass = glass) {
         if (isEditing) {
             Row(
                 modifier = Modifier

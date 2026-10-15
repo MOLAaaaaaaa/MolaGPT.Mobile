@@ -16,6 +16,7 @@ import com.molagpt.app.core.model.ImageGenerationConfig
 import com.molagpt.app.core.model.MemorySection
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ReasoningOff
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.StreamEvent
@@ -55,6 +56,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
+import java.net.URI
 import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -94,6 +96,9 @@ class ByokChatService(
      * 因此执行必须回调出去，不能在这里直接读库。
      */
     private val localToolHandler: ByokLocalToolHandler = ByokLocalToolHandler.NoOp,
+    private val skillReader: suspend (String, String, Int, String) -> String = { _, _, _, _ ->
+        "skill failed: Skill reader is unavailable."
+    },
     private val dispatchers: DispatcherProvider,
 ) {
     fun sendMessage(request: ChatRequest): Flow<StreamEvent> = flow {
@@ -255,7 +260,7 @@ class ByokChatService(
             ByokProviderType.OPENAI_COMPAT -> buildJsonObject {
                 put("model", modelId)
                 put("stream", false)
-                put("temperature", TITLE_TEMPERATURE)
+                if (!usesGeminiDefaultSampling(provider, modelId)) put("temperature", TITLE_TEMPERATURE)
                 putJsonArray("messages") {
                     addJsonObject {
                         put("role", "system")
@@ -370,7 +375,7 @@ class ByokChatService(
             ByokProviderType.OPENAI_COMPAT -> buildJsonObject {
                 put("model", modelId)
                 put("stream", false)
-                put("temperature", temperature)
+                if (!usesGeminiDefaultSampling(provider, modelId)) put("temperature", temperature)
                 putJsonArray("messages") {
                     addJsonObject {
                         put("role", "user")
@@ -1352,7 +1357,7 @@ class ByokChatService(
         includeTools: Boolean,
     ): JsonObject = buildJsonObject {
         put("model", request.modelId)
-        put("temperature", request.temperature)
+        if (!usesGeminiDefaultSampling(provider, request.modelId)) put("temperature", request.temperature)
         put("stream", stream)
         // OpenAI 兼容端点流式默认不返回 usage，必须显式要；不要它就没有 token 统计可展示。
         // usage 会单独放在 finish_reason 之后的 choices:[] chunk 里（StreamParser 有对应处理）。
@@ -1380,6 +1385,24 @@ class ByokChatService(
     private fun thinkingConfigOf(provider: ByokProvider, modelId: String): ThinkingConfig? =
         provider.models.firstOrNull { it.id == modelId }?.thinkingConfig
 
+    private fun usesGeminiThinkingLevel(modelId: String): Boolean =
+        ThinkingKinds.inferFromModelId(modelId) == ThinkingParamKind.GEMINI_LEVEL
+
+    private fun usesGeminiDefaultSampling(provider: ByokProvider, modelId: String): Boolean =
+        usesGeminiThinkingLevel(modelId) && (provider.type == ByokProviderType.GEMINI ||
+            URI(provider.baseUrl).host.equals("generativelanguage.googleapis.com", ignoreCase = true))
+
+    private fun geminiEffort(modelId: String, requested: String): String {
+        val config = ThinkingKinds.geminiConfigFor(modelId)
+        val effort = requested.ifBlank { config?.defaultEffort ?: ThinkingKinds.MEDIUM }
+        if (config == null || effort in config.effortLevels) return effort
+        return if (effort == ThinkingKinds.MINIMAL && ThinkingKinds.LOW in config.effortLevels) {
+            ThinkingKinds.LOW
+        } else {
+            config.defaultEffort
+        }
+    }
+
     /**
      * 有效推理 kind：模型显式配置（含 NONE=关闭）优先；否则按方言表的 host 形状→模型 ID 兜底。
      * 聚合网关下预算类通过 [ThinkingKinds.wireKind] 折算为 OPENAI_REASONING_EFFORT，
@@ -1389,7 +1412,12 @@ class ByokChatService(
         val raw = thinkingConfigOf(provider, modelId)?.kind
             ?: ThinkingKinds.hostInferredKind(provider.baseUrl)
             ?: ThinkingKinds.inferFromModelId(modelId)
-        return ThinkingKinds.wireKind(raw, provider.baseUrl)
+        val kind = if (raw == ThinkingParamKind.GEMINI && usesGeminiDefaultSampling(provider, modelId)) {
+            ThinkingParamKind.GEMINI_LEVEL
+        } else {
+            raw
+        }
+        return ThinkingKinds.wireKind(kind, provider.baseUrl)
     }
 
     /**
@@ -1398,7 +1426,9 @@ class ByokChatService(
      */
     private fun isAlwaysOnThinking(provider: ByokProvider, modelId: String): Boolean {
         val cfg = thinkingConfigOf(provider, modelId)
-            ?: return ThinkingKinds.isKimiK3(modelId)
+        if (usesGeminiDefaultSampling(provider, modelId) && cfg?.kind != ThinkingParamKind.NONE
+        ) return true
+        if (cfg == null) return ThinkingKinds.isKimiK3(modelId)
         return ThinkingKinds.isAlwaysOn(cfg, provider.baseUrl) || ThinkingKinds.isKimiK3(modelId)
     }
 
@@ -1438,10 +1468,14 @@ class ByokChatService(
             addReasoningOff(provider, modelId)
             return
         }
-        val effort = reasoningEffort.ifBlank {
-            provider.models.firstOrNull { it.id == modelId }?.thinkingConfig
-                ?.let { ThinkingKinds.resolveDefaultEffort(it) }
-                ?: ThinkingKinds.MEDIUM
+        val effort = if (kind == ThinkingParamKind.GEMINI_LEVEL) {
+            geminiEffort(modelId, reasoningEffort)
+        } else {
+            reasoningEffort.ifBlank {
+                provider.models.firstOrNull { it.id == modelId }?.thinkingConfig
+                    ?.let { ThinkingKinds.resolveDefaultEffort(it) }
+                    ?: ThinkingKinds.MEDIUM
+            }
         }
         when (kind) {
             ThinkingParamKind.OPENAI_REASONING_EFFORT -> {
@@ -1463,7 +1497,7 @@ class ByokChatService(
                 put("enable_thinking", true)
                 put("thinking_budget", ThinkingKinds.budgetFor(kind, effort))
             }
-            ThinkingParamKind.GEMINI -> {
+            ThinkingParamKind.GEMINI, ThinkingParamKind.GEMINI_LEVEL -> {
                 // OpenAI-compat Gemini：符号档位；聚合网关已在 wireKind 折算走 effort 分支。
                 if (ThinkingKinds.isAggregatingGateway(provider.baseUrl)) {
                     putJsonObject("reasoning") { put("effort", effort) }
@@ -1490,10 +1524,24 @@ class ByokChatService(
      */
     private fun JsonObjectBuilder.applyModelCustomBody(provider: ByokProvider, modelId: String) {
         val custom = provider.models.firstOrNull { it.id == modelId }?.customBody ?: return
+        val geminiLevels = usesGeminiDefaultSampling(provider, modelId)
         custom.forEach { param ->
             val key = param.key.trim()
             if (key.isBlank() || isProtectedBodyKey(key)) return@forEach
-            put(key, customBodyValueToJson(param))
+            if (geminiLevels && key in DEPRECATED_GEMINI_PARAMS) return@forEach
+            val value = customBodyValueToJson(param)
+            put(key, if (geminiLevels && key in GEMINI_CONFIG_KEYS) cleanGeminiConfig(value) else value)
+        }
+    }
+
+    private fun cleanGeminiConfig(value: JsonElement): JsonElement {
+        if (value !is JsonObject) return value
+        return buildJsonObject {
+            value.forEach { (key, child) ->
+                if (key !in DEPRECATED_GEMINI_PARAMS) {
+                    put(key, if (key in GEMINI_CONFIG_KEYS) cleanGeminiConfig(child) else child)
+                }
+            }
         }
     }
 
@@ -1656,6 +1704,24 @@ class ByokChatService(
     }
 
     private fun toolSpecs(provider: ByokProvider, request: ChatRequest): List<ToolSpec> = buildList {
+        if (request.providerKind == ProviderKind.BYOK &&
+            request.enabledTools.skills && request.availableSkills.isNotEmpty()
+        ) {
+            add(
+                ToolSpec(
+                    name = "read_skill",
+                    description = "Read an enabled skill's instructions or a referenced text file. " +
+                        "Read SKILL.md before using the skill. This tool cannot execute scripts. " +
+                        "If next_offset is returned, continue reading at that offset until the instructions are complete.",
+                    properties = mapOf(
+                        "skill" to ToolProperty("Skill name", enumValues = request.availableSkills.map { it.name }),
+                        "path" to ToolProperty("Path relative to the skill directory. Defaults to SKILL.md."),
+                        "offset" to ToolProperty("Character offset. Defaults to 0.", ToolPropertyType.INTEGER),
+                    ),
+                    required = listOf("skill"),
+                ),
+            )
+        }
         if (request.enabledTools.network) {
             add(
                 ToolSpec(
@@ -1889,6 +1955,12 @@ class ByokChatService(
             when (call.name) {
                 "search_web" -> searchWeb(call.arg("query"), call.arg("max_results")?.toIntOrNull(), citations)
                 "fetch_url" -> fetchUrl(call.arg("url"))
+                "read_skill" -> {
+                    val name = call.arg("skill") ?: return ToolExecutionResult.failure("Missing skill")
+                    require(request.availableSkills.any { it.name == name }) { "该技能未在当前会话启用。" }
+                    val offset = call.arg("offset")?.let { it.toInt() } ?: 0
+                    skillReader(name, call.arg("path") ?: "SKILL.md", offset, request.sessionId)
+                }
                 "view_image" -> viewImage(provider, request, call)
                 "generate_image" -> generateImage(provider, request, call.arg("prompt"))
                 "mcp_list_tools" -> listMcpTools(call.arg("server"))
@@ -1900,6 +1972,9 @@ class ByokChatService(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
+            if (call.name == "read_skill") {
+                return ToolExecutionResult.failure("读取技能失败：${error.message ?: error::class.simpleName}")
+            }
             return ToolExecutionResult.failure("${labelForTool(call.name)} failed: ${error.message ?: error::class.simpleName}")
         }
         return classifyByokToolResult(call.name, output)
@@ -2585,6 +2660,7 @@ class ByokChatService(
     private fun labelForTool(name: String): String = when (name) {
         "search_web" -> "联网搜索"
         "fetch_url" -> "阅读网页"
+        "read_skill" -> "读取技能"
         "view_image" -> "视觉理解"
         "generate_image" -> "图像生成"
         "mcp_list_tools" -> "MCP 工具列表"
@@ -2617,6 +2693,7 @@ class ByokChatService(
         if (result.status == ToolStatus.FAILED) return result.output
         return when (call.name) {
             "search_web", "web_search" -> call.arg("query")?.takeIf { it.isNotBlank() }?.take(200)
+            "read_skill" -> "${call.arg("skill")}/${call.arg("path") ?: "SKILL.md"}"
             "fetch_url" ->
                 result.output.lineSequence().takeWhile { it.isNotBlank() }.joinToString("\n").take(400)
             // 回忆结果整份是给模型读的，铺进卡片既难读又会把这一项撑得比视口还高；
@@ -2723,14 +2800,17 @@ class ByokChatService(
             })
         }
         put("generationConfig", buildJsonObject {
-            put("temperature", request.temperature)
-            // Gemini 2.5/3 推理：thinkingConfig.thinkingBudget（按档位映射）。
+            if (!usesGeminiDefaultSampling(provider, request.modelId)) put("temperature", request.temperature)
             val kind = effectiveThinkingKind(provider, request.modelId)
             val thinkingOn = request.useThinking || isAlwaysOnThinking(provider, request.modelId)
-            if (thinkingOn && kind == ThinkingParamKind.GEMINI) {
-                val effort = request.reasoningEffort.ifBlank { ThinkingKinds.MEDIUM }
+            if (thinkingOn && (kind == ThinkingParamKind.GEMINI || kind == ThinkingParamKind.GEMINI_LEVEL)) {
                 putJsonObject("thinkingConfig") {
-                    put("thinkingBudget", ThinkingKinds.budgetFor(kind, effort))
+                    if (kind == ThinkingParamKind.GEMINI_LEVEL) {
+                        put("thinkingLevel", geminiEffort(request.modelId, request.reasoningEffort))
+                    } else {
+                        val effort = request.reasoningEffort.ifBlank { ThinkingKinds.MEDIUM }
+                        put("thinkingBudget", ThinkingKinds.budgetFor(kind, effort))
+                    }
                     put("includeThoughts", true)
                 }
             }
@@ -2824,6 +2904,12 @@ class ByokChatService(
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+        val DEPRECATED_GEMINI_PARAMS = setOf(
+            "temperature", "top_p", "topP", "top_k", "topK", "thinking_budget", "thinkingBudget",
+        )
+        val GEMINI_CONFIG_KEYS = setOf(
+            "generationConfig", "generation_config", "thinkingConfig", "thinking_config", "extra_body", "google",
+        )
         const val TITLE_TEMPERATURE = 0.3
         const val ANTHROPIC_TITLE_MAX_TOKENS = 2048
 
@@ -3133,6 +3219,7 @@ internal fun classifyByokToolResult(name: String, output: String): ToolExecution
             text.startsWith("未配置 Exa API Key") ||
             text.startsWith("未从 DuckDuckGo 获取到结果")
         "fetch_url" -> lower.startsWith("fetch failed:")
+        "read_skill" -> lower.startsWith("skill failed:")
         "view_image" -> lower.startsWith("vision failed:") ||
             (lower.startsWith("image index ") && lower.contains(" out of range")) ||
             text.startsWith("外挂视觉未配置")
@@ -3325,7 +3412,7 @@ private fun syntheticResponsesMessage(text: String): JsonObject = buildJsonObjec
 
 /** 本次请求是否会带上工具定义。 */
 val com.molagpt.app.core.model.EnabledTools.hasByokTools: Boolean
-    get() = network || steelBrowser || vision || imageGeneration || mcp || memory || conversationRecall
+    get() = network || steelBrowser || vision || imageGeneration || mcp || memory || conversationRecall || skills
 
 internal fun selectByokVisionModel(provider: ByokProvider, fallbackModelId: String): String {
     val current = provider.models.firstOrNull { it.id == fallbackModelId }

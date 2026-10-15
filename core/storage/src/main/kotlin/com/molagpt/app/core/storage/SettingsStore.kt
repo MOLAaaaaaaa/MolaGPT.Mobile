@@ -45,6 +45,7 @@ data class AppSettings(
     val toolSteel: Boolean = true,
     val toolCode: Boolean = true,
     val byokMcpServers: List<ByokMcpServer> = emptyList(),
+    val disabledSkillIds: Set<String> = emptySet(),
     /** 联网搜索服务商 id（duckduckgo/tavily/exa）；key 单独经 CredentialStore 加密存储。 */
     val webSearchProvider: String = "duckduckgo",
     /** 联网搜索结果数量上限（1..10）。 */
@@ -157,6 +158,7 @@ class SettingsStore(private val context: Context) {
             toolSteel = p[Keys.TOOL_STEEL] ?: true,
             toolCode = p[Keys.TOOL_CODE] ?: true,
             byokMcpServers = decodeMcpServers(p[Keys.BYOK_MCP_SERVERS]),
+            disabledSkillIds = p[Keys.DISABLED_SKILL_IDS] ?: emptySet(),
             webSearchProvider = p[Keys.WEB_SEARCH_PROVIDER] ?: "duckduckgo",
             webSearchMaxResults = (p[Keys.WEB_SEARCH_MAX_RESULTS] ?: 6L).toInt(),
             visionProxyEnabled = p[Keys.VISION_PROXY_ENABLED] ?: false,
@@ -339,6 +341,15 @@ class SettingsStore(private val context: Context) {
             ((it[Keys.SEEN_AGENT_COMMAND_FAILURES] ?: emptySet()) + key).toList().takeLast(100).toSet()
     }
 
+    suspend fun setSkillEnabled(id: String, enabled: Boolean) = edit { p ->
+        val disabled = p[Keys.DISABLED_SKILL_IDS] ?: emptySet()
+        p[Keys.DISABLED_SKILL_IDS] = if (enabled) disabled - id else disabled + id
+    }
+
+    suspend fun removeSkillPreferences(id: String) = edit { p ->
+        p[Keys.DISABLED_SKILL_IDS] = (p[Keys.DISABLED_SKILL_IDS] ?: emptySet()) - id
+    }
+
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         context.settingsDataStore.edit(block)
     }
@@ -381,6 +392,7 @@ class SettingsStore(private val context: Context) {
         val TOOL_STEEL = booleanPreferencesKey("tool_steel")
         val TOOL_CODE = booleanPreferencesKey("tool_code")
         val BYOK_MCP_SERVERS = stringPreferencesKey("byok_mcp_servers")
+        val DISABLED_SKILL_IDS = stringSetPreferencesKey("disabled_skill_ids")
         val WEB_SEARCH_PROVIDER = stringPreferencesKey("web_search_provider")
         val WEB_SEARCH_MAX_RESULTS = longPreferencesKey("web_search_max_results")
         val VISION_PROXY_ENABLED = booleanPreferencesKey("vision_proxy_enabled")

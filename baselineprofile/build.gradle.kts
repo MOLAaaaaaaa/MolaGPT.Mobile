@@ -1,12 +1,11 @@
 plugins {
     alias(libs.plugins.android.test)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.baselineprofile)
 }
 
 android {
     namespace = "com.molagpt.app.baselineprofile"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 28 // baseline profile 生成要求 minSdk 28+（运行时安装仍覆盖到 app 的 minSdk 23）

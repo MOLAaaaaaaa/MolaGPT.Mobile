@@ -68,6 +68,8 @@ import com.molagpt.app.feature.settings.PersonalizationScreen
 import com.molagpt.app.feature.settings.PersonalizationViewModel
 import com.molagpt.app.feature.settings.PostProcessingScreen
 import com.molagpt.app.feature.settings.SettingsScreen
+import com.molagpt.app.feature.settings.SkillDetailScreen
+import com.molagpt.app.feature.settings.SkillsScreen
 import com.molagpt.app.feature.settings.SettingsViewModel
 import com.molagpt.app.feature.settings.StartupNoticesHost
 import kotlin.coroutines.cancellation.CancellationException
@@ -89,6 +91,8 @@ private object Routes {
     const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
     const val BYOK_TOOLS = "byok_tools"
     const val BYOK_MEMORY = "byok_memory"
+    const val SKILLS = "skills"
+    const val SKILL_DETAIL = "skill_detail"
     const val POST_PROCESSING = "post_processing"
     const val LOREBOOKS = "lorebooks"
     const val MCP_SERVER_DETAIL = "mcp_server_detail"
@@ -253,6 +257,7 @@ fun MolaNavHost(
                 viewModel = vm,
                 loggedIn = account.loggedIn,
                 username = account.username,
+                onOpenSkills = { navController.navigate(Routes.SKILLS) { launchSingleTop = true } },
                 onBack = {
                     if (navController.currentDestination?.route == Routes.SETTINGS) {
                         val returnedToPrevious = navController.popBackStack()
@@ -548,6 +553,27 @@ fun MolaNavHost(
             )
         }
 
+        composable(Routes.SKILLS) {
+            SkillsScreen(
+                repository = container.skillRepository,
+                settingsStore = container.settingsStore,
+                onBack = { navController.popBackStack() },
+                onOpenSkill = { id -> navController.navigate("${Routes.SKILL_DETAIL}/$id") { launchSingleTop = true } },
+            )
+        }
+
+        composable(
+            route = "${Routes.SKILL_DETAIL}/{id}",
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) { entry ->
+            SkillDetailScreen(
+                skillId = entry.arguments?.getString("id").orEmpty(),
+                repository = container.skillRepository,
+                settingsStore = container.settingsStore,
+                onBack = { navController.popBackStack() },
+            )
+        }
+
         // 回答后处理页：规则在流结束后施加、处理结果直接落库，与 BYOK 无关，对所有模型生效。
         composable(Routes.POST_PROCESSING) {
             val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
@@ -750,7 +776,13 @@ private fun ChatHost(
             }
             drawerOpen = false
         } catch (e: CancellationException) {
-            drawerProgress.animateTo(1f, MolaMotion.standardDecelerate(durationMillis = 260))
+            // 回弹不能跟随手势协程一起取消。
+            scope.launch {
+                drawerProgress.animateTo(
+                    targetValue = if (drawerOpen) 1f else 0f,
+                    animationSpec = MolaMotion.standardDecelerate(durationMillis = 260),
+                )
+            }
             throw e
         }
     }

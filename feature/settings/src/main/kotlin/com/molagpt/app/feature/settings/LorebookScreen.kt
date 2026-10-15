@@ -28,10 +28,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -82,11 +82,11 @@ fun LorebookScreen(
 
     ImeDismissBackHandler()
 
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text("世界书") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -99,8 +99,8 @@ fun LorebookScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
                 .verticalScroll(rememberScrollState())
+                .padding(inner)
                 .padding(horizontal = 16.dp)
                 .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
         ) {

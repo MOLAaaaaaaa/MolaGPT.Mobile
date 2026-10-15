@@ -32,12 +32,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -87,11 +87,11 @@ fun AboutScreen(
         UpdateAvailableDialog(info = info, onDismiss = { updateInfo = null })
     }
 
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text("关于") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -105,8 +105,8 @@ fun AboutScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
                 .verticalScroll(rememberScrollState())
+                .padding(inner)
                 .padding(horizontal = 14.dp)
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(4.dp),

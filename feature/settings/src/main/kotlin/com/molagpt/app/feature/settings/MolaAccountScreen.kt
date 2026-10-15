@@ -28,13 +28,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -85,11 +85,11 @@ fun MolaAccountScreen(
     // 改版前这行挂在设置页上，等于每次进设置都可能触发一次 status.php。
     LaunchedEffect(loggedIn) { viewModel.ensureStatus() }
 
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text("MolaGPT 账户") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -102,8 +102,8 @@ fun MolaAccountScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
                 .verticalScroll(rememberScrollState())
+                .padding(inner)
                 .padding(16.dp)
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(4.dp),

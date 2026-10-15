@@ -379,7 +379,7 @@ internal fun looksLikeByokReasoningModel(id: String): Boolean {
         lower.contains("glm-5") || Regex("glm-4\\.\\d").containsMatchIn(lower) ||
         Regex("minimax-m[23]").containsMatchIn(lower) || lower.contains("mimo-v2-flash") ||
         lower.contains("grok-3-mini") || lower.contains("grok-4") ||
-        lower.contains("gemini-2.5") || lower.contains("gemini-3") ||
+        lower.contains("gemini-2.5") || lower.contains("gemini-3") || lower.contains("gemini-4") ||
         lower.contains("claude-3-7") || lower.contains("claude-3.7") ||
         lower.contains("sonnet-4") || lower.contains("opus-4") || lower.contains("haiku-4") ||
         lower.contains("magistral") || lower.contains("seed-oss") ||

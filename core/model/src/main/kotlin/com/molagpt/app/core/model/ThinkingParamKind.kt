@@ -23,8 +23,11 @@ enum class ThinkingParamKind {
     /** DeepSeek 混合推理：`thinking:{type:"enabled"/"disabled"}` + `reasoning_effort`。 */
     DEEPSEEK_THINKING,
 
-    /** Gemini 2.5/3：原生 `generationConfig.thinkingConfig.thinkingBudget`；OpenAI-compat 走 `reasoning_effort`。 */
+    /** Gemini 2.5：原生 `generationConfig.thinkingConfig.thinkingBudget`。 */
     GEMINI,
+
+    /** Gemini 3/4：原生 `generationConfig.thinkingConfig.thinkingLevel`。 */
+    GEMINI_LEVEL,
 
     /** Qwen3 / QwQ：`enable_thinking` + `thinking_budget`。 */
     QWEN_THINKING_BUDGET,
@@ -101,7 +104,7 @@ object ThinkingKinds {
         ThinkingParamKind.OPENAI_REASONING_EFFORT -> listOf(MINIMAL, LOW, MEDIUM, HIGH, XHIGH, MAX)
         ThinkingParamKind.CLAUDE_ADAPTIVE -> listOf(LOW, MEDIUM, HIGH, XHIGH, MAX)
         ThinkingParamKind.DEEPSEEK_THINKING -> listOf(HIGH, MAX)
-        ThinkingParamKind.GEMINI -> listOf(MINIMAL, LOW, MEDIUM, HIGH)
+        ThinkingParamKind.GEMINI, ThinkingParamKind.GEMINI_LEVEL -> listOf(MINIMAL, LOW, MEDIUM, HIGH)
         ThinkingParamKind.CLAUDE_BUDGET,
         ThinkingParamKind.QWEN_THINKING_BUDGET,
         -> listOf(LOW, MEDIUM, HIGH)
@@ -124,6 +127,53 @@ object ThinkingKinds {
         alwaysOn = true,
         detectSource = ThinkingDetectSource.HEURISTIC,
     )
+
+    /**
+     * Gemini 原生 API 的已知思考配置。2.5 使用 thinkingBudget，3/4 使用 thinkingLevel；
+     * 已知型号按官方档位配置；未列出细分型号的 Gemini 3/4 使用对应家族默认配置，
+     * 其他未知或不支持思考的 Gemini 型号返回 null。
+     */
+    fun geminiConfigFor(modelId: String): ThinkingConfig? {
+        val model = modelId.lowercase().substringAfterLast('/')
+        if (model.contains("-non-reasoning")) return null
+        fun levelConfig(
+            levels: List<String>,
+            default: String,
+        ) = ThinkingConfig(
+            kind = ThinkingParamKind.GEMINI_LEVEL,
+            effortLevels = levels,
+            defaultEffort = default,
+            alwaysOn = true,
+            detectSource = ThinkingDetectSource.HEURISTIC,
+        )
+
+        return when {
+            model.startsWith("gemini-4-argon") ->
+                levelConfig(listOf(LOW, MEDIUM, HIGH), MEDIUM)
+            model.startsWith("gemini-3.8-flash") ->
+                levelConfig(listOf(LOW, MEDIUM, HIGH), MEDIUM)
+            model.startsWith("gemini-3.6-flash") ->
+                levelConfig(listOf(MINIMAL, LOW, MEDIUM, HIGH), MEDIUM)
+            model.startsWith("gemini-3.1-flash-lite-image") ->
+                levelConfig(listOf(MINIMAL, HIGH), MINIMAL)
+            model.startsWith("gemini-3.5-flash-lite") ||
+                model.startsWith("gemini-3.1-flash-lite") ->
+                levelConfig(listOf(MINIMAL, LOW, MEDIUM, HIGH), MINIMAL)
+            model.startsWith("gemini-3.1-pro") ->
+                levelConfig(listOf(LOW, MEDIUM, HIGH), HIGH)
+            model.startsWith("gemini-3-pro") ->
+                levelConfig(listOf(LOW, HIGH), HIGH)
+            model.startsWith("gemini-3-flash") ->
+                levelConfig(listOf(MINIMAL, LOW, MEDIUM, HIGH), HIGH)
+            model.startsWith("gemini-2.5-pro") || model.startsWith("gemini-2.5-flash") ->
+                configFor(ThinkingParamKind.GEMINI, detectSource = ThinkingDetectSource.HEURISTIC)
+            model.startsWith("gemini-4") ->
+                levelConfig(listOf(LOW, MEDIUM, HIGH), MEDIUM)
+            model.startsWith("gemini-3") ->
+                levelConfig(listOf(MINIMAL, LOW, MEDIUM, HIGH), HIGH)
+            else -> null
+        }
+    }
 
     /** 模型 ID 是否为 Kimi K3（含 moonshot/kimi-k3 路径）。 */
     fun isKimiK3(id: String): Boolean {
@@ -155,8 +205,8 @@ object ThinkingKinds {
         if (lower.contains("kimi") || lower.contains("moonshot")) return ThinkingParamKind.KIMI
         // Qwen 思考版：仅 qwen3 / qwq（qwen-max/plus/turbo 等非思考版不发 enable_thinking）。
         if (lower.contains("qwen3") || lower.contains("qwq")) return ThinkingParamKind.QWEN_THINKING_BUDGET
-        // Gemini
-        if (lower.contains("gemini")) return ThinkingParamKind.GEMINI
+        // Gemini 3/4 使用档位；其余型号保留原有预算方言。
+        if (lower.contains("gemini")) return geminiConfigFor(id)?.kind ?: ThinkingParamKind.GEMINI
         // 其余推理模型 → 标准 reasoning_effort（与 looksLikeByokReasoningModel 保持一致）。
         if (leaf.startsWith("o1") || leaf.startsWith("o3") || leaf.startsWith("o4") ||
             leaf.startsWith("gpt-5") || lower.contains("gpt-oss") ||
@@ -311,7 +361,12 @@ object ThinkingKinds {
             } else {
                 source
             }
-            return configFor(byId, detectSource = upgraded)
+            val native = if (byId == ThinkingParamKind.GEMINI || byId == ThinkingParamKind.GEMINI_LEVEL) {
+                geminiConfigFor(modelId)
+            } else {
+                null
+            }
+            return (native ?: configFor(byId)).copy(detectSource = upgraded)
         }
 
         val byHost = hostInferredKind(baseUrl) ?: return null
@@ -391,7 +446,7 @@ object ThinkingKinds {
             ThinkingBehavior.BUDGET -> when (preferred) {
                 ThinkingParamKind.CLAUDE_ADAPTIVE, ThinkingParamKind.CLAUDE_BUDGET ->
                     ThinkingParamKind.CLAUDE_BUDGET // budget_tokens
-                ThinkingParamKind.GEMINI -> ThinkingParamKind.GEMINI // thinkingBudget
+                ThinkingParamKind.GEMINI, ThinkingParamKind.GEMINI_LEVEL -> ThinkingParamKind.GEMINI // thinkingBudget
                 else -> ThinkingParamKind.QWEN_THINKING_BUDGET
             }
             ThinkingBehavior.TOGGLE -> ThinkingParamKind.KIMI
@@ -451,6 +506,7 @@ object ThinkingKinds {
         ThinkingParamKind.CLAUDE_ADAPTIVE -> "thinking.effort"
         ThinkingParamKind.CLAUDE_BUDGET -> "budget_tokens"
         ThinkingParamKind.GEMINI -> "thinkingBudget"
+        ThinkingParamKind.GEMINI_LEVEL -> "thinkingLevel"
         ThinkingParamKind.QWEN_THINKING_BUDGET -> "thinking_budget"
         ThinkingParamKind.KIMI -> "thinking"
         ThinkingParamKind.NONE -> ""

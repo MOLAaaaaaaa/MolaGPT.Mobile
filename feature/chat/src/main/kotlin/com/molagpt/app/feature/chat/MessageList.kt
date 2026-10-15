@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -34,20 +36,30 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalTextToolbar
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import com.molagpt.app.core.render.RetryBar
 import com.molagpt.app.core.render.MolaMotion
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.molagpt.app.core.markdown.MdBlock
 import com.molagpt.app.core.model.ChatMessage
@@ -74,10 +86,12 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 
 @Composable
-fun MessageList(
+internal fun MessageList(
     messages: List<ChatMessage>,
     spend: com.molagpt.app.core.storage.ConversationSpend? = null,
     modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(12.dp),
+    bottomOverlayPadding: Dp = 0.dp,
     onRegenerate: () -> Unit = {},
     onRegenerateWithModel: (String) -> Unit = {},
     onEditUser: (String) -> Unit = {},
@@ -93,10 +107,37 @@ fun MessageList(
     /** 正在进行的压缩。 */
     compacting: ContextCompactionProgress? = null,
     onCancelCompaction: () -> Unit = {},
+    /** 全屏阅读；为空时不提供「选择」入口。 */
+    reader: AssistantReaderState? = null,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
+    val textToolbar = LocalTextToolbar.current
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val density = LocalDensity.current
+    val ime = WindowInsets.ime
+    val selectableMessages = remember(messages) {
+        messages.filter { it.role == Role.ASSISTANT && !it.isStreaming }.associateBy(ChatMessage::messageId)
+    }
+    /** [rowKey] 是双击的那一行，阅读层优先以它对齐。 */
+    val selectMessage: (String, String?) -> Unit = { messageId, rowKey ->
+        val message = selectableMessages[messageId]
+        if (reader != null && message != null) {
+            textToolbar.hide()
+            focusManager.clearFocus()
+            keyboard?.hide()
+            scope.launch {
+                awaitImeHidden { ime.getBottom(density) }
+                reader.open(message, rowKey)
+            }
+        }
+    }
+    /** 正文行：阅读层接管时隐藏，并登记位置供阅读层对齐。 */
+    fun Modifier.readerTracked(key: String): Modifier = if (reader == null) this else this
+        .graphicsLayer { alpha = if (key in reader.hiddenKeys) 0f else 1f }
+        .onGloballyPositioned { reader.rowTops[key] = it.positionInRoot().y }
     var autoFollow by remember { mutableStateOf(true) }
     StreamRenderPacingEffect(messages.any(ChatMessage::isStreaming))
     val renderRequests = remember { Channel<MessageRenderRequest>(Channel.CONFLATED) }
@@ -145,6 +186,16 @@ fun MessageList(
         }
     }
 
+    if (reader != null) {
+        val overlapPx = with(density) { 24.dp.toPx() }
+        SideEffect {
+            reader.listState = listState
+            reader.rows = rows
+            reader.density = density.density
+            reader.overlapDistancePx = overlapPx
+        }
+    }
+
     // 贴底判定的容差。原来写死 48 **像素**——在 3x 屏上只有 16dp，手指停在离底一点点的地方
     // 就判成「没贴底」，跟随再也不恢复。改成按密度换算的 dp，手感才和屏幕无关。
     val bottomThresholdPx = with(LocalDensity.current) { 32.dp.roundToPx() }
@@ -169,10 +220,16 @@ fun MessageList(
     // DragInteraction 只有真实拖拽才产生，程序滚动不发，用它当闸门就没有误判。
     // 闸门保持到滚动**完全停下**为止，这样抬手后的惯性滑行也算用户主导——一甩到底同样能恢复跟随。
     var userScrolling by remember { mutableStateOf(false) }
+    // 从轮次条跳过去的那一轮，在用户自己动手滚之前一直算作「当前轮」：跳到靠后的轮次时列表
+    // 会顶到底，按阅读线算出来的会是更后面的一轮，而不是用户点的那一轮。
+    var pinnedTurn by remember { mutableIntStateOf(-1) }
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect { interaction ->
             when (interaction) {
-                is DragInteraction.Start -> userScrolling = true
+                is DragInteraction.Start -> {
+                    userScrolling = true
+                    pinnedTurn = -1
+                }
                 // 抬手/取消时如果已经不在滚（没有惯性可跟），立刻关闸。
                 // 兜底而已：正常情况由下面「滚动停下」那一路关闸，那条才覆盖得到惯性滑行。
                 // 少了这句，一次没产生任何滚动的拖拽会把闸门永久卡在开启状态。
@@ -199,6 +256,7 @@ fun MessageList(
         if (lastMessage.messageId != lastSeenMessageId) {
             lastSeenMessageId = lastMessage.messageId
             autoFollow = true
+            pinnedTurn = -1
             listState.scrollToBottom()
         } else if (autoFollow) {
             listState.scrollToBottom()
@@ -216,6 +274,49 @@ fun MessageList(
         }
     }
 
+    val turns = remember(messages) { messages.toTurnMarks() }
+    val turnOfMessage = remember(messages) {
+        val map = HashMap<String, Int>(messages.size)
+        var turn = -1
+        for (message in messages) {
+            if (message.role == Role.USER) turn++
+            map[message.messageId] = turn
+        }
+        map
+    }
+    val currentRows by rememberUpdatedState(rows)
+    val currentTurns by rememberUpdatedState(turns)
+    val currentTurnOfMessage by rememberUpdatedState(turnOfMessage)
+    // 「正在读」的那一轮：顶栏下方这条线压着的行属于哪一轮。贴底时就是最后一轮。
+    val readingLinePx = with(density) { 16.dp.roundToPx() }
+    val activeTurn by remember {
+        derivedStateOf {
+            val turnCount = currentTurns.size
+            when {
+                turnCount == 0 -> -1
+                pinnedTurn in 0 until turnCount -> pinnedTurn
+                listState.isAtBottom(bottomThresholdPx) -> turnCount - 1
+                else -> listState.layoutInfo.visibleItemsInfo
+                    .firstOrNull { it.offset + it.size > readingLinePx }
+                    ?.let { currentRows.getOrNull(it.index)?.ownerMessageId }
+                    ?.let { currentTurnOfMessage[it] }
+                    ?: -1
+            }
+        }
+    }
+    // 轮次条只在用户亲手滚动或按住它时浮现，停下 1.5 秒后淡出。不能看 isScrollInProgress：
+    // 流式输出时的贴底跟随也是程序滚动，每来一段字它都会亮一下。
+    var scrubbing by remember { mutableStateOf(false) }
+    var railShown by remember { mutableStateOf(false) }
+    LaunchedEffect(userScrolling, scrubbing) {
+        if (userScrolling || scrubbing) {
+            railShown = true
+        } else {
+            delay(1500)
+            railShown = false
+        }
+    }
+
     CompositionLocalProvider(
         LocalMarkdownImageRenderer provides { url, imgModifier ->
             RemoteImage(url, imgModifier)
@@ -227,8 +328,15 @@ fun MessageList(
         Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(12.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (reader == null) Modifier
+                    else Modifier.onGloballyPositioned {
+                        reader.listContentTop = it.positionInRoot().y + listState.layoutInfo.beforeContentPadding
+                    },
+                ),
+            contentPadding = contentPadding,
             verticalArrangement = Arrangement.Top,
         ) {
             items(
@@ -246,16 +354,31 @@ fun MessageList(
                     is MessageListRow.Fragment -> CompositionLocalProvider(
                         LocalCitationSources provides row.citationSources,
                     ) {
+                        val body = row.fragment.isAssistantBodyText()
                         FragmentRenderer(
                             fragment = row.fragment,
-                            modifier = rowModifier,
+                            modifier = rowModifier
+                                .then(if (body) Modifier.readerTracked(row.key) else Modifier)
+                                .onAssistantTextDoubleTap(
+                                    messageId = row.messageId,
+                                    enabled = reader != null && body && selectableMessages.containsKey(row.messageId),
+                                    onDoubleTap = { selectMessage(row.messageId, row.key) },
+                                ),
                             streamingTail = row.streamingTail,
                         )
                     }
                     is MessageListRow.AssistantText -> CompositionLocalProvider(
                         LocalCitationSources provides row.citationSources,
                     ) {
-                        SelectionContainer(modifier = rowModifier) {
+                        SelectionContainer(
+                            modifier = rowModifier
+                                .readerTracked(row.key)
+                                .onAssistantTextDoubleTap(
+                                    messageId = row.messageId,
+                                    enabled = reader != null && selectableMessages.containsKey(row.messageId),
+                                    onDoubleTap = { selectMessage(row.messageId, row.key) },
+                                ),
+                        ) {
                             Column {
                                 row.blocks.forEachIndexed { index, block ->
                                     // 渐隐只加在最后一个 block 上：整段套会把每个段落的行尾都淡掉。
@@ -280,6 +403,11 @@ fun MessageList(
                     ) {
                         MessageActionBar(
                             onCopy = { clipboard.setText(AnnotatedString(row.text)) },
+                            onSelect = if (reader != null && selectableMessages.containsKey(row.messageId)) {
+                                { selectMessage(row.messageId, null) }
+                            } else {
+                                null
+                            },
                             onRegenerate = if (row.canRegenerate) onRegenerate else null,
                             onEdit = if (row.canEdit) {
                                 { if (row.editsAssistant) onEditAssistant(row.messageId) else onEditUser(row.messageId) }
@@ -318,9 +446,30 @@ fun MessageList(
                 }
             }
         }
+        if (turns.size >= TURN_RAIL_MIN_TURNS) {
+            TurnRail(
+                turns = turns,
+                activeIndex = activeTurn,
+                visible = railShown && reader?.visible != true,
+                onScrubbingChange = { scrubbing = it },
+                onScrub = { index ->
+                    val id = turns.getOrNull(index)?.messageId
+                    val rowIndex = rows.indexOfFirst { it is MessageListRow.User && it.message.messageId == id }
+                    if (rowIndex >= 0) {
+                        autoFollow = false
+                        pinnedTurn = index
+                        scope.launch { listState.scrollToItem(rowIndex) }
+                    }
+                },
+                modifier = Modifier.padding(
+                    top = contentPadding.calculateTopPadding(),
+                    bottom = contentPadding.calculateBottomPadding(),
+                ),
+            )
+        }
         JumpToBottomButton(
             visible = showJumpToBottom,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = bottomOverlayPadding + 16.dp),
             onClick = {
                 // 点一下 = 明确表达「我要看最新的」，所以顺手把跟随打开：
                 // 之后的流式增长会继续贴底，不用再点第二次。
@@ -366,7 +515,7 @@ private fun androidx.compose.foundation.lazy.LazyListState.isAtBottom(thresholdP
     val info = layoutInfo
     val last = info.visibleItemsInfo.lastOrNull() ?: return true
     if (last.index < info.totalItemsCount - 1) return false
-    return last.offset + last.size <= info.viewportEndOffset + thresholdPx
+    return last.offset + last.size <= info.viewportEndOffset - info.afterContentPadding + thresholdPx
 }
 
 /**
@@ -377,7 +526,7 @@ private fun androidx.compose.foundation.lazy.LazyListState.distanceToBottomPx():
     val info = layoutInfo
     val last = info.visibleItemsInfo.lastOrNull() ?: return 0
     if (last.index < info.totalItemsCount - 1) return Int.MAX_VALUE
-    return (last.offset + last.size - info.viewportEndOffset).coerceAtLeast(0)
+    return (last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding)).coerceAtLeast(0)
 }
 
 private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToBottom(animated: Boolean = false) {
@@ -387,7 +536,7 @@ private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToBotto
     if (animated) animateScrollToItem(lastIndex) else scrollToItem(lastIndex)
     val info = layoutInfo
     val last = info.visibleItemsInfo.lastOrNull { it.index == lastIndex } ?: return
-    val overshoot = last.offset + last.size - info.viewportEndOffset
+    val overshoot = last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding)
     if (overshoot > 0) {
         if (animated) animateScrollBy(overshoot.toFloat()) else scrollBy(overshoot.toFloat())
     }
@@ -530,6 +679,22 @@ internal sealed interface MessageListRow {
         override val contentType = "compaction"
     }
 }
+
+/** 这一行属于哪条消息；压缩记录不属于任何一条。 */
+private val MessageListRow.ownerMessageId: String?
+    get() = when (this) {
+        is MessageListRow.User -> message.messageId
+        is MessageListRow.Pending -> messageId
+        is MessageListRow.Fragment -> messageId
+        is MessageListRow.ToolGroup -> messageId
+        is MessageListRow.AssistantText -> messageId
+        is MessageListRow.StreamingPlaceholder -> messageId
+        is MessageListRow.Stats -> messageId
+        is MessageListRow.Actions -> messageId
+        is MessageListRow.Retry -> messageId
+        is MessageListRow.EditBranch -> messageId
+        is MessageListRow.Compaction -> null
+    }
 
 internal fun List<ChatMessage>.toMessageRows(
     parseMarkdown: Boolean,

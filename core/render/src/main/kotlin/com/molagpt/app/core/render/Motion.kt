@@ -18,6 +18,8 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -51,9 +53,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 
 /**
  * 统一动画模块。集中声明 Material 3 motion 缓动、时长与可复用动画原语。
@@ -76,6 +81,12 @@ object MolaMotion {
     fun <T> standard(durationMillis: Int = Short) = tween<T>(durationMillis, easing = Standard)
     /** Predictive back 转场/收尾用：cubic-bezier(0,0,0,1) 减速（官方推荐的返回手势曲线）。 */
     fun <T> standardDecelerate(durationMillis: Int = Medium) = tween<T>(durationMillis, easing = StandardDecelerate)
+    /** 位移、尺寸用的弹簧：M3 Expressive spatial default（阻尼 0.8 / 刚度 380），带轻微回弹。 */
+    fun <T> expressiveSpatial() = spring<T>(dampingRatio = 0.8f, stiffness = 380f)
+    /** 收起、归位用的弹簧：M3 Standard spatial default（0.9 / 700），更快且几乎不回弹。 */
+    fun <T> spatialSettle() = spring<T>(dampingRatio = 0.9f, stiffness = 700f)
+    /** 透明度、颜色用的弹簧：M3 effects default（1.0 / 1600），不回弹。 */
+    fun <T> effects() = spring<T>(dampingRatio = 1f, stiffness = 1600f)
     /** 带回弹的 spring（开关圆点、对勾弹入等）。 */
     fun <T> springy() = spring<T>(dampingRatio = 0.6f, stiffness = Spring.StiffnessMediumLow)
 
@@ -255,7 +266,7 @@ fun SegmentedControl(
         val offsetX by animateDpAsState(targetValue = segW * index, animationSpec = MolaMotion.emphasized(), label = "segPill")
         Box(
             modifier = Modifier
-                .offset(x = offsetX)
+                .offset { IntOffset(offsetX.roundToPx(), 0) }
                 .width(segW)
                 .fillMaxHeight()
                 .padding(3.dp)
@@ -265,7 +276,7 @@ fun SegmentedControl(
                     else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
                 ),
         )
-        Row(modifier = Modifier.fillMaxSize()) {
+        Row(modifier = Modifier.fillMaxSize().selectableGroup()) {
             options.forEach { (value, label) ->
                 val sel = value.equals(selected, ignoreCase = true)
                 Box(
@@ -273,7 +284,7 @@ fun SegmentedControl(
                         .weight(1f)
                         .fillMaxHeight()
                         .clip(shape)
-                        .clickable(enabled = enabled) { onSelect(value) },
+                        .selectable(selected = sel, enabled = enabled, role = Role.RadioButton) { onSelect(value) },
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
@@ -285,6 +296,8 @@ fun SegmentedControl(
                         },
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }

@@ -52,12 +52,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -211,12 +211,12 @@ fun ImageWorkbenchScreen(
         ImagePreviewHost(
             extraAction = if (selection.editable) ImagePreviewAction("以此为底图") { viewModel.useAsBase(it) } else null,
         ) {
-            Scaffold(
+            MolaScaffold(
                 modifier = Modifier.fillMaxSize(),
                 contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
                 snackbarHost = { SnackbarHost(snackbar) },
                 topBar = {
-                    TopAppBar(
+                    MolaTopBar(
                         navigationIcon = {
                             IconButton(onClick = onBack) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")

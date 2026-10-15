@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.DesktopWindows
 import androidx.compose.material.icons.outlined.Extension
@@ -36,10 +37,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -70,6 +71,7 @@ fun SettingsScreen(
     onOpenPersonaManagement: () -> Unit,
     onOpenLorebooks: () -> Unit,
     onOpenByokMemory: () -> Unit,
+    onOpenSkills: () -> Unit,
     onOpenPostProcessing: () -> Unit,
     buildLabel: String,
     modifier: Modifier = Modifier,
@@ -78,12 +80,12 @@ fun SettingsScreen(
     val byokProviders by viewModel.byokProviderList.collectAsStateWithLifecycle()
     val byokStatus by viewModel.byokStatus.collectAsStateWithLifecycle()
 
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         // 底部系统栏由滚动内容消费，页面背景保持铺满。
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text("设置") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -96,8 +98,8 @@ fun SettingsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
                 .verticalScroll(rememberScrollState())
+                .padding(inner)
                 .padding(16.dp)
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -126,6 +128,7 @@ fun SettingsScreen(
                 onOpenByokProviders = onOpenByokProviders,
                 onOpenByokTools = onOpenByokTools,
                 onOpenByokMemory = onOpenByokMemory,
+                onOpenSkills = onOpenSkills,
                 onOpenPostProcessing = onOpenPostProcessing,
             )
 
@@ -286,6 +289,7 @@ private fun ModelAndConversationCard(
     onOpenByokProviders: () -> Unit,
     onOpenByokTools: () -> Unit,
     onOpenByokMemory: () -> Unit,
+    onOpenSkills: () -> Unit,
     onOpenPostProcessing: () -> Unit,
 ) {
     SettingsGroup {
@@ -308,6 +312,13 @@ private fun ModelAndConversationCard(
             title = "本地记忆",
             subtitle = if (memoryEnabled) "已开启" else "未开启",
             onClick = onOpenByokMemory,
+            showDivider = true,
+        )
+        SettingsEntryRow(
+            icon = Icons.Outlined.AutoAwesome,
+            title = "技能",
+            subtitle = "导入技能文件供模型按需使用",
+            onClick = onOpenSkills,
             showDivider = true,
         )
         SettingsEntryRow(

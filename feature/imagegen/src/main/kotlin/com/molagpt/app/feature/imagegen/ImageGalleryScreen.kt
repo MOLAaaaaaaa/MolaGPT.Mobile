@@ -19,9 +19,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -66,9 +66,9 @@ fun ImageGalleryScreen(
         modifier = modifier,
         extraAction = ImagePreviewAction("查看任务") { url -> taskByUrl[url]?.let(onOpenTask) },
     ) {
-        Scaffold(
+        MolaScaffold(
             topBar = {
-                TopAppBar(
+                MolaTopBar(
                     title = {
                         Column {
                             Text("画廊", style = MaterialTheme.typography.titleMedium)
@@ -99,8 +99,13 @@ fun ImageGalleryScreen(
                 val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(3),
-                    modifier = Modifier.fillMaxSize().padding(inner),
-                    contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = bottom + 12.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = 12.dp,
+                        end = 12.dp,
+                        top = inner.calculateTopPadding() + 4.dp,
+                        bottom = bottom + 12.dp,
+                    ),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {

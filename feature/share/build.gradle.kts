@@ -1,11 +1,10 @@
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
 }
 
 android {
     namespace = "com.molagpt.app.feature.share"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 23

@@ -10,6 +10,7 @@ import com.molagpt.app.core.common.DefaultDispatchers
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.common.Logger
 import com.molagpt.app.core.model.byokMcpServerTokenKey
+import com.molagpt.app.core.model.enabledSkills
 import com.molagpt.app.core.model.ImageGenerationConfig
 import com.molagpt.app.core.model.ModelContextWindows
 import com.molagpt.app.core.model.ProviderKind
@@ -55,6 +56,7 @@ import com.molagpt.app.core.storage.PersonaAvatarStore
 import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.core.storage.SettingsStore
+import com.molagpt.app.core.storage.SkillRepository
 import com.molagpt.app.core.storage.SyncEngine
 import com.molagpt.app.core.storage.TracksToggle
 import com.molagpt.app.core.storage.allModels
@@ -114,6 +116,7 @@ class AppContainer(
         saveDeviceCookie = { credentialStore.saveSecret("molagpt.device_cookie", it) },
     )
     val settingsStore = SettingsStore(context)
+    val skillRepository = SkillRepository(java.io.File(appContext.filesDir, "skills"))
     private val agentDeviceId: String = run {
         val androidId = runCatching {
             android.provider.Settings.Secure.getString(
@@ -322,6 +325,11 @@ class AppContainer(
             }.getOrNull()
         },
         localToolHandler = byokLocalToolExecutor,
+        skillReader = { name, path, offset, _ ->
+            val settings = settingsStore.settings.first()
+            val skills = enabledSkills(skillRepository.skills.value, settings.disabledSkillIds)
+            skillRepository.readForModel(name, path, offset, skills)
+        },
         dispatchers = dispatchers,
     )
 

@@ -1,12 +1,11 @@
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
 android {
     namespace = "com.molagpt.app.core.render"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 23
@@ -36,6 +35,8 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     implementation(libs.androidx.core.ktx) // createBitmap 扩展
+    implementation(libs.haze)
+    implementation(libs.haze.blur)
     implementation("androidx.collection:collection-ktx:1.4.5") // LruCache
 
     // LaTeX：JLaTeXMath Android 版，使用原生 Canvas 渲染。

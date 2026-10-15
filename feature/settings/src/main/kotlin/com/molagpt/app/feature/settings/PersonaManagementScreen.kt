@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
@@ -42,13 +44,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
+import com.molagpt.app.core.render.MolaScaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
+import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -149,10 +151,10 @@ private fun PersonaListContent(
 ) {
     val builtin = personas.filter { it.isBuiltin }
     val mine = personas.filter { !it.isBuiltin }
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text("角色管理") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -179,9 +181,11 @@ private fun PersonaListContent(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
-                .padding(horizontal = 16.dp)
-                .navigationBarsPadding(),
+                .padding(horizontal = 16.dp),
+            contentPadding = PaddingValues(
+                top = inner.calculateTopPadding(),
+                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
+            ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
@@ -340,10 +344,10 @@ fun PersonaViewScreen(
     val cs = MaterialTheme.colorScheme
     val personas by repository.observeAll().collectAsStateWithLifecycle(initialValue = emptyList())
     val persona = personas.firstOrNull { it.id == personaId }
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text("查看角色") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -373,12 +377,12 @@ fun PersonaViewScreen(
             }
         },
     ) { inner ->
-        if (persona == null) return@Scaffold
+        if (persona == null) return@MolaScaffold
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
                 .verticalScroll(rememberScrollState())
+                .padding(inner)
                 .padding(horizontal = 16.dp),
         ) {
             Spacer(Modifier.height(8.dp))
@@ -500,10 +504,10 @@ fun PersonaEditScreen(
         }
     }
 
-    Scaffold(
+    MolaScaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
-            TopAppBar(
+            MolaTopBar(
                 title = { Text(if (isNew) "新建角色" else "编辑角色") },
                 navigationIcon = {
                     IconButton(onClick = onClose) {
@@ -558,8 +562,8 @@ fun PersonaEditScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(inner)
                 .verticalScroll(rememberScrollState())
+                .padding(inner)
                 .padding(horizontal = 16.dp),
         ) {
             if (fromBuiltinName != null) {

@@ -32,6 +32,7 @@ data class ChatRequest(
      * 发送前由上下文压缩器再核验一次。
      */
     val contextCheckpointId: String? = null,
+    val availableSkills: List<SkillInfo> = emptyList(),
 )
 
 /**
@@ -56,4 +57,5 @@ data class EnabledTools(
     val memory: Boolean = false,
     /** BYOK 历史对话回忆工具（recall_conversations）。仅本地裁剪，不进 MolaGPT 线格式。 */
     val conversationRecall: Boolean = false,
+    val skills: Boolean = false,
 )
