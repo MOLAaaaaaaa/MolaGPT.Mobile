@@ -568,6 +568,7 @@ class ByokChatService(
                     return@flow
                 }
                 var emittedFinish = false
+                val emittedImages = mutableSetOf<GeminiInlineImageKey>()
                 sseFlow { source.readUtf8Line() }.collect { payload ->
                     currentCoroutineContext().ensureActive()
                     if (payload.isDone) {
@@ -575,7 +576,7 @@ class ByokChatService(
                         emittedFinish = true
                         return@collect
                     }
-                    parseGeminiEvent(payload.data).forEach { event ->
+                    parseGeminiEvent(payload.data, emittedImages).forEach { event ->
                         if (event is StreamEvent.Failed) {
                             emit(
                                 StreamEvent.Failed(
@@ -1213,12 +1214,13 @@ class ByokChatService(
     ) {
         val contents = initialContents.toMutableList()
         val turnItems = ArrayList<JsonObject>()
+        val emittedImages = mutableSetOf<GeminiInlineImageKey>()
         // 多轮累计：每轮都是独立计费的请求，只报最后一轮会大幅低估实际消耗。
         var usage: Usage? = null
 
         while (true) {
             currentCoroutineContext().ensureActive()
-            val round = streamGeminiToolRound(provider, request, contents, emitEvent) ?: return
+            val round = streamGeminiToolRound(provider, request, contents, emittedImages, emitEvent) ?: return
             val modelContent = ensureGeminiModelRole(round.content)
             contents += modelContent
             turnItems += modelContent
@@ -1275,6 +1277,7 @@ class ByokChatService(
         provider: ByokProvider,
         request: ChatRequest,
         contents: List<JsonObject>,
+        emittedImages: MutableSet<GeminiInlineImageKey>,
         emitEvent: suspend (StreamEvent) -> Unit,
     ): GeminiRound? {
         val body = buildGeminiBody(provider, request, contents, includeTools = true)
@@ -1304,12 +1307,11 @@ class ByokChatService(
                 sseFlow { source.readUtf8Line() }.collect { payload ->
                     currentCoroutineContext().ensureActive()
                     val root = runCatching { http.json.parseToJsonElement(payload.data) }.getOrNull() as? JsonObject
-                    if (root != null) {
-                        parts.feed(root)
-                        (root["promptFeedback"] as? JsonObject)?.get("blockReason")?.jsonPrimitive?.contentOrNull
-                            ?.let { blockReason = it }
-                    }
-                    parseGeminiEvent(payload.data).forEach { event ->
+                        ?: return@collect
+                    parts.feed(root)
+                    (root["promptFeedback"] as? JsonObject)?.get("blockReason")?.jsonPrimitive?.contentOrNull
+                        ?.let { blockReason = it }
+                    parseGeminiEvent(root = root, emittedImages = emittedImages).forEach { event ->
                         when (event) {
                             // 本轮是否结束看有没有 functionCall，不看 finishReason，由外层循环判。
                             is StreamEvent.Finish -> finishReason = event.reason ?: finishReason
@@ -2819,30 +2821,75 @@ class ByokChatService(
         applyModelCustomBody(provider, request.modelId)
     }
 
-    private fun parseGeminiEvent(data: String): List<StreamEvent> {
+    private suspend fun parseGeminiEvent(
+        data: String,
+        emittedImages: MutableSet<GeminiInlineImageKey>,
+    ): List<StreamEvent> {
         val root = runCatching { http.json.parseToJsonElement(data).jsonObject }.getOrNull() ?: return emptyList()
+        return parseGeminiEvent(root, emittedImages)
+    }
+
+    private suspend fun parseGeminiEvent(
+        root: JsonObject,
+        emittedImages: MutableSet<GeminiInlineImageKey>,
+    ): List<StreamEvent> {
         root["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull?.let {
             return listOf(StreamEvent.Failed(it))
         }
         val candidates = root["candidates"] as? JsonArray ?: JsonArray(emptyList())
-        return listOfNotNull(geminiUsage(root)?.let { StreamEvent.UsageUpdate(it) }) + candidates.flatMap { candidateElement ->
-            val candidate = candidateElement as? JsonObject ?: return@flatMap emptyList()
+        val events = mutableListOf<StreamEvent>()
+        for (candidateElement in candidates) {
+            val candidate = candidateElement as? JsonObject ?: continue
             val content = candidate["content"] as? JsonObject
             val parts = content?.get("parts") as? JsonArray
-            val events = parts?.mapNotNull { part ->
-                val obj = part as? JsonObject ?: return@mapNotNull null
-                obj["text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }?.let { text ->
-                    if (obj["thought"]?.jsonPrimitive?.booleanOrNull == true) {
-                        StreamEvent.Delta(thinking = text)
-                    } else {
-                        StreamEvent.Delta(text = text)
+            if (parts != null) {
+                for (part in parts) {
+                    val obj = part as? JsonObject ?: continue
+                    obj["text"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }?.let { text ->
+                        events += if (obj["thought"]?.jsonPrimitive?.booleanOrNull == true) {
+                            StreamEvent.Delta(thinking = text)
+                        } else {
+                            StreamEvent.Delta(text = text)
+                        }
                     }
+                    parseGeminiInlineImage(obj, emittedImages)?.let(events::add)
                 }
-            }.orEmpty().toMutableList<StreamEvent>()
+            }
             val finish = candidate["finishReason"]?.jsonPrimitive?.contentOrNull
             if (!finish.isNullOrBlank()) events += StreamEvent.Finish(finish)
-            events
         }
+        return listOfNotNull(geminiUsage(root)?.let { StreamEvent.UsageUpdate(it) }) + events
+    }
+
+    private suspend fun parseGeminiInlineImage(
+        part: JsonObject,
+        emittedImages: MutableSet<GeminiInlineImageKey>,
+    ): StreamEvent.Image? {
+        val inline = part["inlineData"]?.jsonObject ?: part["inline_data"]?.jsonObject ?: return null
+        val data = inline["data"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return null
+        val mimeType = (
+            inline["mimeType"]?.jsonPrimitive?.contentOrNull
+                ?: inline["mime_type"]?.jsonPrimitive?.contentOrNull
+                ?: "image/png"
+            ).substringBefore(';').trim().ifBlank { "image/png" }
+        if (!mimeType.startsWith("image/", ignoreCase = true)) return null
+
+        // Gemini 流式响应可能重复发送同一张 inlineData；以原始数据做键，避免重复解码和写文件。
+        if (!emittedImages.add(GeminiInlineImageKey(mimeType, data))) return null
+        val bytes = android.util.Base64.decode(data, android.util.Base64.DEFAULT)
+        val url = imageFileSaver(bytes, geminiImageExtension(mimeType))
+            ?.takeIf { it.isNotBlank() && !it.startsWith("data:", ignoreCase = true) }
+            ?: error("生成图片保存失败")
+        return StreamEvent.Image(url)
+    }
+
+    private fun geminiImageExtension(mimeType: String): String = when (
+        mimeType.substringAfter('/').lowercase(Locale.ROOT)
+    ) {
+        "jpeg", "jpg" -> "jpg"
+        "webp" -> "webp"
+        "gif" -> "gif"
+        else -> "png"
     }
 
     private fun geminiUsage(root: JsonObject): Usage? {
@@ -3075,6 +3122,7 @@ class ByokChatService(
         INTEGER("integer", "INTEGER"),
     }
     private data class DataUrl(val mimeType: String, val base64: String)
+    private data class GeminiInlineImageKey(val mimeType: String, val data: String)
 }
 
 /** 一次原生工具执行后，回传 Claude/Gemini 所需的最小协议信息。 */

@@ -66,6 +66,8 @@ fun SettingsScreen(
     onOpenAbout: () -> Unit,
     onOpenImageWorkbench: () -> Unit,
     onOpenAgentControl: () -> Unit,
+    /** 「电脑」一行的副标题，如在线台数；为空时显示功能说明。 */
+    desktopStatus: String? = null,
     onOpenByokProviders: () -> Unit,
     onOpenByokTools: () -> Unit,
     onOpenPersonaManagement: () -> Unit,
@@ -113,6 +115,16 @@ fun SettingsScreen(
                 onClick = onOpenMolaAccount,
             )
 
+            SectionTitle("远程控制")
+            SettingsGroup {
+                SettingsEntryRow(
+                    icon = Icons.Outlined.DesktopWindows,
+                    title = "电脑",
+                    subtitle = desktopStatus ?: "在手机上继续电脑上的对话",
+                    onClick = onOpenAgentControl,
+                )
+            }
+
             SectionTitle("模型与对话")
             ModelAndConversationCard(
                 providerCount = byokProviders.size,
@@ -156,7 +168,7 @@ fun SettingsScreen(
                     )
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
                     ToggleRow(
-                        label = "Agent 控制快捷入口",
+                        label = "电脑快捷入口",
                         checked = s.showAgentControlShortcut,
                         onChange = viewModel::setShowAgentControlShortcut,
                         subtitle = "显示在对话页顶部",
@@ -190,16 +202,6 @@ fun SettingsScreen(
                         subtitle = "关闭后 HTML 内容默认显示为代码，仍可本地运行",
                     )
                 }
-            }
-
-            SectionTitle("远程控制")
-            SettingsGroup {
-                SettingsEntryRow(
-                    icon = Icons.Outlined.DesktopWindows,
-                    title = "Agent 控制",
-                    subtitle = "远程查看和控制桌面端 Agent 会话",
-                    onClick = onOpenAgentControl,
-                )
             }
 
             SectionTitle("关于")
@@ -266,7 +268,7 @@ private fun MolaAccountEntryCard(
                     text = if (loggedIn) {
                         "${username ?: "已登录"} · 配额、云同步与个性化记忆"
                     } else {
-                        "登录后解锁云同步与 Agent 控制"
+                        "登录后使用云同步与电脑控制"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

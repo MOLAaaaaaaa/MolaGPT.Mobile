@@ -1,5 +1,6 @@
 package com.molagpt.app.nav
 
+import android.net.Uri
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.coroutines.flow.MutableStateFlow
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModel
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,6 +41,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.molagpt.app.LocalAppContainer
+import com.molagpt.app.di.AppContainer
+import com.molagpt.app.core.model.DesktopInfo
+import com.molagpt.app.core.model.DesktopLinkState
+import com.molagpt.app.core.network.DesktopRemoteService
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.render.MolaMotion
@@ -42,15 +52,25 @@ import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.feature.agentcontrol.AgentControlScreen
 import com.molagpt.app.feature.agentcontrol.AgentControlViewModel
+import com.molagpt.app.feature.agentcontrol.desktop.DesktopsScreen
+import com.molagpt.app.feature.agentcontrol.desktop.DesktopsViewModel
+import com.molagpt.app.feature.agentcontrol.desktop.RemoteConversationScreen
+import com.molagpt.app.feature.agentcontrol.desktop.RemoteConversationViewModel
 import com.molagpt.app.feature.auth.AuthViewModel
 import com.molagpt.app.feature.auth.LoginScreen
 import com.molagpt.app.feature.chat.ChatScreen
+import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.feature.chat.ModelMenuContent
+import com.molagpt.app.feature.chat.ChatViewModel
+import com.molagpt.app.feature.chat.DesktopModelsState
+import com.molagpt.app.feature.chat.DesktopRunTarget
 import com.molagpt.app.feature.imagegen.Base64ToolScreen
 import com.molagpt.app.feature.imagegen.ImageGalleryScreen
 import com.molagpt.app.feature.imagegen.ImageGalleryViewModel
 import com.molagpt.app.feature.imagegen.ImageWorkbenchScreen
 import com.molagpt.app.feature.imagegen.ImageWorkbenchViewModel
 import com.molagpt.app.feature.session.SessionDrawer
+import com.molagpt.app.feature.session.DesktopSidebarConversation
 import com.molagpt.app.feature.session.SessionViewModel
 import com.molagpt.app.feature.settings.AboutScreen
 import com.molagpt.app.feature.settings.ByokProviderDetailScreen
@@ -73,7 +93,11 @@ import com.molagpt.app.feature.settings.SkillsScreen
 import com.molagpt.app.feature.settings.SettingsViewModel
 import com.molagpt.app.feature.settings.StartupNoticesHost
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
 
 private object Routes {
     const val LOGIN = "login"
@@ -87,6 +111,7 @@ private object Routes {
     const val IMAGE_GALLERY = "image_gallery"
     const val IMAGE_BASE64 = "image_base64"
     const val AGENT_CONTROL = "agent_control"
+    const val DESKTOPS = "desktops"
     const val BYOK_PROVIDERS = "byok_providers"
     const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
     const val BYOK_TOOLS = "byok_tools"
@@ -113,6 +138,34 @@ fun MolaNavHost(
         val target = if (container.authService.isLoggedIn) Routes.AGENT_CONTROL else Routes.AGENT_LOGIN
         if (navController.currentDestination?.route != target) {
             navController.navigate(target) { launchSingleTop = true }
+        }
+    }
+    // 「电脑」页：手机控制电脑上的 MolaGPT 对话；外部 Agent（Claude Code / Codex）从它进入。
+    var loginTarget by remember { mutableStateOf(Routes.AGENT_CONTROL) }
+    val openDesktops = {
+        val target = if (container.authService.isLoggedIn) Routes.DESKTOPS else Routes.AGENT_LOGIN
+        if (target == Routes.AGENT_LOGIN) loginTarget = Routes.DESKTOPS
+        if (navController.currentDestination?.route != target) {
+            navController.navigate(target) { launchSingleTop = true }
+        }
+    }
+    // 电脑对话和本地对话一样显示在主页上，不是二级页：从「电脑」页、通知打开的，都回到主页再切过去。
+    val desktopChatRequests = remember { MutableStateFlow<DesktopChatTarget?>(null) }
+    val openDesktopConversation = { machineId: String, conversationId: String, machineName: String ->
+        desktopChatRequests.value = DesktopChatTarget(machineId, conversationId, machineName)
+        if (navController.currentDestination?.route != Routes.CHAT) {
+            navController.navigate(Routes.CHAT) {
+                popUpTo(Routes.CHAT)
+                launchSingleTop = true
+            }
+        }
+    }
+    val pendingDesktopOpen by container.pendingOpenDesktopConversation.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingDesktopOpen) {
+        val key = pendingDesktopOpen ?: return@LaunchedEffect
+        container.pendingOpenDesktopConversation.value = null
+        if (container.authService.isLoggedIn) {
+            openDesktopConversation(key.substringBefore('/'), key.substringAfter('/'), "")
         }
     }
     val pendingAgentOpen by container.pendingOpenAgentSessionId.collectAsStateWithLifecycle()
@@ -187,10 +240,11 @@ fun MolaNavHost(
             LoginScreen(
                 viewModel = vm,
                 onLoggedIn = {
-                    navController.navigate(Routes.AGENT_CONTROL) {
+                    navController.navigate(loginTarget) {
                         popUpTo(Routes.AGENT_LOGIN) { inclusive = true }
                         launchSingleTop = true
                     }
+                    loginTarget = Routes.AGENT_CONTROL
                 },
                 onBack = {
                     container.pendingOpenAgentSessionId.value = null
@@ -219,7 +273,8 @@ fun MolaNavHost(
                     val target = "${Routes.BYOK_PROVIDER_DETAIL}/$providerId?editModel=$encodedModel"
                     navController.navigate(target) { launchSingleTop = true }
                 },
-                onOpenAgentControl = openAgentControl,
+                onOpenAgentControl = openDesktops,
+                desktopChatRequests = desktopChatRequests,
                 onOpenImageWorkbench = {
                     if (navController.currentDestination?.route != Routes.IMAGE_WORKBENCH) {
                         navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
@@ -253,6 +308,21 @@ fun MolaNavHost(
         composable(Routes.SETTINGS) {
             val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
             val account by container.authService.account.collectAsStateWithLifecycle()
+            var desktopStatus by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(account.loggedIn, account.username) {
+                if (!account.loggedIn || account.username.isNullOrBlank()) {
+                    desktopStatus = "登录后可在手机上继续电脑上的对话"
+                    return@LaunchedEffect
+                }
+                desktopStatus = null
+                desktopStatus = try {
+                    desktopStatusText(container.desktopRemoteService.listDesktops())
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+            }
             SettingsScreen(
                 viewModel = vm,
                 loggedIn = account.loggedIn,
@@ -283,7 +353,8 @@ fun MolaNavHost(
                         navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
                     }
                 },
-                onOpenAgentControl = openAgentControl,
+                onOpenAgentControl = openDesktops,
+                desktopStatus = desktopStatus,
                 onOpenByokProviders = {
                     if (navController.currentDestination?.route != Routes.BYOK_PROVIDERS) {
                         navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
@@ -400,6 +471,35 @@ fun MolaNavHost(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+        }
+
+        composable(Routes.DESKTOPS) {
+            val account by container.authService.account.collectAsStateWithLifecycle()
+            if (!account.loggedIn) {
+                LaunchedEffect(Unit) {
+                    loginTarget = Routes.DESKTOPS
+                    navController.navigate(Routes.AGENT_LOGIN) {
+                        popUpTo(Routes.DESKTOPS) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                }
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {}
+            } else {
+                val vm: DesktopsViewModel = viewModel(factory = ViewModelFactories.desktops(container))
+                DesktopsScreen(
+                    vm = vm,
+                    onOpenConversation = { machineId, conversationId ->
+                        val name = vm.state.value.desktops.firstOrNull { it.info.machineId == machineId }?.info?.machineName.orEmpty()
+                        openDesktopConversation(machineId, conversationId, name)
+                    },
+                    onOpenExternalAgents = openAgentControl,
+                    onExit = {
+                        if (navController.currentDestination?.route == Routes.DESKTOPS && !navController.popBackStack()) {
+                            navController.navigate(Routes.CHAT) { launchSingleTop = true }
+                        }
+                    },
+                )
+            }
         }
 
         composable(Routes.AGENT_CONTROL) {
@@ -713,13 +813,15 @@ fun MolaNavHost(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
 private fun ChatHost(
     settings: AppSettings,
     onOpenSettings: () -> Unit,
     onOpenByokModelSettings: (providerId: String, modelId: String) -> Unit,
     onOpenAgentControl: () -> Unit,
+    /** 从主页以外（「电脑」页、通知）要打开的电脑对话，消费后清空。 */
+    desktopChatRequests: MutableStateFlow<DesktopChatTarget?>,
     onOpenImageWorkbench: () -> Unit,
     onOpenImageTask: (String) -> Unit,
     onOpenPersonaManagement: () -> Unit,
@@ -729,16 +831,237 @@ private fun ChatHost(
 ) {
     val container = LocalAppContainer.current
     val sessionVm: SessionViewModel = viewModel(factory = ViewModelFactories.session(container))
+    val account by container.authService.account.collectAsStateWithLifecycle()
+    val desktopLink by container.desktopRemoteService.link.collectAsStateWithLifecycle()
+    val onlineDesktopIds by container.desktopRemoteService.onlineMachines.collectAsStateWithLifecycle()
+    // 电脑列表由服务保管：上次的结果（含本地缓存）随时可用，侧边栏打开时先显示它，刷新回来原地替换。
+    val cachedDesktops by container.desktopRemoteService.desktops.collectAsStateWithLifecycle()
+    val desktopInfos = if (account.loggedIn) cachedDesktops.orEmpty() else emptyList()
+    // 配对密钥在加密存储里，逐行读太重；随列表刷新在 IO 上算一次。
+    var pairedDesktopIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var desktopLoadError by remember { mutableStateOf<String?>(null) }
+    var pairingDesktopId by remember { mutableStateOf<String?>(null) }
+
+    // 当前会话需要跨二级页面往返和进程重建恢复。
+    var currentSessionId by rememberSaveable { mutableStateOf<String?>(Ids.newSessionId()) }
+    var drawerOpen by remember { mutableStateOf(false) }
+    val drawerProgress = remember { Animatable(0f) }
+    // 主页正在显示的电脑对话；null 即显示本地会话 currentSessionId。
+    var desktopTarget by rememberSaveable(stateSaver = DesktopChatTargetSaver) { mutableStateOf<DesktopChatTarget?>(null) }
+    // 电脑对话的 ViewModel 放在它自己的存储里：切走就清掉，断开实时连接；跳到设置等二级页再回来时保留。
+    val remoteChatHost: RemoteChatHost = viewModel { RemoteChatHost() }
+    LaunchedEffect(desktopTarget == null) {
+        if (desktopTarget == null) remoteChatHost.clear()
+    }
+    val desktopRequest by desktopChatRequests.collectAsStateWithLifecycle()
+    LaunchedEffect(desktopRequest) {
+        val target = desktopRequest ?: return@LaunchedEffect
+        desktopChatRequests.value = null
+        desktopTarget = target
+        drawerOpen = false
+    }
 
     val scope = rememberCoroutineScope()
     // 抽屉里的删除反馈。ChatHost 没有 Scaffold，所以在根 Box 内自建宿主；
     // 抽屉盖在聊天页之上，Snackbar 必须画在最外层才可见。
     val snackbar = remember { SnackbarHostState() }
 
-    // 当前会话需要跨二级页面往返和进程重建恢复。
-    var currentSessionId by rememberSaveable { mutableStateOf<String?>(Ids.newSessionId()) }
-    var drawerOpen by remember { mutableStateOf(false) }
-    val drawerProgress = remember { Animatable(0f) }
+    // 登录态变化时换成当前账号的缓存列表；未登录则清空。
+    LaunchedEffect(account.loggedIn, account.username) {
+        desktopLoadError = null
+        container.desktopRemoteService.restoreDesktops()
+    }
+
+    LaunchedEffect(desktopInfos) {
+        val service = container.desktopRemoteService
+        pairedDesktopIds = withContext(container.dispatchers.io) {
+            desktopInfos.mapNotNullTo(HashSet()) { info -> info.machineId.takeIf(service::isPaired) }
+        }
+    }
+
+    // 侧边栏打开期间保持电脑实时连接并刷新列表；关闭后断开，但列表保留，下次打开不必从空白等起。
+    LaunchedEffect(drawerOpen, account.loggedIn, account.username) {
+        if (!drawerOpen || !account.loggedIn || account.username.isNullOrBlank()) return@LaunchedEffect
+        val service = container.desktopRemoteService
+        service.acquire()
+        try {
+            suspend fun refresh() {
+                try {
+                    service.listDesktops()
+                    desktopLoadError = null
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    desktopLoadError = error.message ?: "电脑列表加载失败"
+                }
+            }
+            refresh()
+            service.listChanged.debounce(400).collect { refresh() }
+        } finally {
+            service.release()
+        }
+    }
+
+    val desktopSidebarSessions = remember(desktopInfos, pairedDesktopIds, onlineDesktopIds, desktopLink, pairingDesktopId) {
+        desktopInfos.flatMap { info ->
+            val online = if (desktopLink == DesktopLinkState.Connected) {
+                info.machineId in onlineDesktopIds
+            } else {
+                info.online
+            }
+            info.conversations.map { conversation ->
+                DesktopSidebarConversation(
+                    machineId = info.machineId,
+                    machineName = info.machineName,
+                    conversation = conversation,
+                    online = online,
+                    paired = info.machineId in pairedDesktopIds,
+                    pairing = info.machineId == pairingDesktopId,
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(desktopSidebarSessions) {
+        sessionVm.sessionItems.setDesktopSessions(desktopSidebarSessions)
+    }
+
+    // 首页模型菜单「在电脑上运行」：登录后先取一次电脑列表，菜单首次打开就有；
+    // 菜单打开期间保持实时连接，在线状态与列表随之刷新。
+    var modelMenuOpen by remember { mutableStateOf(false) }
+    var menuDesktopInfos by remember { mutableStateOf<List<DesktopInfo>>(emptyList()) }
+    var menuPairedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // 至少成功取到过一次列表：首页引导要等它，免得已配对的人先看到一闪。
+    var menuDesktopsLoaded by remember { mutableStateOf(false) }
+    var desktopModels by remember { mutableStateOf<DesktopModelsState?>(null) }
+    var desktopModelsJob by remember { mutableStateOf<Job?>(null) }
+    LaunchedEffect(modelMenuOpen, account.loggedIn, account.username) {
+        if (!account.loggedIn || account.username.isNullOrBlank()) {
+            menuDesktopInfos = emptyList()
+            menuPairedIds = emptySet()
+            menuDesktopsLoaded = false
+            return@LaunchedEffect
+        }
+        val service = container.desktopRemoteService
+        suspend fun refresh() {
+            try {
+                val infos = service.listDesktops()
+                menuPairedIds = withContext(container.dispatchers.io) {
+                    infos.mapNotNullTo(HashSet()) { info -> info.machineId.takeIf(service::isPaired) }
+                }
+                menuDesktopInfos = infos
+                menuDesktopsLoaded = true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // 取不到就不显示这一节，不打扰选本机模型。
+            }
+        }
+        if (!modelMenuOpen) {
+            if (menuDesktopInfos.isEmpty()) refresh()
+            return@LaunchedEffect
+        }
+        service.acquire()
+        try {
+            refresh()
+            service.listChanged.debounce(400).collect { refresh() }
+        } finally {
+            service.release()
+        }
+    }
+    val desktopTargets = remember(menuDesktopInfos, menuPairedIds, onlineDesktopIds, desktopLink) {
+        menuDesktopInfos.map { info ->
+            DesktopRunTarget(
+                machineId = info.machineId,
+                name = info.machineName,
+                online = if (desktopLink == DesktopLinkState.Connected) info.machineId in onlineDesktopIds else info.online,
+                paired = info.machineId in menuPairedIds,
+            )
+        }
+    }
+
+    /** 用指定模型新建本机对话。 */
+    fun newChatWithModel(modelId: String, providerId: String?, kind: ProviderKind, personaId: String?) {
+        scope.launch {
+            // 跨阵营会新建会话，也必须与空白会话直接切换一样更新下次启动默认值。
+            runCatching {
+                container.settingsStore.setDefaultModelSelection(modelId, kind, providerId)
+            }
+            val conversation = container.sessionRepository.create(
+                title = SessionRepository.DEFAULT_TITLE,
+                model = modelId,
+                providerId = providerId,
+                providerKind = kind,
+                personaId = personaId,
+            )
+            currentSessionId = conversation.sessionId
+            desktopTarget = null
+        }
+    }
+
+    /** 点开一台电脑：没配对先用账号配对，再取它的模型。 */
+    fun openDesktopModels(machineId: String) {
+        desktopModelsJob?.cancel()
+        val service = container.desktopRemoteService
+        // 取过就先显示上次的模型，后台刷新；只有第一次才显示读取中。
+        val cached = service.cachedModelGroups(machineId)
+        desktopModels = DesktopModelsState(machineId, loading = cached == null, groups = cached.orEmpty())
+        desktopModelsJob = scope.launch {
+            desktopModels = try {
+                if (machineId !in menuPairedIds) {
+                    service.pairWithAccount(
+                        machineId = machineId,
+                        deviceName = container.remoteDeviceName,
+                        deviceId = container.remoteDeviceId,
+                    )
+                    menuPairedIds = menuPairedIds + machineId
+                }
+                DesktopModelsState(machineId, groups = service.modelGroups(machineId))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                // 刷新失败但有上次的结果：继续显示它，不打断选择。
+                if (cached != null) {
+                    DesktopModelsState(machineId, groups = cached)
+                } else {
+                    DesktopModelsState(machineId, error = error.message ?: "无法读取电脑上的模型")
+                }
+            }
+        }
+    }
+
+    fun openDesktopFromDrawer(row: DesktopSidebarConversation) {
+        if (pairingDesktopId != null) return
+        if (!row.paired && !row.online) {
+            scope.launch { snackbar.showSnackbar("电脑离线，无法配对") }
+            return
+        }
+        if (!row.paired) pairingDesktopId = row.machineId
+        scope.launch {
+            try {
+                if (!row.paired) {
+                    try {
+                        container.desktopRemoteService.pairWithAccount(
+                            machineId = row.machineId,
+                            deviceName = container.remoteDeviceName,
+                            deviceId = container.remoteDeviceId,
+                        )
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        snackbar.showSnackbar(error.message ?: "配对失败")
+                        return@launch
+                    }
+                    pairedDesktopIds = pairedDesktopIds + row.machineId
+                }
+                if (!drawerOpen) return@launch
+                drawerOpen = false
+                desktopTarget = DesktopChatTarget(row.machineId, row.conversation.id, row.machineName)
+            } finally {
+                if (!row.paired) pairingDesktopId = null
+            }
+        }
+    }
 
     LaunchedEffect(drawerOpen) {
         val target = if (drawerOpen) 1f else 0f
@@ -755,14 +1078,15 @@ private fun ChatHost(
         val target = pendingOpen
         if (!target.isNullOrBlank()) {
             currentSessionId = target
+            desktopTarget = null
             drawerOpen = false
             container.pendingOpenSessionId.value = null
         }
     }
 
     // 维护「当前可见会话」给完成通知做抑制；离开聊天页时清空。
-    DisposableEffect(currentSessionId) {
-        container.setForegroundSession(currentSessionId)
+    DisposableEffect(currentSessionId, desktopTarget == null) {
+        container.setForegroundSession(currentSessionId.takeIf { desktopTarget == null })
         onDispose { container.setForegroundSession(null) }
     }
 
@@ -788,9 +1112,99 @@ private fun ChatHost(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
-        // 内容（聊天页）
+        // 内容：电脑对话或本地聊天页，同在主页上，共用侧边栏。
         val selectedSessionId = currentSessionId
-        if (selectedSessionId == null) {
+        val shownDesktop = desktopTarget
+        if (shownDesktop != null) {
+            key(shownDesktop.key) {
+                val owner = remember(shownDesktop.key) { remoteChatHost.ownerFor(shownDesktop.key) }
+                val remoteVm: RemoteConversationViewModel = viewModel(
+                    viewModelStoreOwner = owner,
+                    key = shownDesktop.key,
+                    factory = ViewModelFactories.remoteConversation(
+                        container,
+                        shownDesktop.machineId,
+                        shownDesktop.conversationId,
+                        providerId = shownDesktop.providerId,
+                        modelId = shownDesktop.modelId,
+                        // 草稿在电脑上建成后记下对话 id：侧边栏能高亮它，进程重建后也按正式对话打开。
+                        onSent = { id ->
+                            val current = desktopTarget
+                            if (current?.key == shownDesktop.key && current.conversationId == null) {
+                                desktopTarget = current.copy(conversationId = id)
+                            }
+                        },
+                    ),
+                )
+                RemoteConversationScreen(
+                    vm = remoteVm,
+                    machineName = shownDesktop.machineName.ifBlank { "电脑" },
+                    enterToSend = settings.enterToSend,
+                    onVisible = { visible ->
+                        container.foregroundDesktopConversation.value =
+                            if (visible) "${shownDesktop.machineId}/${remoteVm.state.value.conversationId}" else null
+                    },
+                    onOpenDrawer = { drawerOpen = true },
+                    onNewConversation = { providerId, modelId ->
+                        desktopTarget = shownDesktop.copy(
+                            conversationId = null,
+                            providerId = providerId,
+                            modelId = modelId,
+                            draftKey = Ids.newSessionId(),
+                        )
+                    },
+                    onOpenSettings = onOpenSettings,
+                    drawerOpen = drawerOpen,
+                    // 还没发出首条消息的新对话：模型菜单与首页同一份，可以退回手机上的模型或换一台电脑。
+                    draftModelMenu = if (shownDesktop.conversationId == null) {
+                        { close ->
+                            DesktopDraftModelMenu(
+                                container = container,
+                                shownDesktop = shownDesktop,
+                                remoteVm = remoteVm,
+                                localSessionId = currentSessionId,
+                                settings = settings,
+                                desktopTargets = desktopTargets,
+                                desktopModels = desktopModels,
+                                onVisible = { modelMenuOpen = it },
+                                onOpenDesktopModels = ::openDesktopModels,
+                                onPickOtherDesktop = { target, providerId, modelId ->
+                                    close()
+                                    desktopTarget = DesktopChatTarget(
+                                        machineId = target.machineId,
+                                        conversationId = null,
+                                        machineName = target.name,
+                                        providerId = providerId,
+                                        modelId = modelId,
+                                        draftKey = Ids.newSessionId(),
+                                    )
+                                },
+                                onBackToPhone = { sessionId ->
+                                    close()
+                                    currentSessionId = sessionId
+                                    desktopTarget = null
+                                },
+                                onNewChatWithModel = { model ->
+                                    close()
+                                    newChatWithModel(model.id, model.providerId, model.providerKind, null)
+                                },
+                                onAuthExpired = {
+                                    close()
+                                    onAuthExpired()
+                                },
+                                onClose = close,
+                            )
+                        }
+                    } else {
+                        null
+                    },
+                    // 侧边栏推入时，与聊天页一样保留轻微右移视差。
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { translationX = size.width * 0.25f * drawerProgress.value },
+                )
+            }
+        } else if (selectedSessionId == null) {
             androidx.compose.material3.LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         } else {
             key(selectedSessionId) {
@@ -807,7 +1221,7 @@ private fun ChatHost(
                     viewModel = chatVm,
                     enterToSend = settings.enterToSend,
                     htmlAsCard = settings.htmlAsCard,
-                    showAgentControlShortcut = settings.showAgentControlShortcut,
+                    showAgentControlShortcut = settings.showAgentControlShortcut && account.loggedIn,
                     showImageWorkbenchShortcut = settings.showImageWorkbenchShortcut,
                     onOpenDrawer = { drawerOpen = true },
                     onOpenSettings = onOpenSettings,
@@ -817,27 +1231,31 @@ private fun ChatHost(
                     onAuthExpired = onAuthExpired,
                     onOpenAgentControl = onOpenAgentControl,
                     onOpenImageWorkbench = onOpenImageWorkbench,
-                    onNewChatWithModel = { modelId, providerId, kind, personaId ->
-                        scope.launch {
-                            // 跨阵营会新建会话，也必须与空白会话直接切换一样更新下次启动默认值。
-                            runCatching {
-                                container.settingsStore.setDefaultModelSelection(modelId, kind, providerId)
-                            }
-                            val conversation = container.sessionRepository.create(
-                                title = SessionRepository.DEFAULT_TITLE,
-                                model = modelId,
-                                providerId = providerId,
-                                providerKind = kind,
-                                personaId = personaId,
-                            )
-                            currentSessionId = conversation.sessionId
-                        }
-                    },
+                    onNewChatWithModel = ::newChatWithModel,
                     onNewChat = {
                         currentSessionId = Ids.newSessionId()
                         drawerOpen = false
                     },
                     drawerOpen = drawerOpen,
+                    desktopTargets = desktopTargets,
+                    desktopModels = desktopModels,
+                    onModelMenuVisible = { modelMenuOpen = it },
+                    onOpenDesktopModels = ::openDesktopModels,
+                    onPickDesktopModel = { target, providerId, modelId ->
+                        desktopTarget = DesktopChatTarget(
+                            machineId = target.machineId,
+                            conversationId = null,
+                            machineName = target.name,
+                            providerId = providerId,
+                            modelId = modelId,
+                            draftKey = Ids.newSessionId(),
+                        )
+                    },
+                    showDesktopHint = account.loggedIn && menuDesktopsLoaded &&
+                        menuPairedIds.isEmpty() && !settings.desktopHintDismissed,
+                    onDismissDesktopHint = {
+                        scope.launch { container.settingsStore.setDesktopHintDismissed(true) }
+                    },
                     // 侧边栏推入时，聊天页保留轻微右移视差。
                     modifier = Modifier
                         .fillMaxSize()
@@ -862,31 +1280,25 @@ private fun ChatHost(
             SessionDrawer(
                 sessions = sessionVm.sessionItems,
                 personaLabels = personaLabels,
-                currentSessionId = currentSessionId,
+                currentSessionId = currentSessionId.takeIf { desktopTarget == null },
+                currentDesktopKey = desktopTarget?.let { target -> target.conversationId?.let { "${target.machineId}/$it" } },
                 drawerOpen = drawerOpen,
                 onNewChat = {
                     currentSessionId = Ids.newSessionId()
+                    desktopTarget = null
                     drawerOpen = false
                 },
                 onSelect = { id ->
                     currentSessionId = id
+                    desktopTarget = null
                     drawerOpen = false
                 },
                 // 抽屉保持打开：从工作台返回时还在原处。
                 onOpenImageTask = onOpenImageTask,
-                onDelete = { id, nextSessionId ->
-                    scope.launch {
-                        // delete() 在 viewModelScope 里跑，join 后再提示，避免「已删除」早于落库。
-                        sessionVm.delete(id).join()
-                        if (id == currentSessionId) {
-                            currentSessionId = nextSessionId ?: Ids.newSessionId()
-                        }
-                        container.syncEngine.schedulePush(id)
-                        // 删的若是画图任务，这里只删了会话行；记录、图片和在途生成交给画图那边收尾。
-                        container.imageTaskManager.onConversationsDeleted()
-                        snackbar.showSnackbar("已删除 1 个对话")
-                    }
-                },
+                onOpenDesktopConversation = ::openDesktopFromDrawer,
+                desktopLoadError = desktopLoadError,
+                desktopLoginRequired = !account.loggedIn,
+                desktopPairingInProgress = pairingDesktopId != null,
                 onDeleteMany = { ids, nextSessionId ->
                     scope.launch {
                         val deleted = sessionVm.deleteAll(ids)
@@ -898,7 +1310,7 @@ private fun ChatHost(
                         snackbar.showSnackbar("已删除 ${deleted.size} 个对话")
                     }
                 },
-                onRequestAllIds = { sessionVm.allVisibleSessionIds() },
+                onRequestAllIds = { sessionVm.allVisibleSessionIds(sessionVm.sessionItems.filter.value) },
             )
         }
 
@@ -909,4 +1321,156 @@ private fun ChatHost(
                 .windowInsetsPadding(WindowInsets.navigationBars),
         )
     }
+}
+
+/** 设置页「电脑」一行的状态。 */
+private fun desktopStatusText(desktops: List<DesktopInfo>): String {
+    if (desktops.isEmpty()) return "尚未连接电脑"
+    val online = desktops.count { it.online }
+    return if (online > 0) "$online 台电脑在线" else "电脑离线"
+}
+
+/**
+ * 主页上显示的电脑对话。[conversationId] 为 null 是在电脑上起草的新对话，[draftKey] 区分每一次起草。
+ * 草稿发出首条消息后会补上 [conversationId]；[key] 对草稿始终取 [draftKey]，补上后仍是同一个 ViewModel。
+ */
+internal data class DesktopChatTarget(
+    val machineId: String,
+    val conversationId: String?,
+    val machineName: String,
+    val providerId: String? = null,
+    val modelId: String? = null,
+    val draftKey: String = "",
+) {
+    val key: String get() = if (draftKey.isNotEmpty()) "$machineId/draft:$draftKey" else "$machineId/$conversationId"
+}
+
+private val DesktopChatTargetSaver = Saver<DesktopChatTarget?, ArrayList<String>>(
+    save = { target ->
+        target?.let {
+            arrayListOf(it.machineId, it.conversationId.orEmpty(), it.machineName, it.providerId.orEmpty(), it.modelId.orEmpty(), it.draftKey)
+        }
+    },
+    restore = { saved ->
+        DesktopChatTarget(
+            machineId = saved[0],
+            conversationId = saved[1].ifEmpty { null },
+            machineName = saved[2],
+            providerId = saved[3].ifEmpty { null },
+            modelId = saved[4].ifEmpty { null },
+            draftKey = saved[5],
+        )
+    },
+)
+
+/**
+ * 主页上电脑对话的 ViewModel 容器。电脑对话的 ViewModel 持有实时连接，不能像本地会话那样一直留在主页的存储里；
+ * 放进这里的独立存储，换到别的对话就整个清掉。容器本身随主页存活，跳到二级页再回来、旋转屏幕都保留。
+ */
+internal class RemoteChatHost : ViewModel() {
+    private var key: String? = null
+    private var store: ViewModelStore? = null
+
+    fun ownerFor(key: String): ViewModelStoreOwner {
+        if (this.key != key) {
+            store?.clear()
+            store = ViewModelStore()
+            this.key = key
+        }
+        val current = store!!
+        return object : ViewModelStoreOwner {
+            override val viewModelStore: ViewModelStore = current
+        }
+    }
+
+    fun clear() {
+        store?.clear()
+        store = null
+        key = null
+    }
+
+    override fun onCleared() = clear()
+}
+
+/**
+ * 电脑上还没发出首条消息的新对话，它的模型菜单。内容与首页模型菜单相同，打开时停在这台电脑的模型页；
+ * 返回上一级可改选别的电脑，或手机上的模型——当前本机会话还是空白的就直接切过去，否则用那个模型新建本机对话。
+ */
+@Composable
+private fun DesktopDraftModelMenu(
+    container: AppContainer,
+    shownDesktop: DesktopChatTarget,
+    remoteVm: RemoteConversationViewModel,
+    localSessionId: String?,
+    settings: AppSettings,
+    desktopTargets: List<DesktopRunTarget>,
+    desktopModels: DesktopModelsState?,
+    onVisible: (Boolean) -> Unit,
+    onOpenDesktopModels: (machineId: String) -> Unit,
+    onPickOtherDesktop: (target: DesktopRunTarget, providerId: String, modelId: String) -> Unit,
+    onBackToPhone: (sessionId: String) -> Unit,
+    onNewChatWithModel: (ProviderModel) -> Unit,
+    onAuthExpired: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val sessionId = remember { localSessionId ?: Ids.newSessionId() }
+    val localVm: ChatViewModel = viewModel(
+        key = "chat-$sessionId",
+        factory = ViewModelFactories.chat(container = container, sessionId = sessionId, settings = settings),
+    )
+    val localState by localVm.uiState.collectAsStateWithLifecycle()
+    val remoteSettings = remoteVm.state.collectAsStateWithLifecycle().value.settings
+    var page by remember { mutableStateOf<String?>(shownDesktop.machineId) }
+    // 菜单内容只在打开期间组合：进来即取这台电脑的模型，宿主同时保持连接、刷新电脑列表。
+    DisposableEffect(Unit) {
+        onVisible(true)
+        onOpenDesktopModels(shownDesktop.machineId)
+        onDispose { onVisible(false) }
+    }
+    // 电脑列表还没取到时补上这台，菜单仍能停在它的模型页。
+    val targets = remember(desktopTargets, shownDesktop.machineId) {
+        if (desktopTargets.any { it.machineId == shownDesktop.machineId }) {
+            desktopTargets
+        } else {
+            listOf(DesktopRunTarget(shownDesktop.machineId, shownDesktop.machineName, online = true, paired = true)) + desktopTargets
+        }
+    }
+    ModelMenuContent(
+        state = localState,
+        desktopPage = page,
+        onDesktopPageChange = { page = it },
+        desktopTargets = targets,
+        desktopModels = desktopModels,
+        onOpenDesktopModels = onOpenDesktopModels,
+        onPickDesktopModel = { target, group, model ->
+            if (target.machineId == shownDesktop.machineId) {
+                onClose()
+                remoteVm.selectModel(group, model)
+            } else {
+                onPickOtherDesktop(target, group.providerId, model.id)
+            }
+        },
+        onPickModel = { model ->
+            val blank = localState.messages.isEmpty() &&
+                localState.pendingAttachments.isEmpty() &&
+                !localState.isLoadingHistory
+            when {
+                model.loginRequired -> onAuthExpired()
+                blank -> {
+                    localVm.selectModel(model.id, model.providerId)
+                    onBackToPhone(sessionId)
+                }
+                else -> onNewChatWithModel(model)
+            }
+        },
+        onRefreshModels = {
+            if (localState.isMolaModelConfigLoaded) localVm.refreshModels() else localVm.ensureMolaModelsLoaded()
+        },
+        showSelection = false,
+        isDesktopModelSelected = { machineId, providerId, modelId ->
+            machineId == shownDesktop.machineId &&
+                remoteSettings?.providerId == providerId &&
+                remoteSettings.modelId == modelId
+        },
+    )
 }

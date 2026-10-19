@@ -104,6 +104,7 @@ class MainActivity : ComponentActivity() {
         container.requestOpenImageTask(intent?.getStringExtra(NotificationController.EXTRA_OPEN_IMAGE_TASK))
         val agentSessionId = intent?.getStringExtra(AgentNotificationController.EXTRA_OPEN_AGENT_SESSION)
         if (!agentSessionId.isNullOrBlank()) container.requestOpenAgentSession(agentSessionId)
+        container.requestOpenDesktopConversation(intent?.getStringExtra(DesktopNotificationMonitor.EXTRA_OPEN_DESKTOP_CONVERSATION))
     }
 
     private fun maybeRequestNotificationPermission() {

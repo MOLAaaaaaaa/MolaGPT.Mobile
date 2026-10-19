@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import com.molagpt.app.AgentNotificationController
 import com.molagpt.app.AgentNotificationMonitor
+import com.molagpt.app.DesktopNotificationMonitor
 import com.molagpt.app.NotificationController
 import com.molagpt.app.StreamForegroundService
 import com.molagpt.app.core.common.DefaultDispatchers
@@ -20,6 +21,10 @@ import com.molagpt.app.core.model.webSearchApiKeyKey
 import com.molagpt.app.core.network.AltchaSolver
 import com.molagpt.app.core.network.AccountStatusCache
 import com.molagpt.app.core.network.AgentControlService
+import com.molagpt.app.core.network.DesktopRemoteService
+import com.molagpt.app.core.network.RemotePair
+import com.molagpt.app.core.network.RemotePairStore
+import com.molagpt.app.feature.agentcontrol.desktop.DesktopSnapshotCache
 import com.molagpt.app.core.network.AuthApi
 import com.molagpt.app.core.network.ByokChatService
 import com.molagpt.app.core.network.ByokImageApi
@@ -139,7 +144,8 @@ class AppContainer(
     val settingsFlow: StateFlow<AppSettings?> = _settingsFlow.asStateFlow()
     private val currentSettings: AppSettings get() = settingsFlow.value ?: AppSettings()
 
-    private val database = MolaDatabase.build(context)
+    private val wireHistoryStore = com.molagpt.app.core.storage.WireHistoryStore(context.filesDir)
+    private val database = MolaDatabase.build(context, wireHistoryStore)
     val modelRegistry = ModelRegistry()
     val byokProviderRepository = ByokProviderRepository(
         dao = database.byokProviderDao(),
@@ -392,6 +398,7 @@ class AppContainer(
         dispatchers = dispatchers,
         cloudSyncEnabled = { currentSettings.cloudSyncEnabled },
         contextCheckpointDao = database.contextCheckpointDao(),
+        wireHistoryStore = wireHistoryStore,
     )
 
     /**
@@ -425,6 +432,7 @@ class AppContainer(
         postProcessor = responseTextProcessor,
         pricingResolver = { providerId, modelId -> byokProviderRepository.get(providerId)?.models?.firstOrNull { it.id == modelId }?.pricing },
         contextCompactor = contextCompactor,
+        wireHistoryStore = wireHistoryStore,
     )
 
     /** 云同步底层调用（会话同步 / 用户设置写入 update_setting）。 */
@@ -457,6 +465,63 @@ class AppContainer(
             }
         },
     )
+
+    /**
+     * 手机远控电脑上的 MolaGPT 对话（Work / BYOK）。与每台电脑的配对密钥按账号加密存在
+     * CredentialStore；最后看到的电脑列表和对话快照存在 noBackupFilesDir，供打开时先显示、电脑离线时查看。
+     */
+    val desktopRemoteService = DesktopRemoteService(
+        http = http,
+        dispatchers = dispatchers,
+        jwtProvider = { credentialStore.jwt },
+        pairs = object : RemotePairStore {
+            private fun prefix(): String? = credentialStore.username?.let { "remote.pair.${userKey(it)}." }
+            private fun index(prefix: String?): List<String> =
+                prefix?.let { credentialStore.loadSecret(it + "index") }?.split(',')?.filter { it.isNotBlank() }.orEmpty()
+
+            private fun writeIndex(prefix: String, ids: List<String>) {
+                credentialStore.saveSecret(prefix + "index", ids.distinct().joinToString(",").ifEmpty { null })
+            }
+
+            override fun load(machineId: String): RemotePair? {
+                val raw = prefix()?.let { credentialStore.loadSecret(it + machineId) } ?: return null
+                val pairId = raw.substringBefore('|')
+                val secret = runCatching { android.util.Base64.decode(raw.substringAfter('|'), android.util.Base64.NO_WRAP) }.getOrNull()
+                return if (pairId.isBlank() || secret == null || secret.size != 32) null else RemotePair(pairId, secret)
+            }
+
+            override fun save(machineId: String, pair: RemotePair, expectedJwt: String): Boolean {
+                val prefix = prefix() ?: return false
+                if (credentialStore.jwt != expectedJwt) return false
+                credentialStore.saveSecret(prefix + machineId, pair.pairId + "|" + android.util.Base64.encodeToString(pair.secret, android.util.Base64.NO_WRAP))
+                writeIndex(prefix, index(prefix) + machineId)
+                return true
+            }
+
+            override fun remove(machineId: String) {
+                val prefix = prefix() ?: return
+                credentialStore.removeSecret(prefix + machineId)
+                writeIndex(prefix, index(prefix) - machineId)
+            }
+
+            override fun hasAny(): Boolean = index(prefix()).isNotEmpty()
+        },
+        listCacheFile = {
+            credentialStore.username?.let { java.io.File(appContext.noBackupFilesDir, "desktop-list/${userKey(it)}.json") }
+        },
+    )
+
+    val desktopSnapshotCache = DesktopSnapshotCache {
+        credentialStore.username?.let { java.io.File(appContext.noBackupFilesDir, "desktop-remote/${userKey(it)}") }
+    }
+
+    /** 配对时告诉电脑这是哪台手机。 */
+    val remoteDeviceId: String get() = agentDeviceId
+    val remoteDeviceName: String get() = agentDeviceName
+
+    private fun userKey(username: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(username.toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(16)
 
     /** 云同步引擎（个人中心“立即同步”、登录、每轮完成均触发）。 */
     val syncEngine = SyncEngine(
@@ -592,6 +657,26 @@ class AppContainer(
         isAuthenticated = { !credentialStore.jwt.isNullOrBlank() },
     )
 
+    /** 当前可见的电脑对话（machineId/conversationId），用于提醒抑制。 */
+    val foregroundDesktopConversation = MutableStateFlow<String?>(null)
+
+    /** 通知请求打开的电脑对话（machineId/conversationId）；导航消费后清空。 */
+    val pendingOpenDesktopConversation = MutableStateFlow<String?>(null)
+
+    internal val desktopNotificationMonitor = DesktopNotificationMonitor(
+        context = appContext,
+        service = desktopRemoteService,
+        scope = applicationScope,
+        notifyEnabled = { currentSettings.completionNotify },
+        isAuthenticated = { !credentialStore.jwt.isNullOrBlank() },
+        appForeground = { appForeground.value },
+        foregroundConversation = { foregroundDesktopConversation.value },
+    )
+
+    fun requestOpenDesktopConversation(key: String?) {
+        if (!key.isNullOrBlank() && key.contains('/')) pendingOpenDesktopConversation.value = key
+    }
+
     fun setAppForeground(value: Boolean) {
         val wasBackground = !appForeground.value
         appForeground.value = value
@@ -639,6 +724,10 @@ class AppContainer(
         }
         // 启动时校验 UA 是否漂移，漂移则静默清 token。
         authService.ensureJwtValidForUa()
+
+        applicationScope.launch {
+            authService.account.collect { desktopRemoteService.reconnectNow() }
+        }
 
         // 设置快照：供 Compose、聊天 VM 与后台服务共用，避免多个 DataStore 订阅和首帧假默认值。
         applicationScope.launch {
@@ -734,6 +823,7 @@ class AppContainer(
      * 会话删除和编辑截断都不经过附件层，孤儿只能靠这一步统一清理。
      */
     private suspend fun sweepOrphanAttachments() {
+        chatRepository.sweepWireHistoryFiles()
         runCatching {
             val referenced = chatRepository.referencedAttachmentPaths()
             AttachmentStore(appContext).sweep(referenced)

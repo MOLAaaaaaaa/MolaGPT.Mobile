@@ -2,6 +2,7 @@ package com.molagpt.app.feature.session
 
 import androidx.compose.runtime.Immutable
 import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.model.DesktopConversation
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.storage.SessionHit
 import java.text.SimpleDateFormat
@@ -18,17 +19,44 @@ sealed interface SessionListItem {
         override val contentType: String = "header"
     }
 
+    /** 归入「置顶 / 今天 / 最近 7 天 / 更早」分组的行。 */
+    sealed interface Grouped : SessionListItem {
+        val groupLabel: String
+    }
+
     data class Row(
         val conversation: Conversation,
         val time: String,
-        val groupLabel: String,
+        override val groupLabel: String,
         /** 正文命中片段；标题命中或非搜索态为 null，UI 据此决定是否展示第二行。 */
         val snippet: String? = null,
-    ) : SessionListItem {
+    ) : Grouped {
         override val key: String = conversation.sessionId
         override val contentType: String = "conversation"
     }
+
+    /** 电脑 Work 会话，按更新时间与本地会话交错排列。 */
+    data class Desktop(
+        val row: DesktopSidebarConversation,
+        val time: String,
+        override val groupLabel: String,
+        /** 来源标签里的次要信息：离线状态，以及多台电脑时的电脑名。 */
+        val detail: String?,
+    ) : Grouped {
+        override val key: String = "desktop:${row.machineId}/${row.conversation.id}"
+        override val contentType: String = "desktop-conversation"
+    }
 }
+
+/** 电脑 Work 会话在侧边栏中的投影；正文仍由电脑端提供，不进入 Room。 */
+data class DesktopSidebarConversation(
+    val machineId: String,
+    val machineName: String,
+    val conversation: DesktopConversation,
+    val online: Boolean,
+    val paired: Boolean,
+    val pairing: Boolean = false,
+)
 
 /**
  * 会话行上的角色名快照（角色 id → 名称）。
@@ -76,21 +104,34 @@ internal class SessionListGrouping(
 
     fun row(hit: SessionHit): SessionListItem.Row {
         val conversation = hit.conversation
-        val groupLabel = when {
-            conversation.pinned -> GROUP_PINNED
-            conversation.updatedAt >= startToday -> GROUP_TODAY
-            conversation.updatedAt >= startWeek -> GROUP_RECENT
-            else -> GROUP_OLDER
-        }
         return SessionListItem.Row(
             conversation = conversation,
             time = timeLabel(conversation.updatedAt, startToday, startWeek, timeFormat, dateFormat),
-            groupLabel = groupLabel,
+            groupLabel = if (conversation.pinned) GROUP_PINNED else groupOf(conversation.updatedAt),
             snippet = hit.matchedSnippet?.let(::normalizeSnippet)?.takeIf { it.isNotEmpty() },
         )
     }
 
-    fun headerBetween(before: SessionListItem.Row?, after: SessionListItem.Row?): SessionListItem.Header? {
+    fun desktopRow(row: DesktopSidebarConversation, showMachine: Boolean): SessionListItem.Desktop {
+        val at = row.conversation.updatedAtMs
+        return SessionListItem.Desktop(
+            row = row,
+            time = if (at > 0) timeLabel(at, startToday, startWeek, timeFormat, dateFormat) else "",
+            groupLabel = groupOf(at),
+            detail = listOfNotNull(
+                "离线".takeIf { !row.online },
+                row.machineName.takeIf { showMachine },
+            ).joinToString(" · ").ifEmpty { null },
+        )
+    }
+
+    private fun groupOf(updatedAt: Long): String = when {
+        updatedAt >= startToday -> GROUP_TODAY
+        updatedAt >= startWeek -> GROUP_RECENT
+        else -> GROUP_OLDER
+    }
+
+    fun headerBetween(before: SessionListItem.Grouped?, after: SessionListItem.Grouped?): SessionListItem.Header? {
         if (after == null) return null
         return if (before?.groupLabel == after.groupLabel) null else SessionListItem.Header(after.groupLabel)
     }

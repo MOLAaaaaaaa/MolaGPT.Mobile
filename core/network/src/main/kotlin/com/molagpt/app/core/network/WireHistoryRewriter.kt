@@ -44,7 +44,14 @@ object WireHistoryRewriter {
      */
     fun rewrite(raw: String?, replacements: List<TextReplacement>): String? {
         if (raw.isNullOrBlank()) return null
-        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
+        val header = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
+        val file = header["wire_file"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val root = if (file == null) {
+            header
+        } else {
+            val content = WireHistorySource.readFile(file)
+            runCatching { json.parseToJsonElement(content) as? JsonObject }.getOrNull() ?: return null
+        }
         val wireApi = root["wire_api"]?.jsonPrimitive?.contentOrNull ?: return null
         // 先认协议再看内容：不然一份 items 为空的陌生快照会一路走到底，被当成「改写成功」留下来。
         if (wireApi !in KNOWN_WIRE_APIS) return null
@@ -123,7 +130,16 @@ object WireHistoryRewriter {
             cursor = cursor,
             textOf = { part ->
                 val isThought = part["thought"]?.jsonPrimitive?.booleanOrNull == true
-                if (isThought || part.containsKey("functionCall")) null else part.text()
+                if (
+                    isThought ||
+                        part.containsKey("functionCall") ||
+                        part.containsKey("inlineData") ||
+                        part.containsKey("inline_data")
+                ) {
+                    null
+                } else {
+                    part.text()
+                }
             },
         ) ?: return null
         return JsonObject(item + ("parts" to JsonArray(rewritten)))

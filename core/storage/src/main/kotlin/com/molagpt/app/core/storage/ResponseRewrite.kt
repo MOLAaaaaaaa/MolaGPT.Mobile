@@ -48,7 +48,7 @@ internal object ResponseRewrite {
         var out = metadata
         for (key in ChatMessageMetadataKeys.WIRE_HISTORY) {
             val raw = metadata[key] ?: continue
-            val rewritten = runCatching { WireHistoryRewriter.rewrite(raw, replacements) }.getOrNull()
+            val rewritten = WireHistoryRewriter.rewrite(raw, replacements)
             out = if (rewritten != null) out + (key to rewritten) else out - key
         }
         return out

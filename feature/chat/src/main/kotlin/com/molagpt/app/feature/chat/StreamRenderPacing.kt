@@ -21,23 +21,27 @@ internal fun StreamRenderPacingEffect(active: Boolean) {
     }
 }
 
-internal object StreamRenderPacing {
+/**
+ * 流式刷新节奏：按最近的掉帧情况给出合并窗口，帧率健康时 16ms，一卡就放宽（最多 250ms）。
+ * 聊天页按它给网络增量分批；电脑对话按它推进逐字放出。
+ */
+object StreamRenderPacing {
     private val tracker = FrameIntervalTracker()
     private var monitorCount = 0
 
     @Synchronized
-    fun startMonitoring() {
+    internal fun startMonitoring() {
         if (monitorCount++ == 0) tracker.reset()
     }
 
     @Synchronized
-    fun stopMonitoring() {
+    internal fun stopMonitoring() {
         monitorCount = (monitorCount - 1).coerceAtLeast(0)
         if (monitorCount == 0) tracker.reset()
     }
 
     @Synchronized
-    fun onFrame(frameTimeNanos: Long) {
+    internal fun onFrame(frameTimeNanos: Long) {
         tracker.onFrame(frameTimeNanos)
     }
 

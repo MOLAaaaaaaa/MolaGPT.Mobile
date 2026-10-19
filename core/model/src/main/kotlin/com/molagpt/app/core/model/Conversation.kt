@@ -37,5 +37,14 @@ data class Conversation(
     val byokMemoryWatermarkAt: Long = 0L,
 )
 
+/** 侧边栏会话来源筛选。电脑 Work 会话不存入本地会话表，由侧边栏单独合并。 */
+enum class ConversationFilter(val wire: String, val label: String) {
+    ALL("ALL", "全部"),
+    /** MolaGPT Chat 与 BYOK 对话；行上的来源图标区分两者。 */
+    CHAT("CHAT", "对话"),
+    IMAGE("IMAGE", "图像"),
+    DESKTOP_WORK("DESKTOP_WORK", "电脑"),
+}
+
 /** 这一行是画图任务（见 [ProviderIds.IMAGE_WORKBENCH]），点开应进画图工作台而不是聊天页。 */
 val Conversation.isImageTask: Boolean get() = providerId == ProviderIds.IMAGE_WORKBENCH

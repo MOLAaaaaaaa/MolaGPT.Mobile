@@ -38,12 +38,28 @@ internal object OpenAiWireHistory {
     ): List<JsonObject>? {
         if (raw.isNullOrBlank()) return null
         val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
-        if (root["version"]?.jsonPrimitive?.intOrNull != VERSION) return null
-        if (root["wire_api"]?.jsonPrimitive?.contentOrNull != expectedWireApi) return null
-        if (root["provider_id"]?.jsonPrimitive?.contentOrNull != expectedProviderId) return null
-        if (root["model_id"]?.jsonPrimitive?.contentOrNull != expectedModelId) return null
-        return (root["items"] as? JsonArray)
+        if (!matches(root, expectedWireApi, expectedProviderId, expectedModelId)) return null
+        val file = root["wire_file"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val payload = if (file == null) {
+            root
+        } else {
+            val content = WireHistorySource.readFile(file)
+            runCatching { json.parseToJsonElement(content) as? JsonObject }.getOrNull() ?: return null
+        }
+        if (!matches(payload, expectedWireApi, expectedProviderId, expectedModelId)) return null
+        return (payload["items"] as? JsonArray)
             ?.mapNotNull { it as? JsonObject }
             ?.takeIf { it.isNotEmpty() }
     }
+
+    private fun matches(
+        root: JsonObject,
+        expectedWireApi: String,
+        expectedProviderId: String,
+        expectedModelId: String,
+    ): Boolean =
+        root["version"]?.jsonPrimitive?.intOrNull == VERSION &&
+            root["wire_api"]?.jsonPrimitive?.contentOrNull == expectedWireApi &&
+            root["provider_id"]?.jsonPrimitive?.contentOrNull == expectedProviderId &&
+            root["model_id"]?.jsonPrimitive?.contentOrNull == expectedModelId
 }

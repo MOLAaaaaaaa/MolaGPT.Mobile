@@ -43,7 +43,13 @@ fun PersonaWelcome(
     /** 当前角色的卡片头像；没有就退回矢量图标。 */
     avatar: java.io.File? = null,
     onOpenPersonaPicker: () -> Unit,
+    /** 替换欢迎语下的说明。 */
+    subtitle: String? = null,
+    /** 对话在哪儿运行，例如电脑名；显示为说明下方的一枚标签。 */
+    location: String? = null,
     modifier: Modifier = Modifier,
+    /** 欢迎区最下方的附加内容，如首页引导。 */
+    footer: (@Composable () -> Unit)? = null,
 ) {
     Column(
         modifier = modifier.fillMaxSize(),
@@ -60,11 +66,15 @@ fun PersonaWelcome(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = if (isByok) "可选择一个角色来定制回答风格" else "MolaGPT 会尽力提供帮助",
+            text = subtitle ?: if (isByok) "可选择一个角色来定制回答风格" else "MolaGPT 会尽力提供帮助",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+        if (location != null) {
+            Spacer(Modifier.height(12.dp))
+            LocationTag(location)
+        }
 
         if (isByok) {
             Spacer(Modifier.height(32.dp))
@@ -75,6 +85,32 @@ fun PersonaWelcome(
                 modifier = Modifier.padding(horizontal = 32.dp),
             )
         }
+        if (footer != null) {
+            Spacer(Modifier.height(if (isByok) 16.dp else 28.dp))
+            footer()
+        }
+    }
+}
+
+@Composable
+private fun LocationTag(text: String) {
+    val cs = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(cs.surfaceVariant.copy(alpha = 0.5f))
+            .padding(horizontal = 12.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(cs.primary))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            color = cs.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

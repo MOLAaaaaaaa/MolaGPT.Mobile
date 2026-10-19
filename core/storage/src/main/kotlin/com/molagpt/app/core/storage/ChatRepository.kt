@@ -50,6 +50,7 @@ class ChatRepository(
     private val postProcessor: ResponseTextProcessor = ResponseTextProcessor { it },
     /** BYOK 上下文压缩。为 null 时请求原样发出。 */
     private val contextCompactor: ContextCompactor? = null,
+    private val wireHistoryStore: WireHistoryStore? = null,
 ) {
     private val controller = ChatStreamController()
 
@@ -57,7 +58,7 @@ class ChatRepository(
         messageDao.observeBySession(sessionId).map { rows -> rows.map { it.toDomain() } }
 
     suspend fun persistUserMessage(message: ChatMessage) = withContext(dispatchers.io) {
-        messageDao.upsert(message.toEntity())
+        messageDao.upsert(message.toEntity(wireHistoryStore))
         conversationDao.touch(message.sessionId, System.currentTimeMillis(), message.rawText?.take(60))
     }
 
@@ -76,7 +77,7 @@ class ChatRepository(
      */
     suspend fun persistGreeting(message: ChatMessage): Boolean = withContext(dispatchers.io) {
         if (messageDao.count(message.sessionId) > 0) return@withContext false
-        messageDao.upsert(message.toEntity())
+        messageDao.upsert(message.toEntity(wireHistoryStore))
         conversationDao.refreshListVisibility(message.sessionId)
         true
     }
@@ -107,6 +108,10 @@ class ChatRepository(
             }
             .mapNotNull { it.localPath?.takeIf(String::isNotBlank) }
             .toSet()
+    }
+
+    suspend fun sweepWireHistoryFiles() = withContext(dispatchers.io) {
+        wireHistoryStore?.sweep(messageDao.allMetadataWithWireFiles())
     }
 
     /** regenerate / edit 的本地裁剪：删掉指定时间点及之后的消息，随后由 ViewModel 重新发起。 */
@@ -306,7 +311,7 @@ class ChatRepository(
                 finalMsg = finalMsg.withAttempts(priorAttempts)
             }
             withContext(NonCancellable + dispatchers.io) {
-                messageDao.upsert(finalMsg.toEntity())
+                messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
                 conversationDao.touch(request.sessionId, System.currentTimeMillis(), finalMsg.rawText?.take(60))
             }
         }
@@ -314,7 +319,7 @@ class ChatRepository(
 
     /** 持久化单条消息（版本切换后落库）。 */
     suspend fun updateMessage(message: ChatMessage) = withContext(dispatchers.io) {
-        messageDao.upsert(message.toEntity())
+        messageDao.upsert(message.toEntity(wireHistoryStore))
         conversationDao.refreshListVisibility(message.sessionId)
     }
 
@@ -376,7 +381,7 @@ class ChatRepository(
                 metadata = msg.metadata - "pending",
             )
             withContext(NonCancellable + dispatchers.io) {
-                messageDao.upsert(finalMsg.toEntity())
+                messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
                 conversationDao.touch(sessionId, System.currentTimeMillis(), finalMsg.rawText?.take(60))
             }
         }
@@ -493,7 +498,8 @@ class ChatRepository(
                 frags.add(MessageFragment.Image(Ids.newFragmentId(), cmd.url, cmd.prompt))
             }
             is DeltaCommand.SetMetadata -> {
-                meta = meta + (cmd.key to cmd.value)
+                val next = mapOf(cmd.key to cmd.value)
+                meta = meta + (wireHistoryStore?.storeMetadata(msg.sessionId, next) ?: next)
             }
             is DeltaCommand.Complete -> {
                 status = MessageStatus.COMPLETE
@@ -530,11 +536,13 @@ class ChatRepository(
      * 规则够不到它们——这也是移动端不必像桌面端那样为工具标记做偏移重映射的原因。
      * 正文变了的话，下一轮回放用的协议快照由 [ResponseRewrite] 一并跟上。
      *
-     * **无论如何都不会抛**：规则是用户自己写的，写坏了顶多是不改写，绝不能让一条回答
-     * 因此落不了库。
+     * 规则执行失败时保留原回答；外置文件写入失败仍正常抛出。
      */
-    private suspend fun applyPostProcessing(msg: ChatMessage): ChatMessage =
-        runCatching { ResponseRewrite.apply(msg) { postProcessor.process(it) } }.getOrDefault(msg)
+    private suspend fun applyPostProcessing(msg: ChatMessage): ChatMessage {
+        val processed = runCatching { ResponseRewrite.apply(msg) { postProcessor.process(it) } }.getOrDefault(msg)
+        val stored = wireHistoryStore?.storeMetadata(msg.sessionId, processed.metadata) ?: processed.metadata
+        return if (stored === processed.metadata) processed else processed.copy(metadata = stored)
+    }
 
     private companion object {
         const val OVERFLOW_NOTICE = "对话超出模型上下文长度"

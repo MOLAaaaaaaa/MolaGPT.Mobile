@@ -54,9 +54,10 @@ internal fun MessageEntity.toDomain(): ChatMessage {
     )
 }
 
-internal fun ChatMessage.toEntity(): MessageEntity {
+internal fun ChatMessage.toEntity(wireHistoryStore: WireHistoryStore? = null): MessageEntity {
     val storedFragments = fragments.map { it.stripInlineDataForStorage() }
     val storedAttachments = attachments.map { it.stripInlineDataForStorage() }
+    val storedMetadata = wireHistoryStore?.storeMetadata(sessionId, metadata) ?: metadata
     return MessageEntity(
         messageId = messageId,
         sessionId = sessionId,
@@ -69,9 +70,9 @@ internal fun ChatMessage.toEntity(): MessageEntity {
         model = model,
         metadataJson = MessageJson.encodeMeta(
             if (storedAttachments.isEmpty()) {
-                metadata
+                storedMetadata
             } else {
-                metadata + ("attachments" to MessageJson.encodeAttachments(storedAttachments))
+                storedMetadata + ("attachments" to MessageJson.encodeAttachments(storedAttachments))
             },
         ),
     )

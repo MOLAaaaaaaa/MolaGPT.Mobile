@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -45,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -216,6 +219,7 @@ private fun HubScaffold(
     onExit: () -> Unit,
     onNew: () -> Unit,
 ) {
+    val layoutDirection = LocalLayoutDirection.current
     MolaScaffold(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         containerColor = MaterialTheme.colorScheme.surface,
@@ -247,7 +251,8 @@ private fun HubScaffold(
             connectionState = connectionState,
             onSelect = onSelect,
             onReconnect = onReconnect,
-            modifier = Modifier.padding(inner),
+            modifier = Modifier.padding(start = inner.calculateStartPadding(layoutDirection), end = inner.calculateEndPadding(layoutDirection)),
+            topPadding = inner.calculateTopPadding(),
         )
     }
 }

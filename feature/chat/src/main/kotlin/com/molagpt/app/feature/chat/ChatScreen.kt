@@ -81,6 +81,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -112,6 +113,8 @@ import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.Persona
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.model.RemoteModelChoice
+import com.molagpt.app.core.model.RemoteModelGroup
 import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.render.MolaBottomEdge
 import com.molagpt.app.feature.chat.persona.PersonaPickerSheet
@@ -154,6 +157,18 @@ fun ChatScreen(
     drawerOpen: Boolean = false,
     /** 设置「网页以卡片显示」。 */
     htmlAsCard: Boolean = true,
+    /** 模型菜单最上方「在电脑上运行」的电脑；为空时不显示这一节。 */
+    desktopTargets: List<DesktopRunTarget> = emptyList(),
+    /** 菜单里点开的那台电脑的模型。 */
+    desktopModels: DesktopModelsState? = null,
+    /** 模型菜单开合：打开期间宿主保持电脑连接、刷新电脑列表。 */
+    onModelMenuVisible: (Boolean) -> Unit = {},
+    onOpenDesktopModels: (machineId: String) -> Unit = {},
+    /** 选了电脑的模型：在那台电脑上新建对话。 */
+    onPickDesktopModel: (target: DesktopRunTarget, providerId: String, modelId: String) -> Unit = { _, _, _ -> },
+    /** 欢迎页显示「在手机上继续电脑上的对话」引导。 */
+    showDesktopHint: Boolean = false,
+    onDismissDesktopHint: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -173,6 +188,12 @@ fun ChatScreen(
     val memoryHint by viewModel.memoryHint.collectAsStateWithLifecycle()
     val contextUsage by viewModel.contextUsage.collectAsStateWithLifecycle()
     var modelMenuOpen by remember { mutableStateOf(false) }
+    /** 模型菜单里点开的电脑；为 null 时显示菜单首页。 */
+    var desktopPage by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(modelMenuOpen) {
+        onModelMenuVisible(modelMenuOpen)
+        if (!modelMenuOpen) desktopPage = null
+    }
     var personaSheetOpen by remember { mutableStateOf(false) }
     /** 正在改写的助手消息 id。编辑回答走独立弹层而不是输入框——输入框的按钮是「发送」，语义不同。 */
     var editingAssistantId by remember { mutableStateOf<String?>(null) }
@@ -431,159 +452,34 @@ fun ChatScreen(
                         onDismissRequest = { modelMenuOpen = false },
                         properties = PopupProperties(focusable = false),
                     ) {
-                        if (state.modelGroups.isEmpty()) {
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        when {
-                                            state.isModelRefreshing -> "正在获取 MolaGPT 模型..."
-                                            state.isMolaModelConfigLoaded -> "暂无可用 MolaGPT 模型 · 点此刷新"
-                                            else -> "未获取到 MolaGPT 模型 · 点此重试"
-                                        },
-                                    )
-                                },
-                                onClick = {
-                                    if (!state.isModelRefreshing) {
-                                        if (state.isMolaModelConfigLoaded) viewModel.refreshModels()
-                                        else viewModel.ensureMolaModelsLoaded()
-                                    }
-                                },
-                                enabled = !state.isModelRefreshing,
-                            )
-                        } else {
-                            state.modelGroups.forEachIndexed { index, group ->
-                                if (index > 0) HorizontalDivider()
-                                // 分组标题（不可点）。
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            group.title,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.primary,
-                                        )
-                                    },
-                                    onClick = {},
-                                    enabled = false,
-                                )
-                                group.models.forEach { model ->
-                                    val sameKind = group.kind == state.providerKind
-                                    val selected = state.selectedModel?.let {
-                                        it.id == model.id && it.providerId == model.providerId
-                                    } == true
-                                    DropdownMenuItem(
-                                        text = {
-                                            Column(modifier = Modifier.fillMaxWidth()) {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                ) {
-                                                    Text(
-                                                        model.displayName,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                        modifier = Modifier.weight(1f),
-                                                    )
-                                                    // 点数档位：$ 越多扣得越狠。服务端给什么画什么。
-                                                    model.creditSymbol?.takeIf { it.isNotEmpty() }?.let { sym ->
-                                                        Spacer(Modifier.width(8.dp))
-                                                        Text(
-                                                            sym,
-                                                            style = MaterialTheme.typography.labelMedium,
-                                                            fontFamily = FontFamily.Monospace,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                        )
-                                                    }
-                                                    // 峰谷计价的模型标出当前时段，档位随时段变化（与 Web 一致）。
-                                                    model.pricingPeriodLabel?.let { period ->
-                                                        Spacer(Modifier.width(6.dp))
-                                                        Text(
-                                                            period,
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                        )
-                                                    }
-                                                    if (selected) {
-                                                        Spacer(Modifier.width(12.dp))
-                                                        Icon(
-                                                            Icons.Filled.Check,
-                                                            contentDescription = "当前模型",
-                                                            tint = MaterialTheme.colorScheme.primary,
-                                                            modifier = Modifier.size(18.dp),
-                                                        )
-                                                    }
-                                                }
-                                                // 挡住的原因直接用服务端文案。首行是标题（如「今日点数已用完」），
-                                                // 菜单项里只放得下这一行。
-                                                model.quotaMessage
-                                                    ?.lineSequence()
-                                                    ?.firstOrNull { it.isNotBlank() }
-                                                    ?.let { msg ->
-                                                        Text(
-                                                            msg,
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            // 「请登录后使用」不是故障，不用错误色
-                                                            color = if (model.loginRequired) {
-                                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                                            } else {
-                                                                MaterialTheme.colorScheme.error
-                                                            },
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis,
-                                                        )
-                                                    }
-                                            }
-                                        },
-                                        // 额度/风控挡住的模型留在列表里但不可选（与 Web 一致）。
-                                        // 直接从列表删掉会让「点数用完」表现为模型凭空消失。
-                                        // 需要登录的例外：点了直接去登录页。
-                                        enabled = !model.quotaBlocked || model.loginRequired,
-                                        onClick = {
-                                            modelMenuOpen = false
-                                            if (model.loginRequired) {
-                                                onAuthExpired()
-                                            } else if (sameKind || isBlankConversation) {
-                                                // 同阵营直接切换；空白会话跨阵营切换也直接生效，不弹新建确认。
-                                                viewModel.selectModel(model.id, model.providerId)
-                                            } else {
-                                                // 跨阵营：历史不互通，弹确认后新建对话。
-                                                pendingCrossModel = model
-                                            }
-                                        },
-                                        colors = if (selected) {
-                                            MenuDefaults.itemColors(
-                                                textColor = MaterialTheme.colorScheme.primary,
-                                            )
-                                        } else {
-                                            MenuDefaults.itemColors()
-                                        },
-                                        modifier = if (selected) {
-                                            Modifier.background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f))
-                                        } else {
-                                            Modifier
-                                        },
-                                    )
+                        ModelMenuContent(
+                            state = state,
+                            desktopPage = desktopPage,
+                            onDesktopPageChange = { desktopPage = it },
+                            desktopTargets = desktopTargets,
+                            desktopModels = desktopModels,
+                            onOpenDesktopModels = onOpenDesktopModels,
+                            onPickDesktopModel = { target, group, model ->
+                                modelMenuOpen = false
+                                onPickDesktopModel(target, group.providerId, model.id)
+                            },
+                            onPickModel = { model ->
+                                modelMenuOpen = false
+                                if (model.loginRequired) {
+                                    onAuthExpired()
+                                } else if (model.providerKind == state.providerKind || isBlankConversation) {
+                                    // 同阵营直接切换；空白会话跨阵营切换也直接生效，不弹新建确认。
+                                    viewModel.selectModel(model.id, model.providerId)
+                                } else {
+                                    // 跨阵营：历史不互通，弹确认后新建对话。
+                                    pendingCrossModel = model
                                 }
-                            }
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        when {
-                                            state.isModelRefreshing -> "正在获取 MolaGPT 模型..."
-                                            state.isMolaModelConfigLoaded -> "刷新 MolaGPT 模型列表"
-                                            else -> "加载 MolaGPT 模型"
-                                        },
-                                    )
-                                },
-                                onClick = {
-                                    if (!state.isModelRefreshing) {
-                                        if (state.isMolaModelConfigLoaded) viewModel.refreshModels()
-                                        else viewModel.ensureMolaModelsLoaded()
-                                    }
-                                },
-                                enabled = !state.isModelRefreshing,
-                            )
-                        }
+                            },
+                            onRefreshModels = {
+                                if (state.isMolaModelConfigLoaded) viewModel.refreshModels()
+                                else viewModel.ensureMolaModelsLoaded()
+                            },
+                        )
                     }
                 },
                 navigationIcon = {
@@ -766,6 +662,11 @@ fun ChatScreen(
                     avatar = viewModel.personaAvatarFile(activePersona),
                     onOpenPersonaPicker = { personaSheetOpen = true },
                     modifier = Modifier.fillMaxSize().padding(inner),
+                    footer = if (showDesktopHint) {
+                        { DesktopHint(onOpen = onOpenAgentControl, onDismiss = onDismissDesktopHint) }
+                    } else {
+                        null
+                    },
                 )
             } else {
                 MessageList(
@@ -913,8 +814,11 @@ private fun ReasoningMismatchCard(
 }
 
 @Composable
-private fun AgentMonitorIcon(tint: androidx.compose.ui.graphics.Color) {
-    androidx.compose.foundation.Canvas(modifier = Modifier.size(22.dp)) {
+internal fun AgentMonitorIcon(
+    tint: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier.size(22.dp),
+) {
+    androidx.compose.foundation.Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
         val sw = 2.dp.toPx()
@@ -1006,4 +910,146 @@ private fun ChatMessage.editableMarkdown(): String {
         }
     }.trim()
     return fromFragments.ifBlank { rawText.orEmpty() }
+}
+
+/**
+ * 模型菜单的内容：「在电脑上运行」的电脑（点开后是那台电脑的模型），然后是本机模型。
+ * 首页与电脑上的新对话共用这一份，两边可以来回切换。[desktopPage] 为 null 时显示首页。
+ */
+@Composable
+fun ModelMenuContent(
+    state: ChatUiState,
+    desktopPage: String?,
+    onDesktopPageChange: (String?) -> Unit,
+    desktopTargets: List<DesktopRunTarget>,
+    desktopModels: DesktopModelsState?,
+    onOpenDesktopModels: (machineId: String) -> Unit,
+    onPickDesktopModel: (DesktopRunTarget, RemoteModelGroup, RemoteModelChoice) -> Unit,
+    onPickModel: (ProviderModel) -> Unit,
+    onRefreshModels: () -> Unit,
+    /** 本机模型是否标出当前选中项；在电脑对话里打开时不标。 */
+    showSelection: Boolean = true,
+    isDesktopModelSelected: (machineId: String, providerId: String, modelId: String) -> Boolean = { _, _, _ -> false },
+) {
+    val openDesktop = desktopPage?.let { id -> desktopTargets.firstOrNull { it.machineId == id } }
+    if (openDesktop != null) {
+        DesktopModelMenuPage(
+            target = openDesktop,
+            state = desktopModels?.takeIf { it.machineId == openDesktop.machineId },
+            onBack = { onDesktopPageChange(null) },
+            onRetry = { onOpenDesktopModels(openDesktop.machineId) },
+            selected = { group, model -> isDesktopModelSelected(openDesktop.machineId, group.providerId, model.id) },
+            onPick = { group, model -> onPickDesktopModel(openDesktop, group, model) },
+        )
+    } else {
+        // 在电脑上运行：对话由那台电脑执行，放在本机模型之前。
+        if (desktopTargets.isNotEmpty()) {
+            ModelMenuHeader("在电脑上运行")
+            desktopTargets.forEach { target ->
+                DesktopTargetMenuItem(target) {
+                    onDesktopPageChange(target.machineId)
+                    onOpenDesktopModels(target.machineId)
+                }
+            }
+            HorizontalDivider()
+        }
+        if (state.modelGroups.isEmpty()) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        when {
+                            state.isModelRefreshing -> "正在获取 MolaGPT 模型..."
+                            state.isMolaModelConfigLoaded -> "暂无可用 MolaGPT 模型 · 点此刷新"
+                            else -> "未获取到 MolaGPT 模型 · 点此重试"
+                        },
+                    )
+                },
+                onClick = {
+                    if (!state.isModelRefreshing) {
+                        onRefreshModels()
+                    }
+                },
+                enabled = !state.isModelRefreshing,
+            )
+        } else {
+            state.modelGroups.forEachIndexed { index, group ->
+                if (index > 0) HorizontalDivider()
+                ModelMenuHeader(group.title)
+                group.models.forEach { model ->
+                    val selected = showSelection && state.selectedModel?.let {
+                        it.id == model.id && it.providerId == model.providerId
+                    } == true
+                    ModelMenuItem(
+                        label = model.displayName,
+                        selected = selected,
+                        trailing = {
+                            // 点数档位：$ 越多扣得越狠。服务端给什么画什么。
+                            model.creditSymbol?.takeIf { it.isNotEmpty() }?.let { sym ->
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    sym,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            // 峰谷计价的模型标出当前时段，档位随时段变化（与 Web 一致）。
+                            model.pricingPeriodLabel?.let { period ->
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    period,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        },
+                        // 挡住的原因直接用服务端文案。首行是标题（如「今日点数已用完」），
+                        // 菜单项里只放得下这一行。
+                        note = model.quotaMessage
+                            ?.lineSequence()
+                            ?.firstOrNull { it.isNotBlank() }
+                            ?.let { msg ->
+                                {
+                                    Text(
+                                        msg,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        // 「请登录后使用」不是故障，不用错误色
+                                        color = if (model.loginRequired) {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        } else {
+                                            MaterialTheme.colorScheme.error
+                                        },
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            },
+                        // 额度/风控挡住的模型留在列表里但不可选（与 Web 一致）。
+                        // 直接从列表删掉会让「点数用完」表现为模型凭空消失。
+                        // 需要登录的例外：点了直接去登录页。
+                        enabled = !model.quotaBlocked || model.loginRequired,
+                        onClick = { onPickModel(model) },
+                    )
+                }
+            }
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        when {
+                            state.isModelRefreshing -> "正在获取 MolaGPT 模型..."
+                            state.isMolaModelConfigLoaded -> "刷新 MolaGPT 模型列表"
+                            else -> "加载 MolaGPT 模型"
+                        },
+                    )
+                },
+                onClick = {
+                    if (!state.isModelRefreshing) {
+                        onRefreshModels()
+                    }
+                },
+                enabled = !state.isModelRefreshing,
+            )
+        }
+    }
 }

@@ -29,6 +29,8 @@ dependencies {
     implementation(project(":core:network"))
     implementation(project(":core:render"))
     implementation(project(":core:markdown"))
+    implementation(project(":feature:chat"))
+    implementation(project(":feature:file"))
 
     implementation(libs.bundles.compose)
     implementation(libs.androidx.compose.material.icons.extended)

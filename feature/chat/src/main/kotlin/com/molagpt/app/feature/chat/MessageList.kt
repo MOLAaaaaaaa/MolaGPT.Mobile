@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -109,8 +110,14 @@ internal fun MessageList(
     onCancelCompaction: () -> Unit = {},
     /** 全屏阅读；为空时不提供「选择」入口。 */
     reader: AssistantReaderState? = null,
+    /** 远程对话页只读：回答由电脑生成，这里不提供重新生成。 */
+    canRegenerate: Boolean = true,
+    /** 列表最上方的一项（如「加载历史消息」），随内容滚动。 */
+    header: (@Composable () -> Unit)? = null,
+    listState: LazyListState = rememberLazyListState(),
 ) {
-    val listState = rememberLazyListState()
+    // 行号换算：有表头时第 0 项是表头，消息行从 1 开始。
+    val headerItems = if (header != null) 1 else 0
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val textToolbar = LocalTextToolbar.current
@@ -250,8 +257,9 @@ internal fun MessageList(
 
     var lastSeenMessageId by remember { mutableStateOf<String?>(null) }
     val lastMessage = messages.lastOrNull()
-    val lastSignature = lastMessage?.let { it.messageId to it.updatedAt }
-    LaunchedEffect(lastSignature, rows.size) {
+    // 以排好版的行为准触发跟随：行在后台异步排版，按消息变化去滚，滚到的是还没长高的旧布局，
+    // 总慢一拍；电脑对话逐字放出时 updatedAt 不变，按消息签名判断则完全不跟。
+    LaunchedEffect(rows) {
         if (lastMessage == null || rows.isEmpty()) return@LaunchedEffect
         if (lastMessage.messageId != lastSeenMessageId) {
             lastSeenMessageId = lastMessage.messageId
@@ -298,7 +306,7 @@ internal fun MessageList(
                 listState.isAtBottom(bottomThresholdPx) -> turnCount - 1
                 else -> listState.layoutInfo.visibleItemsInfo
                     .firstOrNull { it.offset + it.size > readingLinePx }
-                    ?.let { currentRows.getOrNull(it.index)?.ownerMessageId }
+                    ?.let { currentRows.getOrNull(it.index - headerItems)?.ownerMessageId }
                     ?.let { currentTurnOfMessage[it] }
                     ?: -1
             }
@@ -339,6 +347,7 @@ internal fun MessageList(
             contentPadding = contentPadding,
             verticalArrangement = Arrangement.Top,
         ) {
+            if (header != null) item(key = "list-header", contentType = "list-header") { header() }
             items(
                 items = rows,
                 key = { it.key },
@@ -408,13 +417,13 @@ internal fun MessageList(
                             } else {
                                 null
                             },
-                            onRegenerate = if (row.canRegenerate) onRegenerate else null,
+                            onRegenerate = if (row.canRegenerate && canRegenerate) onRegenerate else null,
                             onEdit = if (row.canEdit) {
                                 { if (row.editsAssistant) onEditAssistant(row.messageId) else onEditUser(row.messageId) }
                             } else {
                                 null
                             },
-                            regenerateModels = if (row.canRegenerate) models else emptyList(),
+                            regenerateModels = if (row.canRegenerate && canRegenerate) models else emptyList(),
                             onRegenerateWithModel = onRegenerateWithModel,
                         )
                     }
@@ -458,7 +467,7 @@ internal fun MessageList(
                     if (rowIndex >= 0) {
                         autoFollow = false
                         pinnedTurn = index
-                        scope.launch { listState.scrollToItem(rowIndex) }
+                        scope.launch { listState.scrollToItem(rowIndex + headerItems) }
                     }
                 },
                 modifier = Modifier.padding(

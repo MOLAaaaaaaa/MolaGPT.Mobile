@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * 从助手消息的协议快照里取出工具调用与工具结果，按发生顺序排列。
@@ -27,8 +28,16 @@ object WireToolTranscript {
     fun extract(metadata: Map<String, String>): List<Entry> {
         val raw = ChatMessageMetadataKeys.WIRE_HISTORY.firstNotNullOfOrNull { key ->
             metadata[key]?.takeIf { it.isNotBlank() }
-        } ?: return emptyList()
-        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyList()
+        }
+        if (raw.isNullOrBlank()) return emptyList()
+        val header = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return emptyList()
+        val file = header["wire_file"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val root = if (file == null) {
+            header
+        } else {
+            val content = WireHistorySource.readFile(file)
+            runCatching { json.parseToJsonElement(content) as? JsonObject }.getOrNull() ?: return emptyList()
+        }
         val items = (root["items"] as? JsonArray)?.mapNotNull { it as? JsonObject } ?: return emptyList()
         return when (root.str("wire_api")) {
             OpenAiWireHistory.CHAT_COMPLETIONS -> chatCompletions(items)

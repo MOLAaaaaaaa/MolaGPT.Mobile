@@ -129,6 +129,20 @@ fun Composer(
     contextGauge: (@Composable () -> Unit)? = null,
     /** 浮在消息列表上方时用玻璃底。 */
     glass: Boolean = false,
+    /** 附件入口；电脑不收附件时隐藏。 */
+    showAttachments: Boolean = true,
+    /** 失败的附件点一下重试；为 null 时只能移除。 */
+    onRetryAttachment: ((String) -> Unit)? = null,
+    /** 附件全部上传完成才能发送：有上传中或失败的附件时发送键不可用。 */
+    holdSendForAttachments: Boolean = false,
+    /** 工具行（角色、记忆、网络访问、推理）；拿不到可调设置时整行不显示。 */
+    showTools: Boolean = true,
+    /** 生成中仍可发送：输入内容加入当前回答，输入框为空时才显示停止。 */
+    sendWhileStreaming: Boolean = false,
+    /** 推理面板的「查看请求参数」，见 [ReasoningSheet]。 */
+    showReasoningWireDetail: Boolean = true,
+    /** 发送失败后放回输入框的原文；输入框已有新内容时不覆盖。 */
+    restoreDraft: ComposerDraft? = null,
     modifier: Modifier = Modifier,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
@@ -139,11 +153,18 @@ fun Composer(
         val edit = editingMessage ?: return@LaunchedEffect
         text = edit.text
     }
+    LaunchedEffect(restoreDraft?.revision) {
+        val draft = restoreDraft ?: return@LaunchedEffect
+        if (text.isBlank()) text = draft.text
+    }
     val hasReadyAttachment = pendingAttachments.any {
         it.uploadStatus == UploadStatus.UPLOADED &&
             (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank() || !it.localPath.isNullOrBlank())
     }
-    val canSend = enabled && (text.isNotBlank() || hasReadyAttachment)
+    val attachmentsUnsettled = holdSendForAttachments && pendingAttachments.any {
+        it.uploadStatus != UploadStatus.UPLOADED
+    }
+    val canSend = enabled && !attachmentsUnsettled && (text.isNotBlank() || hasReadyAttachment)
     val colorScheme = MaterialTheme.colorScheme
     val toolsEnabled = enabled && !isStreaming
     val showThinking = selectedModel?.let { it.supportsThinking || it.supportsReasoningEffort } == true
@@ -171,7 +192,7 @@ fun Composer(
 
     fun submit() {
         val content = text.trim()
-        if ((content.isNotEmpty() || hasReadyAttachment) && enabled) {
+        if ((content.isNotEmpty() || hasReadyAttachment) && enabled && !attachmentsUnsettled) {
             onSend(content)
             text = ""
         }
@@ -207,7 +228,7 @@ fun Composer(
                 )
             }
         }
-        Row(
+        if (showTools) Row(
             modifier = Modifier
                 .fillMaxWidth()
                 // 固定高度：推理开关切换时 SegmentedControl（36dp）出现/消失不再改变整行高度（避免上方按钮抖动）。
@@ -275,7 +296,7 @@ fun Composer(
         }
 
         if (pendingAttachments.isNotEmpty()) {
-            PendingAttachmentRow(files = pendingAttachments, onRemove = onRemoveAttachment)
+            PendingAttachmentRow(files = pendingAttachments, onRemove = onRemoveAttachment, onRetry = onRetryAttachment)
         }
 
         BasicTextField(
@@ -297,7 +318,11 @@ fun Composer(
                 Box(modifier = Modifier.fillMaxWidth()) {
                     if (text.isEmpty()) {
                         Text(
-                            text = if (isEditing) "修改输入..." else "输入消息...",
+                            text = when {
+                                isEditing -> "修改输入..."
+                                isStreaming && sendWhileStreaming -> "补充消息..."
+                                else -> "输入消息..."
+                            },
                             color = colorScheme.onSurfaceVariant.copy(alpha = 0.68f),
                             style = MaterialTheme.typography.bodyLarge,
                         )
@@ -311,7 +336,7 @@ fun Composer(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box {
+            if (showAttachments) Box {
                 RoundIconButton(
                     icon = Icons.Filled.Add,
                     contentDescription = "添加附件",
@@ -333,7 +358,7 @@ fun Composer(
                 Spacer(modifier = Modifier.width(6.dp))
             }
             Crossfade(
-                targetState = isStreaming,
+                targetState = isStreaming && !(sendWhileStreaming && canSend),
                 animationSpec = com.molagpt.app.core.render.MolaMotion.standard(com.molagpt.app.core.render.MolaMotion.Medium),
                 label = "sendStop",
             ) { streaming ->
@@ -349,7 +374,7 @@ fun Composer(
                 } else {
                     RoundIconButton(
                         icon = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "发送",
+                        contentDescription = if (isStreaming) "补充消息" else "发送",
                         selected = canSend,
                         enabled = canSend,
                         containerColor = if (canSend) colorScheme.primary else colorScheme.surfaceVariant,
@@ -379,9 +404,13 @@ fun Composer(
             },
             onDismiss = { showReasoningSheet = false },
             onOpenModelSettings = onOpenModelReasoningSettings?.takeIf { isByok },
+            showWireDetail = showReasoningWireDetail,
         )
     }
 }
+
+/** [Composer] 的 restoreDraft：同一段文字再次失败也要换 [revision] 才会重新填入。 */
+data class ComposerDraft(val text: String, val revision: Long)
 
 /**
  * 加号的附件菜单。
@@ -457,19 +486,21 @@ private fun AttachmentMenuItem(
     )
 }
 
-/** 待发送图片条：上传中转圈、失败标红，右侧叉可移除。 */
+/** 待发送图片条：上传中转圈、失败标红（可重试时点一下重试），右侧叉可移除。 */
 @Composable
-private fun PendingAttachmentRow(files: List<FileInfo>, onRemove: (String) -> Unit) {
+private fun PendingAttachmentRow(files: List<FileInfo>, onRemove: (String) -> Unit, onRetry: ((String) -> Unit)?) {
     val colorScheme = MaterialTheme.colorScheme
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(files, key = { it.id }) { file ->
+            val retry = onRetry?.takeIf { file.uploadStatus == UploadStatus.FAILED }
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
                     .background(colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                    .clickable(enabled = retry != null, role = Role.Button) { retry?.invoke(file.id) }
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -478,7 +509,7 @@ private fun PendingAttachmentRow(files: List<FileInfo>, onRemove: (String) -> Un
                     Spacer(modifier = Modifier.width(8.dp))
                 }
                 val problem = when (file.uploadStatus) {
-                    UploadStatus.FAILED -> "失败"
+                    UploadStatus.FAILED -> if (retry != null) "重试" else "失败"
                     UploadStatus.MISSING -> "不可用"
                     else -> null
                 }

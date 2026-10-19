@@ -207,6 +207,8 @@ internal fun ReasoningSheet(
     baseUrl: String = "",
     /** 非空时标题栏右侧展示齿轮，直达当前模型推理设置（通常仅 BYOK）。 */
     onOpenModelSettings: (() -> Unit)? = null,
+    /** 「查看请求参数」：请求不由本机构造时（电脑上的对话）不展示。 */
+    showWireDetail: Boolean = true,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val levels = remember(config, baseUrl) { ThinkingKinds.resolveEffortLevels(config, baseUrl) }
@@ -418,7 +420,7 @@ internal fun ReasoningSheet(
                 )
             }
 
-            Column(
+            if (showWireDetail) Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 4.dp),

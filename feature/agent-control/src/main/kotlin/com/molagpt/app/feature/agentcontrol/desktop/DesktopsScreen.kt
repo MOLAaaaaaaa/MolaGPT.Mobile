@@ -1,0 +1,375 @@
+package com.molagpt.app.feature.agentcontrol.desktop
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.molagpt.app.core.model.DesktopConversation
+import com.molagpt.app.core.render.MolaScaffold
+import com.molagpt.app.core.render.MolaTopBar
+import com.molagpt.app.feature.agentcontrol.MonitorIcon
+import com.molagpt.app.feature.agentcontrol.Pill
+import com.molagpt.app.feature.agentcontrol.agentPalette
+import kotlinx.coroutines.launch
+
+/** 「电脑」页：开启了远控的电脑与它们最近的对话；外部 Agent（Claude Code / Codex）在最下面。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DesktopsScreen(
+    vm: DesktopsViewModel,
+    onOpenConversation: (machineId: String, conversationId: String) -> Unit,
+    onOpenExternalAgents: () -> Unit,
+    onExit: () -> Unit,
+) {
+    val state by vm.state.collectAsStateWithLifecycle()
+    var pairing by remember { mutableStateOf<DesktopRow?>(null) }
+
+    MolaScaffold(
+        contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+        containerColor = MaterialTheme.colorScheme.surface,
+        topBar = {
+            MolaTopBar(
+                title = { Text("电脑", fontWeight = FontWeight.SemiBold) },
+                navigationIcon = {
+                    IconButton(onClick = onExit) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
+                },
+                actions = {
+                    if (state.refreshing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    IconButton(onClick = { vm.refresh() }) { Icon(Icons.Filled.Refresh, contentDescription = "刷新") }
+                },
+            )
+        },
+    ) { inner ->
+        val layoutDirection = LocalLayoutDirection.current
+        // 顶栏留白放进 contentPadding，列表才能滚到玻璃顶栏下面。
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = inner.calculateStartPadding(layoutDirection), end = inner.calculateEndPadding(layoutDirection)),
+            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = inner.calculateTopPadding() + 6.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            state.error?.let { message ->
+                item(key = "error") { Hint(message, error = true) }
+            }
+            if (state.loaded && state.desktops.isEmpty()) {
+                item(key = "empty") {
+                    Hint("请在电脑端设置 → 远程控制中启用手机控制。")
+                }
+            }
+            state.desktops.forEach { row ->
+                item(key = "machine:" + row.info.machineId) {
+                    MachineHeader(
+                        row,
+                        pairing = state.pairingMachineId == row.info.machineId,
+                        canPair = state.pairingMachineId == null && row.online,
+                        onPair = { vm.pairWithAccount(row.info.machineId) },
+                        onPairWithCode = { pairing = row },
+                        onForget = { vm.forget(row.info.machineId) },
+                    )
+                }
+                // 未配对的电脑也列出对话：点开时先用账号配对，与侧边栏一致。
+                item(key = "conversations:" + row.info.machineId) {
+                    val conversations = row.info.conversations
+                    if (conversations.isEmpty()) {
+                        Hint("暂无 Work / BYOK 对话")
+                    } else {
+                        ConversationGroup(
+                            conversations = conversations,
+                            online = row.online,
+                            enabled = state.pairingMachineId == null && (row.paired || row.online),
+                        ) { conversation ->
+                            vm.openConversation(row, conversation.id) { onOpenConversation(row.info.machineId, it) }
+                        }
+                    }
+                }
+            }
+            // 首次加载完再放：否则列表开头只有它，电脑与对话插到它前面时，
+            // LazyColumn 按 key 保持首个可见项，页面会停在最底部。
+            if (state.loaded) item(key = "external") {
+                Surface(
+                    onClick = onOpenExternalAgents,
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp).navigationBarsPadding(),
+                ) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Claude Code / Codex", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "外部 Agent 会话（实验）",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+
+    pairing?.let { row ->
+        PairDialog(
+            machineName = row.info.machineName,
+            onPair = { code -> vm.pair(row.info.machineId, code) },
+            onDismiss = { pairing = null },
+        )
+    }
+}
+
+@Composable
+private fun MachineHeader(
+    row: DesktopRow,
+    pairing: Boolean,
+    canPair: Boolean,
+    onPair: () -> Unit,
+    onPairWithCode: () -> Unit,
+    onForget: () -> Unit,
+) {
+    val p = agentPalette()
+    var menu by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().padding(start = 4.dp, top = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MonitorIcon(MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(row.info.machineName, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            if (!row.online && row.info.lastSeenAtMs > 0) {
+                Text(
+                    "最近在线 · " + relativeTime(row.info.lastSeenAtMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Pill(
+            if (row.online) "在线" else "离线",
+            if (row.online) p.green else MaterialTheme.colorScheme.onSurfaceVariant,
+            if (row.online) p.greenSoft else MaterialTheme.colorScheme.surfaceVariant,
+        )
+        if (!row.paired) {
+            Spacer(Modifier.width(6.dp))
+            val cs = MaterialTheme.colorScheme
+            Text(
+                if (pairing) "配对中…" else "一键配对",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = if (canPair || pairing) cs.primary else cs.onSurfaceVariant,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(cs.primary.copy(alpha = if (canPair || pairing) 0.12f else 0.05f))
+                    .clickable(enabled = canPair, onClick = onPair)
+                    .padding(horizontal = 9.dp, vertical = 3.dp),
+            )
+        }
+        Box {
+            IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, contentDescription = "更多") }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                if (!row.paired) {
+                    DropdownMenuItem(
+                        text = { Text("使用配对码") },
+                        enabled = canPair,
+                        onClick = {
+                            menu = false
+                            onPairWithCode()
+                        },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text(if (row.paired) "移除并取消配对" else "从列表移除") },
+                    onClick = {
+                        menu = false
+                        onForget()
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** 一台电脑的对话，收在一张卡片里，行间细线分隔。 */
+@Composable
+private fun ConversationGroup(
+    conversations: List<DesktopConversation>,
+    online: Boolean,
+    enabled: Boolean,
+    onOpen: (DesktopConversation) -> Unit,
+) {
+    val p = agentPalette()
+    val cs = MaterialTheme.colorScheme
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = cs.surface,
+        border = BorderStroke(1.dp, cs.outline.copy(alpha = 0.6f)),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column {
+            conversations.forEachIndexed { index, conversation ->
+                if (index > 0) HorizontalDivider(Modifier.padding(start = 14.dp), color = cs.outline.copy(alpha = 0.35f))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = enabled) { onOpen(conversation) }
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            conversation.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (online) cs.onSurface else cs.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            listOfNotNull(conversation.modelLabel, relativeTime(conversation.updatedAtMs)).joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    when {
+                        online && conversation.pendingApprovals > 0 -> Pill("等待审批", p.amber, p.amberSoft)
+                        online && conversation.busy -> Pill("生成中", p.blue, p.blueSoft)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Hint(text: String, error: Boolean = false) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+    )
+}
+
+@Composable
+private fun PairDialog(
+    machineName: String,
+    onPair: suspend (String) -> String?,
+    onDismiss: () -> Unit,
+) {
+    var code by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var working by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    AlertDialog(
+        onDismissRequest = { if (!working) onDismiss() },
+        title = { Text("与「$machineName」配对") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "电脑端设置 → 远程控制中选择「配对新手机」，输入显示的 8 位配对码。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = code,
+                    onValueChange = { code = it.uppercase().take(12); error = null },
+                    singleLine = true,
+                    enabled = !working,
+                    placeholder = { Text("XXXX-XXXX") },
+                    textStyle = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, autoCorrectEnabled = false),
+                    isError = error != null,
+                    supportingText = error?.let { { Text(it) } },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !working && code.count { it.isLetterOrDigit() } >= 8,
+                onClick = {
+                    working = true
+                    scope.launch {
+                        val failure = onPair(code)
+                        working = false
+                        if (failure == null) onDismiss() else error = failure
+                    }
+                },
+            ) { Text(if (working) "配对中…" else "配对") }
+        },
+        dismissButton = {
+            TextButton(enabled = !working, onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+internal fun relativeTime(ms: Long): String {
+    if (ms <= 0) return ""
+    val diff = (System.currentTimeMillis() - ms).coerceAtLeast(0)
+    val minutes = diff / 60_000
+    return when {
+        minutes < 1 -> "刚刚"
+        minutes < 60 -> "${minutes} 分钟前"
+        minutes < 24 * 60 -> "${minutes / 60} 小时前"
+        minutes < 7 * 24 * 60 -> "${minutes / (24 * 60)} 天前"
+        else -> java.text.SimpleDateFormat("M月d日", java.util.Locale.CHINA).format(java.util.Date(ms))
+    }
+}

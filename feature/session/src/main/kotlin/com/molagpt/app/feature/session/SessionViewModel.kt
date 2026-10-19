@@ -3,6 +3,7 @@ package com.molagpt.app.feature.session
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.model.ConversationFilter
 import com.molagpt.app.core.storage.PersonaRepository
 import com.molagpt.app.core.storage.SessionRepository
 import kotlinx.coroutines.flow.SharingStarted
@@ -31,5 +32,6 @@ class SessionViewModel(
     suspend fun deleteAll(sessionIds: Collection<String>): List<String> = sessionRepository.deleteAll(sessionIds)
 
     /** 「全选」取数：数据库中全部可见会话，不限于 Paging 已加载的部分。 */
-    suspend fun allVisibleSessionIds(): List<String> = sessionRepository.allVisibleSessionIds()
+    suspend fun allVisibleSessionIds(filter: ConversationFilter = ConversationFilter.ALL): List<String> =
+        sessionRepository.allVisibleSessionIds(filter)
 }

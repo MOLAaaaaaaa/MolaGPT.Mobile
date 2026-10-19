@@ -19,10 +19,15 @@ interface ConversationDao {
         SELECT * FROM conversations
         WHERE deletedAt IS NULL
           AND visibleInList = 1
+          AND (
+              :source = 'ALL'
+              OR (:source = 'CHAT' AND providerId IS NOT 'image-workbench')
+              OR (:source = 'IMAGE' AND providerId = 'image-workbench')
+          )
         ORDER BY pinned DESC, updatedAt DESC
         """,
     )
-    fun pagingSource(): PagingSource<Int, ConversationEntity>
+    fun pagingSource(source: String): PagingSource<Int, ConversationEntity>
 
     /**
      * 搜索侧边栏会话。标题始终可搜；正文只查已经落到本地的 rawText。
@@ -51,6 +56,11 @@ interface ConversationDao {
         WHERE c.deletedAt IS NULL
           AND c.visibleInList = 1
           AND (
+              :source = 'ALL'
+              OR (:source = 'CHAT' AND c.providerId IS NOT 'image-workbench')
+              OR (:source = 'IMAGE' AND c.providerId = 'image-workbench')
+          )
+          AND (
               instr(lower(c.title), lower(:query)) > 0
               OR (
                   c.placeholder = 0
@@ -65,7 +75,7 @@ interface ConversationDao {
         ORDER BY c.pinned DESC, c.updatedAt DESC
         """,
     )
-    fun searchPagingSource(query: String): PagingSource<Int, ConversationSearchRow>
+    fun searchPagingSource(query: String, source: String): PagingSource<Int, ConversationSearchRow>
 
     @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")
     suspend fun getById(sessionId: String): ConversationEntity?
@@ -80,10 +90,15 @@ interface ConversationDao {
         SELECT sessionId FROM conversations
         WHERE deletedAt IS NULL
           AND visibleInList = 1
+          AND (
+              :source = 'ALL'
+              OR (:source = 'CHAT' AND providerId IS NOT 'image-workbench')
+              OR (:source = 'IMAGE' AND providerId = 'image-workbench')
+          )
         ORDER BY pinned DESC, updatedAt DESC
         """,
     )
-    suspend fun allVisibleSessionIds(): List<String>
+    suspend fun allVisibleSessionIds(source: String): List<String>
 
     /** 观察单个会话（用于顶栏标题随重命名实时刷新）。 */
     @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")

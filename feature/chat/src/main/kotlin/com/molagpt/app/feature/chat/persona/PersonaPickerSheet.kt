@@ -50,7 +50,7 @@ import com.molagpt.app.core.render.PersonaIcons
  *
  * @param selectedPersona 当前选中角色；null 表示未显式选择，内部回退到「通用助手」。
  * @param onSelect 选择角色（id）。
- * @param onManage 进入管理页。
+ * @param onManage 进入管理页；为 null 时不显示「管理」（例如电脑上的角色）。
  * @param onDismiss 关闭 sheet。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -61,7 +61,7 @@ fun PersonaPickerSheet(
     /** 角色卡头像；没有卡或没有头像时返回 null，退回矢量图标。 */
     avatarOf: (Persona) -> java.io.File? = { null },
     onSelect: (Persona) -> Unit,
-    onManage: () -> Unit,
+    onManage: (() -> Unit)?,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -99,8 +99,10 @@ fun PersonaPickerSheet(
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = { onManage(); onDismiss() }) {
-                    Text("管理")
+                if (onManage != null) {
+                    TextButton(onClick = { onManage(); onDismiss() }) {
+                        Text("管理")
+                    }
                 }
             }
 

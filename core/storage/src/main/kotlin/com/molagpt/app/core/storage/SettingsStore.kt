@@ -35,7 +35,9 @@ data class AppSettings(
     val throttleMs: Long = 16L,
     val enterToSend: Boolean = false,
     /** 是否在聊天页顶栏显示 Agent 控制快捷按钮。 */
-    val showAgentControlShortcut: Boolean = false,
+    val showAgentControlShortcut: Boolean = true,
+    /** 首页「在手机上继续电脑上的对话」引导被用户关掉。 */
+    val desktopHintDismissed: Boolean = false,
     /** 是否在聊天页顶栏显示图像工作台快捷按钮。 */
     val showImageWorkbenchShortcut: Boolean = true,
     val temperature: Double = 0.7,
@@ -149,7 +151,8 @@ class SettingsStore(private val context: Context) {
             defaultProviderId = p[Keys.DEFAULT_PROVIDER_ID],
             throttleMs = p[Keys.THROTTLE_MS] ?: 16L,
             enterToSend = p[Keys.ENTER_TO_SEND] ?: false,
-            showAgentControlShortcut = p[Keys.SHOW_AGENT_CONTROL_SHORTCUT] ?: false,
+            showAgentControlShortcut = p[Keys.SHOW_AGENT_CONTROL_SHORTCUT] ?: true,
+            desktopHintDismissed = p[Keys.DESKTOP_HINT_DISMISSED] ?: false,
             showImageWorkbenchShortcut = p[Keys.SHOW_IMAGE_WORKBENCH_SHORTCUT] ?: true,
             temperature = p[Keys.TEMPERATURE] ?: 0.7,
             useThinking = p[Keys.USE_THINKING] ?: false,
@@ -220,6 +223,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setEnterToSend(v: Boolean) = edit { it[Keys.ENTER_TO_SEND] = v }
     suspend fun setShowAgentControlShortcut(v: Boolean) = edit { it[Keys.SHOW_AGENT_CONTROL_SHORTCUT] = v }
     suspend fun setShowImageWorkbenchShortcut(v: Boolean) = edit { it[Keys.SHOW_IMAGE_WORKBENCH_SHORTCUT] = v }
+    suspend fun setDesktopHintDismissed(v: Boolean) = edit { it[Keys.DESKTOP_HINT_DISMISSED] = v }
     suspend fun setTemperature(v: Double) = edit { it[Keys.TEMPERATURE] = v }
     suspend fun setUseThinking(v: Boolean) = edit { it[Keys.USE_THINKING] = v }
     suspend fun setReasoningEffort(v: String) = edit { it[Keys.REASONING_EFFORT] = v }
@@ -385,6 +389,7 @@ class SettingsStore(private val context: Context) {
         val ENTER_TO_SEND = booleanPreferencesKey("enter_to_send")
         val SHOW_AGENT_CONTROL_SHORTCUT = booleanPreferencesKey("show_agent_control_shortcut")
         val SHOW_IMAGE_WORKBENCH_SHORTCUT = booleanPreferencesKey("show_image_workbench_shortcut")
+        val DESKTOP_HINT_DISMISSED = booleanPreferencesKey("desktop_hint_dismissed")
         val TEMPERATURE = doublePreferencesKey("temperature")
         val USE_THINKING = booleanPreferencesKey("use_thinking")
         val REASONING_EFFORT = stringPreferencesKey("reasoning_effort")

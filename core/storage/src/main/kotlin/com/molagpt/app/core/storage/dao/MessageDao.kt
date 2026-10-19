@@ -81,6 +81,9 @@ interface MessageDao {
     @Query("SELECT metadataJson FROM messages WHERE metadataJson LIKE '%localPath%'")
     suspend fun allMetadataWithAttachments(): List<String>
 
+    @Query("SELECT metadataJson FROM messages WHERE metadataJson LIKE '%wire_file%'")
+    suspend fun allMetadataWithWireFiles(): List<String>
+
     // ── 历史对话回忆（recall_conversations 工具） ──────────────────────────────
     //
     // 摘要与正文一律在 SQL 侧 substr 截断：把整条 rawText 拉进游标会重演

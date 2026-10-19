@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.AgentBackendIds
 import com.molagpt.app.core.model.AgentPermissionMode
@@ -60,6 +61,7 @@ fun AgentHub(
     onSelect: (RelaySessionMeta) -> Unit,
     onReconnect: () -> Unit,
     modifier: Modifier = Modifier,
+    topPadding: Dp = 0.dp,
 ) {
     val now = System.currentTimeMillis()
     val onlineMachines = machines.count { it.isOnline(now) }
@@ -67,7 +69,7 @@ fun AgentHub(
 
     LazyColumn(
         modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 96.dp),
+        contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = topPadding + 6.dp, bottom = 96.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item(key = "hero") {

@@ -9,6 +9,9 @@ import com.molagpt.app.core.storage.AppSettings
 import com.molagpt.app.di.AppContainer
 import com.molagpt.app.feature.auth.AuthViewModel
 import com.molagpt.app.feature.agentcontrol.AgentControlViewModel
+import com.molagpt.app.feature.agentcontrol.desktop.DesktopsViewModel
+import com.molagpt.app.feature.agentcontrol.desktop.RemoteAttachmentFiles
+import com.molagpt.app.feature.agentcontrol.desktop.RemoteConversationViewModel
 import com.molagpt.app.feature.chat.ChatViewModel
 import com.molagpt.app.feature.imagegen.ImageGalleryViewModel
 import com.molagpt.app.feature.imagegen.ImageWorkbenchViewModel
@@ -34,6 +37,41 @@ object ViewModelFactories {
             onTurnSubmitted = container.agentNotificationMonitor::watch,
             loadDismissedFailures = { container.settingsStore.seenAgentCommandFailureKeys() },
             saveDismissedFailure = { container.settingsStore.addSeenAgentCommandFailureKey(it) },
+        )
+    }
+
+    fun desktops(container: AppContainer) = factory {
+        DesktopsViewModel(
+            service = container.desktopRemoteService,
+            cache = container.desktopSnapshotCache,
+            deviceName = container.remoteDeviceName,
+            deviceId = container.remoteDeviceId,
+        )
+    }
+
+    /** [conversationId] 为 null：在电脑上新建，从 [providerId] / [modelId] 起草。 */
+    fun remoteConversation(
+        container: AppContainer,
+        machineId: String,
+        conversationId: String?,
+        providerId: String? = null,
+        modelId: String? = null,
+        /** 消息已交给电脑（草稿则是电脑已建好对话）。 */
+        onSent: (conversationId: String) -> Unit = {},
+    ) = factory {
+        RemoteConversationViewModel(
+            service = container.desktopRemoteService,
+            cache = container.desktopSnapshotCache,
+            files = RemoteAttachmentFiles(container.appContext),
+            machineId = machineId,
+            existingConversationId = conversationId,
+            dispatchers = container.dispatchers,
+            draftProviderId = providerId,
+            draftModelId = modelId,
+            onSent = { id ->
+                container.desktopNotificationMonitor.watch(machineId, id)
+                onSent(id)
+            },
         )
     }
 

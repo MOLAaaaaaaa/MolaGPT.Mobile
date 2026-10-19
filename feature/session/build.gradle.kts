@@ -30,6 +30,7 @@ dependencies {
     implementation(project(":core:render")) // ImeDismissBackHandler
 
     implementation(libs.bundles.compose)
+    implementation(libs.androidx.compose.material.icons.extended)
     api(libs.androidx.paging.runtime)
     api(libs.kotlinx.coroutines.core)
     implementation(libs.androidx.paging.compose)

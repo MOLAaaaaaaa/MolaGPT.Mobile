@@ -6,6 +6,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import java.io.File
+import java.net.URI
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * 缩短协议快照里过长的工具结果，只留开头。
@@ -21,7 +24,14 @@ object WireHistoryPruner {
     /** @return 缩短后的快照；没有需要缩短的结果或无法解析时返回 null。 */
     fun prune(raw: String?, maxChars: Int, keepChars: Int): String? {
         if (raw.isNullOrBlank()) return null
-        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
+        val header = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
+        val file = header["wire_file"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        val root = if (file == null) {
+            header
+        } else {
+            val content = WireHistorySource.readFile(file)
+            runCatching { json.parseToJsonElement(content) as? JsonObject }.getOrNull() ?: return null
+        }
         val items = (root["items"] as? JsonArray)?.map { it as? JsonObject ?: return null } ?: return null
         var changed = false
 
@@ -80,7 +90,10 @@ object WireHistoryPruner {
             }
         }
         if (!changed) return null
-        return JsonObject(root + ("items" to JsonArray(pruned))).toString()
+        val payload = JsonObject(root + ("items" to JsonArray(pruned)))
+        val result = payload.toString()
+        return if (file == null) result
+            else WireHistorySource.write(result, File(URI(file)).parentFile!!, payload)
     }
 
     private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull

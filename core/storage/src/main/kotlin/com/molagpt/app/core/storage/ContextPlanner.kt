@@ -13,6 +13,10 @@ import com.molagpt.app.core.network.WireToolTranscript
 import com.molagpt.app.core.network.hasByokTools
 import java.security.MessageDigest
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
 
 /**
  * 上下文压缩的纯逻辑：估算上下文、选切点、把摘要套进请求、拼摘要输入。
@@ -78,7 +82,12 @@ internal object ContextPlanner {
         var tokens = ContextTokens.estimate(sendText(message)) + ContextTokens.MESSAGE_OVERHEAD
         if (message.role == Role.ASSISTANT) {
             // 协议快照只在同一模型下回放，回放时它取代正文。
-            replayedWire(message, providerId, modelId)?.let { tokens = maxOf(tokens, ContextTokens.estimate(it)) }
+            replayedWire(message, providerId, modelId)?.let { wire ->
+                val estimated = if (!wire.contains("\"items\":") && wire.contains("\"wire_file\":")) {
+                    Json.parseToJsonElement(wire).jsonObject.getValue("estimated_tokens").jsonPrimitive.int
+                } else ContextTokens.estimate(wire)
+                tokens = maxOf(tokens, estimated)
+            }
         }
         val imagesAsText = message.metadata.containsKey(ChatMessageMetadataKeys.IMAGES_AS_TEXT)
         message.attachments.forEach { attachment ->

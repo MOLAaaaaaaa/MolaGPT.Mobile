@@ -7,6 +7,7 @@ import androidx.paging.map
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.Conversation
+import com.molagpt.app.core.model.ConversationFilter
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ProviderIds
 import com.molagpt.app.core.model.ProviderKind
@@ -25,8 +26,12 @@ class SessionRepository(
     /** 云同步开启时删除走墓碑（待 push delete），否则直接硬删（游客无需保留墓碑）。 */
     private val cloudSyncEnabled: () -> Boolean = { false },
     private val contextCheckpointDao: com.molagpt.app.core.storage.dao.ContextCheckpointDao? = null,
+    private val wireHistoryStore: WireHistoryStore? = null,
 ) {
-    fun pagedSessions(searchQuery: String = ""): Flow<PagingData<SessionHit>> {
+    fun pagedSessions(
+        searchQuery: String = "",
+        filter: ConversationFilter = ConversationFilter.ALL,
+    ): Flow<PagingData<SessionHit>> {
         val query = searchQuery.trim().take(MAX_SEARCH_QUERY_CHARS).takeIf { it.isNotEmpty() }
         val config = PagingConfig(
             pageSize = SESSION_ROWS_PER_PAGE,
@@ -35,10 +40,10 @@ class SessionRepository(
         // 两个 DAO 方法的元素类型不同（实体 vs 搜索投影），共用一个 pagingSourceFactory
         // 推不出公共类型，所以按分支各建各的 Pager。
         return if (query == null) {
-            Pager(config) { conversationDao.pagingSource() }.flow
+            Pager(config) { conversationDao.pagingSource(filter.wire) }.flow
                 .map { pagingData -> pagingData.map { SessionHit(it.toDomain()) } }
         } else {
-            Pager(config) { conversationDao.searchPagingSource(query) }.flow
+            Pager(config) { conversationDao.searchPagingSource(query, filter.wire) }.flow
                 .map { pagingData ->
                     pagingData.map { SessionHit(it.conversation.toDomain(), it.matchedSnippet) }
                 }
@@ -172,8 +177,8 @@ class SessionRepository(
     }
 
     /** 「全选」取数：数据库中全部可见会话，不限于 Paging 已加载的部分。 */
-    suspend fun allVisibleSessionIds(): List<String> =
-        withContext(dispatchers.io) { conversationDao.allVisibleSessionIds() }
+    suspend fun allVisibleSessionIds(filter: ConversationFilter = ConversationFilter.ALL): List<String> =
+        withContext(dispatchers.io) { conversationDao.allVisibleSessionIds(filter.wire) }
 
     /**
      * 单条删除的落库判定，调用方需已在 IO 线程。
@@ -181,6 +186,7 @@ class SessionRepository(
      */
     private suspend fun deleteOne(conversation: ConversationEntity?, sessionId: String) {
         messageDao.deleteBySession(sessionId)
+        wireHistoryStore?.deleteSession(sessionId)
         contextCheckpointDao?.deleteBySession(sessionId)
         contextCheckpointDao?.deleteUsageBySession(sessionId)
         if (cloudSyncEnabled() && conversation?.providerKind == ProviderKind.MOLAGPT.name) {
