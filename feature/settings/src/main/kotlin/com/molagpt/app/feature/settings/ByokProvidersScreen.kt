@@ -54,6 +54,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.ByokProvider
+import com.molagpt.app.core.model.ByokPurpose
+import com.molagpt.app.core.model.ByokImageFormat
 import com.molagpt.app.core.model.ByokProviderType
 import coil3.compose.AsyncImage
 import java.util.UUID
@@ -70,8 +72,11 @@ fun ByokProvidersScreen(
     onOpenDetail: (String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    purpose: ByokPurpose? = null,
 ) {
-    val providers by viewModel.byokProviderList.collectAsStateWithLifecycle()
+    val allProviders by viewModel.byokProviderList.collectAsStateWithLifecycle()
+    val providers = allProviders.filter { purpose == null || it.purpose == purpose }
+    val imageOnly = purpose == ByokPurpose.IMAGE
     val status by viewModel.byokStatus.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showPresetSheet by remember { mutableStateOf(false) }
@@ -88,7 +93,7 @@ fun ByokProvidersScreen(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
             MolaTopBar(
-                title = { Text("BYOK 模型配置") },
+                title = { Text(if (imageOnly) "图像服务" else "BYOK 模型配置") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -105,7 +110,7 @@ fun ByokProvidersScreen(
                 shape = RoundedCornerShape(18.dp),
                 modifier = Modifier.navigationBarsPadding(),
             ) {
-                Icon(Icons.Filled.Add, contentDescription = "添加服务")
+                Icon(Icons.Filled.Add, contentDescription = if (imageOnly) "添加图像服务" else "添加服务")
             }
         },
     ) { inner ->
@@ -118,10 +123,10 @@ fun ByokProvidersScreen(
                 .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            ByokPricingActions(viewModel, snackbar)
+            if (!imageOnly) ByokPricingActions(viewModel, snackbar)
             SectionTitle("已添加的服务")
             if (providers.isEmpty()) {
-                EmptyProvidersHint()
+                EmptyProvidersHint(imageOnly)
             } else {
                 providers.forEach { provider ->
                     ProviderCard(
@@ -134,19 +139,21 @@ fun ByokProvidersScreen(
                 }
             }
 
-            SectionTitle("说明")
-            Surface(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
-            ) {
-                Text(
-                    "支持任意 OpenAI 兼容接口（DeepSeek、Qwen、Moonshot、OneAPI 等）以及 Anthropic、" +
-                        "Google Gemini 原生格式。添加并启用后，可在对话界面的模型选择器中切换使用，密钥仅保存在本机。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.86f),
-                    modifier = Modifier.padding(14.dp),
-                )
+            if (!imageOnly) {
+                SectionTitle("说明")
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                ) {
+                    Text(
+                        "支持任意 OpenAI 兼容接口（DeepSeek、Qwen、Moonshot、OneAPI 等）以及 Anthropic、" +
+                            "Google Gemini 原生格式。添加并启用后，可在对话界面的模型选择器中切换使用，密钥仅保存在本机。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.86f),
+                        modifier = Modifier.padding(14.dp),
+                    )
+                }
             }
         }
     }
@@ -166,14 +173,14 @@ fun ByokProvidersScreen(
                     .navigationBarsPadding(),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Text("添加服务", style = MaterialTheme.typography.titleLarge)
+                Text(if (imageOnly) "添加图像服务" else "添加服务", style = MaterialTheme.typography.titleLarge)
                 Text(
                     "选择一个预设快速开始，或选「自定义」从空白创建。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
                 )
-                val presets = viewModel.byokPresets
+                val presets = viewModel.byokPresets.filter { purpose == null || it.purpose == purpose }
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     PresetGroup("OpenAI 格式 API", presets.filter {
                         it.purpose == com.molagpt.app.core.model.ByokPurpose.CHAT &&
@@ -219,11 +226,19 @@ fun ByokProvidersScreen(
                             type = ByokProviderType.OPENAI_COMPAT,
                             baseUrl = "",
                         ),
+                        subtitle = if (imageOnly) "OpenAI 兼容接口或中转站" else null,
                     ) {
                         showPresetSheet = false
                         val id = "byok-custom-" + UUID.randomUUID().toString().replace("-", "").take(8)
                         viewModel.saveByokProvider(
-                            ByokProvider(id = id, name = "新服务", type = ByokProviderType.OPENAI_COMPAT, baseUrl = ""),
+                            ByokProvider(
+                                id = id,
+                                name = if (imageOnly) "新图像服务" else "新服务",
+                                type = ByokProviderType.OPENAI_COMPAT,
+                                baseUrl = "",
+                                purpose = purpose ?: ByokPurpose.CHAT,
+                                imageEditPath = if (imageOnly) "v1/images/edits" else "",
+                            ),
                         )
                         onOpenDetail(id)
                     }
@@ -274,7 +289,7 @@ private fun ProviderCard(
                     )
                 }
                 Text(
-                    "${provider.models.size} 个模型 · ${protocolLabel(provider.type)}",
+                    "${provider.models.size} 个模型 · ${providerSummary(provider)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -315,7 +330,7 @@ private fun PresetGroup(
 }
 
 @Composable
-private fun PresetRow(preset: ByokProvider, onClick: () -> Unit) {
+private fun PresetRow(preset: ByokProvider, subtitle: String? = null, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -328,7 +343,7 @@ private fun PresetRow(preset: ByokProvider, onClick: () -> Unit) {
         Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
             Text(preset.name, style = MaterialTheme.typography.titleMedium)
             Text(
-                preset.baseUrl.ifBlank { "从空白配置创建" },
+                subtitle ?: preset.baseUrl.ifBlank { "从空白配置创建" },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -385,15 +400,15 @@ private fun ProviderAvatar(provider: ByokProvider) {
 }
 
 @Composable
-private fun EmptyProvidersHint() {
+private fun EmptyProvidersHint(imageOnly: Boolean) {
     Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text("还没有自定义服务", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(if (imageOnly) "还没有图像服务" else "还没有自定义服务", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(
-            "点击右下角 + 接入你自己的 API",
+            if (imageOnly) "点击右下角 + 添加" else "点击右下角 + 接入你自己的 API",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
         )
@@ -405,6 +420,26 @@ internal fun protocolLabel(type: ByokProviderType): String = when (type) {
     ByokProviderType.OPENAI_RESPONSE -> "OpenAI Responses"
     ByokProviderType.ANTHROPIC -> "Anthropic"
     ByokProviderType.GEMINI -> "Gemini"
+}
+
+internal fun imageFormatLabel(format: ByokImageFormat): String = when (format) {
+    ByokImageFormat.OPENAI_IMAGES -> "图像接口"
+    ByokImageFormat.OPENAI_CHAT_IMAGE -> "对话接口"
+}
+
+internal fun imageFormatDescription(format: ByokImageFormat): String = when (format) {
+    ByokImageFormat.OPENAI_IMAGES -> "适用于 gpt-image、Seedream、Qwen-Image 等图像模型"
+    ByokImageFormat.OPENAI_CHAT_IMAGE -> "适用于 Nano Banana 等可输出图像的多模态模型"
+}
+
+/** 服务卡片上的协议说明；图像服务列出模型实际用到的接口。 */
+private fun providerSummary(provider: ByokProvider): String {
+    if (provider.purpose != ByokPurpose.IMAGE) {
+        return protocolLabel(provider.type)
+    }
+    if (provider.type == ByokProviderType.GEMINI) return "Gemini · 对话接口"
+    val formats = provider.models.map { provider.imageFormatFor(it.id) }.toSet().ifEmpty { setOf(provider.imageFormat) }
+    return ByokImageFormat.entries.filter { it in formats }.joinToString(" / ") { imageFormatLabel(it) }
 }
 
 internal fun protocolColor(type: ByokProviderType): Color = when (type) {

@@ -19,8 +19,10 @@ data class ProviderModel(
     val supportsReasoningEffort: Boolean = false,
     val supportsToolCalling: Boolean = false,
     val supportsImageGeneration: Boolean = false,
-    /** 图像模型支持编辑（如 gpt-image、imagen），仅 image 用途 provider 的模型有意义。 */
+    /** 图像模型支持参考图编辑，仅 image 用途 provider 的模型有意义。 */
     val supportsImageEdit: Boolean = false,
+    /** 图像模型单独指定的接口；null 跟随服务设置。同一个中转站里不同模型可能走不同接口。 */
+    val imageFormat: ByokImageFormat? = null,
     val supportsChat: Boolean = true,
     val group: String? = null,
     val description: String? = null,

@@ -1,6 +1,9 @@
 package com.molagpt.app.feature.chat
 
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import com.molagpt.app.core.model.MessageFragment
@@ -52,15 +55,24 @@ fun FragmentRenderer(
         is MessageFragment.Latex -> LatexView(fragment.expr, fragment.display, modifier)
         is MessageFragment.Mermaid -> CodeBlockView("mermaid", fragment.source, modifier)
         is MessageFragment.SearchResult -> SearchResultView(fragment.query, fragment.refs, modifier)
-        is MessageFragment.ToolCall -> ToolCallView(
-            name = fragment.name,
-            status = fragment.status,
-            label = fragment.label,
-            resultPreview = fragment.resultPreview,
-            argsJson = fragment.argsJson,
-            provider = fragment.provider,
-            modifier = modifier,
-        )
+        is MessageFragment.ToolCall -> {
+            val links = LocalSubagentLinks.current
+            val agentId = fragment.agentId?.takeIf { it in (links?.available ?: emptySet()) }
+            Column(modifier) {
+                ToolCallView(
+                    name = fragment.name,
+                    status = fragment.status,
+                    label = fragment.label,
+                    resultPreview = fragment.resultPreview,
+                    argsJson = fragment.argsJson,
+                    provider = fragment.provider,
+                    statusLabel = fragment.statusLabel,
+                )
+                if (agentId != null && links != null) {
+                    TextButton(onClick = { links.open(agentId) }) { Text("查看子 Agent") }
+                }
+            }
+        }
         is MessageFragment.FileCard -> FileCardView(fragment.file, modifier)
         is MessageFragment.Image -> com.molagpt.app.feature.file.RemoteImage(fragment.url, modifier)
         is MessageFragment.Tip -> androidx.compose.material3.Text(

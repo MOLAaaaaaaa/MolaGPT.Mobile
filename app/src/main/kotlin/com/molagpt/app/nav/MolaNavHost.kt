@@ -42,9 +42,11 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.molagpt.app.LocalAppContainer
 import com.molagpt.app.di.AppContainer
+import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.model.DesktopInfo
 import com.molagpt.app.core.model.DesktopLinkState
 import com.molagpt.app.core.network.DesktopRemoteService
+import com.molagpt.app.core.network.RemoteDesktopChannel
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.render.MolaMotion
@@ -113,6 +115,7 @@ private object Routes {
     const val AGENT_CONTROL = "agent_control"
     const val DESKTOPS = "desktops"
     const val BYOK_PROVIDERS = "byok_providers"
+    const val IMAGE_PROVIDERS = "image_providers"
     const val BYOK_PROVIDER_DETAIL = "byok_provider_detail"
     const val BYOK_TOOLS = "byok_tools"
     const val BYOK_MEMORY = "byok_memory"
@@ -143,10 +146,9 @@ fun MolaNavHost(
     // 「电脑」页：手机控制电脑上的 MolaGPT 对话；外部 Agent（Claude Code / Codex）从它进入。
     var loginTarget by remember { mutableStateOf(Routes.AGENT_CONTROL) }
     val openDesktops = {
-        val target = if (container.authService.isLoggedIn) Routes.DESKTOPS else Routes.AGENT_LOGIN
-        if (target == Routes.AGENT_LOGIN) loginTarget = Routes.DESKTOPS
-        if (navController.currentDestination?.route != target) {
-            navController.navigate(target) { launchSingleTop = true }
+        // 「电脑」页不再要求登录：未登录时显示无账号配对入口与已配对电脑。
+        if (navController.currentDestination?.route != Routes.DESKTOPS) {
+            navController.navigate(Routes.DESKTOPS) { launchSingleTop = true }
         }
     }
     // 电脑对话和本地对话一样显示在主页上，不是二级页：从「电脑」页、通知打开的，都回到主页再切过去。
@@ -164,8 +166,9 @@ fun MolaNavHost(
     LaunchedEffect(pendingDesktopOpen) {
         val key = pendingDesktopOpen ?: return@LaunchedEffect
         container.pendingOpenDesktopConversation.value = null
-        if (container.authService.isLoggedIn) {
-            openDesktopConversation(key.substringBefore('/'), key.substringAfter('/'), "")
+        val machineId = key.substringBefore('/')
+        if (container.authService.isLoggedIn || machineId in container.anonRemoteService.pairedDeviceIds()) {
+            openDesktopConversation(machineId, key.substringAfter('/'), "")
         }
     }
     val pendingAgentOpen by container.pendingOpenAgentSessionId.collectAsStateWithLifecycle()
@@ -310,13 +313,14 @@ fun MolaNavHost(
             val account by container.authService.account.collectAsStateWithLifecycle()
             var desktopStatus by remember { mutableStateOf<String?>(null) }
             LaunchedEffect(account.loggedIn, account.username) {
+                desktopStatus = null
+                val anonPaired = container.anonRemoteService.pairedDeviceIds().size
                 if (!account.loggedIn || account.username.isNullOrBlank()) {
-                    desktopStatus = "登录后可在手机上继续电脑上的对话"
+                    desktopStatus = if (anonPaired > 0) "已配对 $anonPaired 台电脑" else "尚未连接电脑"
                     return@LaunchedEffect
                 }
-                desktopStatus = null
                 desktopStatus = try {
-                    desktopStatusText(container.desktopRemoteService.listDesktops())
+                    desktopStatusText(container.desktopRemoteService.listDesktops(), anonPaired)
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
@@ -392,8 +396,12 @@ fun MolaNavHost(
 
         // MolaGPT 账户页：账户域（账户信息/配额/云同步/个性化记忆/账户工具）整体收在此二级页，
         // 设置根页只留一行入口。复用 SettingsViewModel（与图像工作台/BYOK 各页同一惯例）。
-        composable(Routes.MOLA_ACCOUNT) {
-            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+        composable(Routes.MOLA_ACCOUNT) { entry ->
+            val settingsEntry = remember(entry) { navController.getBackStackEntry(Routes.SETTINGS) }
+            val vm: SettingsViewModel = viewModel(
+                viewModelStoreOwner = settingsEntry,
+                factory = ViewModelFactories.settings(container),
+            )
             val account by container.authService.account.collectAsStateWithLifecycle()
             MolaAccountScreen(
                 viewModel = vm,
@@ -430,9 +438,8 @@ fun MolaNavHost(
                         }
                     }
                 },
-                onManageModels = { providerId ->
-                    val target = if (!providerId.isNullOrBlank()) "${Routes.BYOK_PROVIDER_DETAIL}/$providerId" else Routes.BYOK_PROVIDERS
-                    navController.navigate(target) { launchSingleTop = true }
+                onManageModels = {
+                    navController.navigate(Routes.IMAGE_PROVIDERS) { launchSingleTop = true }
                 },
                 onOpenGallery = {
                     if (navController.currentDestination?.route != Routes.IMAGE_GALLERY) {
@@ -474,17 +481,7 @@ fun MolaNavHost(
         }
 
         composable(Routes.DESKTOPS) {
-            val account by container.authService.account.collectAsStateWithLifecycle()
-            if (!account.loggedIn) {
-                LaunchedEffect(Unit) {
-                    loginTarget = Routes.DESKTOPS
-                    navController.navigate(Routes.AGENT_LOGIN) {
-                        popUpTo(Routes.DESKTOPS) { inclusive = true }
-                        launchSingleTop = true
-                    }
-                }
-                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {}
-            } else {
+            run {
                 val vm: DesktopsViewModel = viewModel(factory = ViewModelFactories.desktops(container))
                 DesktopsScreen(
                     vm = vm,
@@ -543,31 +540,38 @@ fun MolaNavHost(
             }
         }
 
-        composable(Routes.BYOK_PROVIDERS) {
-            val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
-            ByokProvidersScreen(
-                viewModel = vm,
-                onOpenDetail = { id ->
-                    navController.navigate("${Routes.BYOK_PROVIDER_DETAIL}/$id") { launchSingleTop = true }
-                },
-                onBack = {
-                    if (navController.currentDestination?.route == Routes.BYOK_PROVIDERS) {
-                        if (!navController.popBackStack()) {
-                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+        listOf(Routes.BYOK_PROVIDERS, Routes.IMAGE_PROVIDERS).forEach { route ->
+            composable(route) {
+                val vm: SettingsViewModel = viewModel(factory = ViewModelFactories.settings(container))
+                ByokProvidersScreen(
+                    viewModel = vm,
+                    purpose = if (route == Routes.IMAGE_PROVIDERS) ByokPurpose.IMAGE else null,
+                    onOpenDetail = { id ->
+                        navController.navigate("${Routes.BYOK_PROVIDER_DETAIL}/$id?imageOnly=${route == Routes.IMAGE_PROVIDERS}") { launchSingleTop = true }
+                    },
+                    onBack = {
+                        if (navController.currentDestination?.route == route) {
+                            if (!navController.popBackStack()) {
+                                navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                            }
                         }
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
 
         composable(
-            route = "${Routes.BYOK_PROVIDER_DETAIL}/{id}?editModel={editModel}",
+            route = "${Routes.BYOK_PROVIDER_DETAIL}/{id}?editModel={editModel}&imageOnly={imageOnly}",
             arguments = listOf(
                 navArgument("id") { type = NavType.StringType },
                 navArgument("editModel") {
                     type = NavType.StringType
                     defaultValue = ""
+                },
+                navArgument("imageOnly") {
+                    type = NavType.BoolType
+                    defaultValue = false
                 },
             ),
         ) { backStackEntry ->
@@ -577,6 +581,7 @@ fun MolaNavHost(
                 providerId = backStackEntry.arguments?.getString("id").orEmpty(),
                 viewModel = vm,
                 initialEditModelId = editModel.ifBlank { null },
+                showPurpose = backStackEntry.arguments?.getBoolean("imageOnly") != true,
                 onBack = {
                     if (!navController.popBackStack()) {
                         navController.navigate(Routes.BYOK_PROVIDERS) { launchSingleTop = true }
@@ -872,7 +877,8 @@ private fun ChatHost(
         container.desktopRemoteService.restoreDesktops()
     }
 
-    LaunchedEffect(desktopInfos) {
+    val accountPairsVersion by container.desktopRemoteService.pairsVersion.collectAsStateWithLifecycle()
+    LaunchedEffect(desktopInfos, accountPairsVersion) {
         val service = container.desktopRemoteService
         pairedDesktopIds = withContext(container.dispatchers.io) {
             desktopInfos.mapNotNullTo(HashSet()) { info -> info.machineId.takeIf(service::isPaired) }
@@ -902,8 +908,36 @@ private fun ChatHost(
         }
     }
 
-    val desktopSidebarSessions = remember(desktopInfos, pairedDesktopIds, onlineDesktopIds, desktopLink, pairingDesktopId) {
-        desktopInfos.flatMap { info ->
+    // 配对码配对的电脑：与登录无关，和账号电脑并列出现在侧边栏与模型菜单里。
+    val anonService = container.anonRemoteService
+    val anonOnlineIds by anonService.onlineMachines.collectAsStateWithLifecycle()
+    var anonInfos by remember { mutableStateOf<List<DesktopInfo>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        suspend fun refresh() {
+            try {
+                anonInfos = anonService.directoryInfos()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+            }
+        }
+        refresh()
+        anonService.listChanged.debounce(400).collect { refresh() }
+    }
+
+    val desktopSidebarSessions = remember(desktopInfos, pairedDesktopIds, onlineDesktopIds, desktopLink, pairingDesktopId, anonInfos, anonOnlineIds) {
+        val anonRows = anonInfos.flatMap { info ->
+            info.conversations.map { conversation ->
+                DesktopSidebarConversation(
+                    machineId = info.machineId,
+                    machineName = info.machineName,
+                    conversation = conversation,
+                    online = info.machineId in anonOnlineIds,
+                    paired = true,
+                )
+            }
+        }
+        withoutAnonDuplicates(desktopInfos, pairedDesktopIds, anonInfos).flatMap { info ->
             val online = if (desktopLink == DesktopLinkState.Connected) {
                 info.machineId in onlineDesktopIds
             } else {
@@ -919,7 +953,7 @@ private fun ChatHost(
                     pairing = info.machineId == pairingDesktopId,
                 )
             }
-        }
+        } + anonRows
     }
 
     LaunchedEffect(desktopSidebarSessions) {
@@ -935,7 +969,7 @@ private fun ChatHost(
     var menuDesktopsLoaded by remember { mutableStateOf(false) }
     var desktopModels by remember { mutableStateOf<DesktopModelsState?>(null) }
     var desktopModelsJob by remember { mutableStateOf<Job?>(null) }
-    LaunchedEffect(modelMenuOpen, account.loggedIn, account.username) {
+    LaunchedEffect(modelMenuOpen, account.loggedIn, account.username, accountPairsVersion) {
         if (!account.loggedIn || account.username.isNullOrBlank()) {
             menuDesktopInfos = emptyList()
             menuPairedIds = emptySet()
@@ -958,7 +992,14 @@ private fun ChatHost(
             }
         }
         if (!modelMenuOpen) {
-            if (menuDesktopInfos.isEmpty()) refresh()
+            if (menuDesktopInfos.isEmpty()) {
+                refresh()
+            } else {
+                val infos = menuDesktopInfos
+                menuPairedIds = withContext(container.dispatchers.io) {
+                    infos.mapNotNullTo(HashSet()) { info -> info.machineId.takeIf(service::isPaired) }
+                }
+            }
             return@LaunchedEffect
         }
         service.acquire()
@@ -969,14 +1010,22 @@ private fun ChatHost(
             service.release()
         }
     }
-    val desktopTargets = remember(menuDesktopInfos, menuPairedIds, onlineDesktopIds, desktopLink) {
-        menuDesktopInfos.map { info ->
+    // 侧边栏或模型菜单打开期间连上配对码电脑，在线状态才准。
+    val anonWanted = drawerOpen || modelMenuOpen
+    DisposableEffect(anonWanted) {
+        if (anonWanted) anonService.acquire()
+        onDispose { if (anonWanted) anonService.release() }
+    }
+    val desktopTargets = remember(menuDesktopInfos, menuPairedIds, onlineDesktopIds, desktopLink, anonInfos, anonOnlineIds) {
+        withoutAnonDuplicates(menuDesktopInfos, menuPairedIds, anonInfos).map { info ->
             DesktopRunTarget(
                 machineId = info.machineId,
                 name = info.machineName,
                 online = if (desktopLink == DesktopLinkState.Connected) info.machineId in onlineDesktopIds else info.online,
                 paired = info.machineId in menuPairedIds,
             )
+        } + anonInfos.map { info ->
+            DesktopRunTarget(info.machineId, info.machineName, online = info.machineId in anonOnlineIds, paired = true)
         }
     }
 
@@ -1002,14 +1051,15 @@ private fun ChatHost(
     /** 点开一台电脑：没配对先用账号配对，再取它的模型。 */
     fun openDesktopModels(machineId: String) {
         desktopModelsJob?.cancel()
-        val service = container.desktopRemoteService
+        val anon = machineId in anonService.pairedDeviceIds()
+        val service: RemoteDesktopChannel = if (anon) anonService else container.desktopRemoteService
         // 取过就先显示上次的模型，后台刷新；只有第一次才显示读取中。
         val cached = service.cachedModelGroups(machineId)
         desktopModels = DesktopModelsState(machineId, loading = cached == null, groups = cached.orEmpty())
         desktopModelsJob = scope.launch {
             desktopModels = try {
-                if (machineId !in menuPairedIds) {
-                    service.pairWithAccount(
+                if (!anon && machineId !in menuPairedIds) {
+                    container.desktopRemoteService.pairWithAccount(
                         machineId = machineId,
                         deviceName = container.remoteDeviceName,
                         deviceId = container.remoteDeviceId,
@@ -1221,7 +1271,7 @@ private fun ChatHost(
                     viewModel = chatVm,
                     enterToSend = settings.enterToSend,
                     htmlAsCard = settings.htmlAsCard,
-                    showAgentControlShortcut = settings.showAgentControlShortcut && account.loggedIn,
+                    showAgentControlShortcut = settings.showAgentControlShortcut,
                     showImageWorkbenchShortcut = settings.showImageWorkbenchShortcut,
                     onOpenDrawer = { drawerOpen = true },
                     onOpenSettings = onOpenSettings,
@@ -1252,7 +1302,7 @@ private fun ChatHost(
                         )
                     },
                     showDesktopHint = account.loggedIn && menuDesktopsLoaded &&
-                        menuPairedIds.isEmpty() && !settings.desktopHintDismissed,
+                        menuPairedIds.isEmpty() && anonInfos.isEmpty() && !settings.desktopHintDismissed,
                     onDismissDesktopHint = {
                         scope.launch { container.settingsStore.setDesktopHintDismissed(true) }
                     },
@@ -1324,10 +1374,22 @@ private fun ChatHost(
 }
 
 /** 设置页「电脑」一行的状态。 */
-private fun desktopStatusText(desktops: List<DesktopInfo>): String {
-    if (desktops.isEmpty()) return "尚未连接电脑"
+/** 账号列表里同名、未配对的电脑已用配对码配对过：只留配对码那一台。 */
+private fun withoutAnonDuplicates(account: List<DesktopInfo>, paired: Set<String>, anon: List<DesktopInfo>): List<DesktopInfo> {
+    if (anon.isEmpty()) return account
+    val anonNames = anon.mapTo(HashSet()) { it.machineName }
+    return account.filter { it.machineId in paired || it.machineName !in anonNames }
+}
+
+/** 配对码电脑的在线状态要连上才知道，这里只计数。 */
+private fun desktopStatusText(desktops: List<DesktopInfo>, anonPaired: Int): String {
     val online = desktops.count { it.online }
-    return if (online > 0) "$online 台电脑在线" else "电脑离线"
+    return when {
+        online > 0 -> "$online 台电脑在线"
+        anonPaired > 0 -> "已配对 ${desktops.size + anonPaired} 台电脑"
+        desktops.isEmpty() -> "尚未连接电脑"
+        else -> "电脑离线"
+    }
 }
 
 /**

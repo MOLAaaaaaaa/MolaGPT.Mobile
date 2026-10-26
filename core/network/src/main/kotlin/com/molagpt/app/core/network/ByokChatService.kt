@@ -1531,7 +1531,7 @@ class ByokChatService(
             val key = param.key.trim()
             if (key.isBlank() || isProtectedBodyKey(key)) return@forEach
             if (geminiLevels && key in DEPRECATED_GEMINI_PARAMS) return@forEach
-            val value = customBodyValueToJson(param)
+            val value = customBodyValueToJson(http.json, param)
             put(key, if (geminiLevels && key in GEMINI_CONFIG_KEYS) cleanGeminiConfig(value) else value)
         }
     }
@@ -1550,16 +1550,6 @@ class ByokChatService(
     private fun isProtectedBodyKey(key: String): Boolean =
         key == "messages" || key == "input" || key == "contents" || key == "stream" ||
             key == "tools" || key == "tool_choice" || key == "functionDeclarations"
-
-    private fun customBodyValueToJson(param: CustomBodyParam): JsonElement =
-        when (param.type.trim().lowercase()) {
-            "number" -> param.value.toLongOrNull()?.let { JsonPrimitive(it) }
-                ?: param.value.toDoubleOrNull()?.let { JsonPrimitive(it) }
-                ?: JsonPrimitive(param.value)
-            "boolean" -> JsonPrimitive(param.value.trim().toBooleanStrictOrNull() ?: false)
-            "json" -> runCatching { http.json.parseToJsonElement(param.value) }.getOrDefault(JsonPrimitive(param.value))
-            else -> JsonPrimitive(param.value)
-        }
 
     private fun buildAnthropicMessages(provider: ByokProvider, request: ChatRequest): List<JsonObject> {
         val replaceImages = replaceImagesWithText(provider, request)
@@ -2005,8 +1995,7 @@ class ByokChatService(
             ?: imageProviderResolver() ?: return "未配置图像服务"
         val imageModelId = imageProvider.models.firstOrNull { it.supportsImageGeneration }?.id
             ?: return "未配置图像模型"
-        // 复用工作台同一出图路径：按 imageProvider.imageFormat 分派（OpenRouter 自动走 chat/completions，
-        // 不再硬编码 v1/images/generations，修复 OpenRouter 出图 404）。出图参数取 BYOK 工具设置。
+        // 复用工作台的模型接口选择，出图参数取 BYOK 工具设置。
         return runCatching {
             val cfg = imageGenConfigProvider()
             val result = byokImageApi.generate(imageProvider, imageModelId, imagePrompt, size = "", imageConfig = cfg)
@@ -3467,3 +3456,14 @@ internal fun selectByokVisionModel(provider: ByokProvider, fallbackModelId: Stri
     if (current?.supportsVision == true) return fallbackModelId
     return provider.models.firstOrNull { it.supportsVision }?.id ?: fallbackModelId
 }
+
+/** 模型参数覆写项按声明的类型转成 JSON 值。对话和图像请求共用。 */
+internal fun customBodyValueToJson(json: Json, param: CustomBodyParam): JsonElement =
+    when (param.type.trim().lowercase()) {
+        "number" -> param.value.toLongOrNull()?.let { JsonPrimitive(it) }
+            ?: param.value.toDoubleOrNull()?.let { JsonPrimitive(it) }
+            ?: JsonPrimitive(param.value)
+        "boolean" -> JsonPrimitive(param.value.trim().toBooleanStrictOrNull() ?: false)
+        "json" -> runCatching { json.parseToJsonElement(param.value) }.getOrDefault(JsonPrimitive(param.value))
+        else -> JsonPrimitive(param.value)
+    }

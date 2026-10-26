@@ -44,13 +44,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.ClipOp
+import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -120,24 +123,33 @@ fun Modifier.streamingTailFade(
     fadeWidth: Dp = 96.dp,
 ): Modifier = if (!active || lastLineEndX <= 0f) this else composed {
     val fadePx = with(LocalDensity.current) { fadeWidth.toPx() }
-    // 需要离屏合成：DstIn 要与已绘制的文本像素做相交，直接画会与背景混合。
-    graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-        .drawWithContent {
-            drawContent()
-            val start = (lastLineEndX - fadePx).coerceAtLeast(0f)
-            val end = lastLineEndX.coerceAtMost(size.width)
-            if (end <= start) return@drawWithContent
-            drawRect(
-                brush = Brush.horizontalGradient(
-                    colors = listOf(Color.Black, Color.Black.copy(alpha = 0.22f)),
-                    startX = start,
-                    endX = end,
-                ),
-                topLeft = Offset(start, lastLineTop),
-                size = Size(end - start, (lastLineBottom - lastLineTop).coerceAtLeast(0f)),
-                blendMode = BlendMode.DstIn,
-            )
+    drawWithCache {
+        val start = (lastLineEndX - fadePx).coerceAtLeast(0f)
+        val end = lastLineEndX.coerceAtMost(size.width)
+        val bounds = Rect(start, lastLineTop, end, lastLineBottom)
+        val paint = Paint()
+        val mask = Brush.horizontalGradient(
+            colors = listOf(Color.Black, Color.Black.copy(alpha = 0.22f)),
+            startX = start,
+            endX = end,
+        )
+        onDrawWithContent {
+            if (bounds.isEmpty) {
+                drawContent()
+            } else {
+                clipRect(bounds.left, bounds.top, bounds.right, bounds.bottom, ClipOp.Difference) {
+                    this@onDrawWithContent.drawContent()
+                }
+                // 只给行尾建离屏层，长段落不再分配整段文字大小的纹理。
+                clipRect(bounds.left, bounds.top, bounds.right, bounds.bottom) {
+                    drawContext.canvas.saveLayer(bounds, paint)
+                    this@onDrawWithContent.drawContent()
+                    drawRect(mask, bounds.topLeft, bounds.size, blendMode = BlendMode.DstIn)
+                    drawContext.canvas.restore()
+                }
+            }
         }
+    }
 }
 
 /** 骨架屏微光（加载占位）。给元素定好尺寸+圆角后调用即可：`Box(Modifier.height(14.dp).clip(..).shimmer())`。 */

@@ -515,6 +515,17 @@ class AppContainer(
         credentialStore.username?.let { java.io.File(appContext.noBackupFilesDir, "desktop-remote/${userKey(it)}") }
     }
 
+    /** 无账号远控：配对码 + 校验码配对，业务帧端到端加密；不登录也能用。 */
+    val anonRemoteService = com.molagpt.app.core.network.AnonRemoteService(
+        http = http,
+        dispatchers = dispatchers,
+        pairs = EncryptedAnonPairStore(credentialStore),
+        grants = AnonGrantKeys(),
+        phoneName = agentDeviceName,
+        phoneDeviceId = agentDeviceId,
+        onAccountTwin = desktopRemoteService::dropSupersededPair,
+    )
+
     /** 配对时告诉电脑这是哪台手机。 */
     val remoteDeviceId: String get() = agentDeviceId
     val remoteDeviceName: String get() = agentDeviceName
@@ -666,6 +677,7 @@ class AppContainer(
     internal val desktopNotificationMonitor = DesktopNotificationMonitor(
         context = appContext,
         service = desktopRemoteService,
+        anon = anonRemoteService,
         scope = applicationScope,
         notifyEnabled = { currentSettings.completionNotify },
         isAuthenticated = { !credentialStore.jwt.isNullOrBlank() },

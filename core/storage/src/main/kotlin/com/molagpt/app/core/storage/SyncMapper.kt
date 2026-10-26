@@ -183,6 +183,37 @@ object SyncMapper {
         return JsonObject(extra).toString()
     }
 
+    /** 云端数组顺序就是对话顺序；时间戳可能因 Web 重保存而倒退。 */
+    fun jsonToMessages(sessionId: String, messages: JsonArray): List<MessageEntity> {
+        var previousCreatedAt = Long.MIN_VALUE
+        return messages.mapIndexedNotNull { index, element ->
+            val obj = element as? JsonObject ?: return@mapIndexedNotNull null
+            val message = jsonToMessage(sessionId, obj, index)
+            val createdAt = maxOf(message.createdAt, previousCreatedAt + 1)
+            previousCreatedAt = createdAt
+            message.copy(createdAt = createdAt, updatedAt = createdAt)
+        }
+    }
+
+    /** 旧云端缓存的 ID 带原数组下标，本地续写的 msg_ 消息接在导入历史之后。 */
+    internal fun cachedMessageOrderUpdates(
+        sessionId: String,
+        messages: List<Pair<String, Long>>,
+    ): List<Pair<String, Long>> {
+        val importedId = Regex("^${Regex.escape(sessionId)}_\\d+_(\\d+)_(?:USER|ASSISTANT|SYSTEM|TOOL)$")
+        val ordered = messages.map { (id, createdAt) ->
+            Triple(id, createdAt, importedId.matchEntire(id)?.groupValues?.get(1)?.toInt())
+        }
+        if (ordered.none { it.third != null }) return emptyList()
+        var previousCreatedAt = Long.MIN_VALUE
+        return ordered.sortedWith(compareBy({ it.third ?: Int.MAX_VALUE }, { it.second }))
+            .mapNotNull { (id, originalCreatedAt, _) ->
+                val createdAt = maxOf(originalCreatedAt, previousCreatedAt + 1)
+                previousCreatedAt = createdAt
+                if (createdAt == originalCreatedAt) null else id to createdAt
+            }
+    }
+
     /** 服务端消息 → 本地实体（把 think/tool/ref/meta 尽量还原成 Android fragments）。 */
     fun jsonToMessage(sessionId: String, obj: JsonObject, index: Int = 0): MessageEntity {
         val roleStr = obj["role"]?.jsonPrimitive?.contentOrNull ?: "assistant"
@@ -217,7 +248,7 @@ object SyncMapper {
             role = role,
         )
         val ts = parseMessageTimestamp(obj["timestamp"])
-        val createdAt = ts + index.coerceAtLeast(0)
+        val createdAt = ts
         val meta = buildMap {
             parseRetry(metaObj?.get("retry"), sources)?.let { retry ->
                 put(RetryAttempts.KEY_ATTEMPTS, RetryAttempts.encode(retry.attempts))

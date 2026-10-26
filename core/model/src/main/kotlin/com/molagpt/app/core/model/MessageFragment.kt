@@ -75,6 +75,8 @@ sealed interface MessageFragment {
         val argsJson: String? = null,
         val resultPreview: String? = null,
         val provider: String? = null,
+        val statusLabel: String? = null,
+        val agentId: String? = null,
     ) : MessageFragment
 
     /** 文件卡片（上传/生成的文件）。 */

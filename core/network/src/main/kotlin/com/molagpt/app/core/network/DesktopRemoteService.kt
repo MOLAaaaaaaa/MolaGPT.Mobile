@@ -83,7 +83,7 @@ class DesktopRemoteService(
     private val pairs: RemotePairStore,
     /** 当前账号的电脑列表缓存文件；未登录时为 null。 */
     private val listCacheFile: () -> File? = { null },
-) {
+) : RemoteDesktopChannel {
     private val base = MolaEndpoints.BASE_URL.trimEnd('/')
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
 
@@ -98,18 +98,22 @@ class DesktopRemoteService(
         .build()
 
     private val _link = MutableStateFlow(DesktopLinkState.Disconnected)
-    val link: StateFlow<DesktopLinkState> = _link.asStateFlow()
+    override val link: StateFlow<DesktopLinkState> = _link.asStateFlow()
 
     private val _onlineMachines = MutableStateFlow<Set<String>>(emptySet())
     /** 此刻连在中转上的电脑；只在 [link] 为 Connected 时可信。 */
-    val onlineMachines: StateFlow<Set<String>> = _onlineMachines.asStateFlow()
+    override val onlineMachines: StateFlow<Set<String>> = _onlineMachines.asStateFlow()
 
     private val _pushes = MutableSharedFlow<DesktopPush>(extraBufferCapacity = 512)
-    val pushes: SharedFlow<DesktopPush> = _pushes.asSharedFlow()
+    override val pushes: SharedFlow<DesktopPush> = _pushes.asSharedFlow()
 
     private val _listChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     /** 电脑的对话列表可能变了（中转提示）。 */
-    val listChanged: SharedFlow<Unit> = _listChanged.asSharedFlow()
+    override val listChanged: SharedFlow<Unit> = _listChanged.asSharedFlow()
+
+    private val _pairsVersion = MutableStateFlow(0)
+    /** 本机配对记录被 [dropSupersededPair] 改过；列表据此重算「已配对」。 */
+    val pairsVersion: StateFlow<Int> = _pairsVersion.asStateFlow()
 
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JsonObject>>()
     private val wake = Channel<Unit>(Channel.CONFLATED)
@@ -194,13 +198,13 @@ class DesktopRemoteService(
      * 上次从这台电脑取到的模型；没取过为 null。只在内存里，切换模型菜单时先显示它，
      * 再由 [modelGroups] 在后台刷新，不必每次都等电脑回话。
      */
-    fun cachedModelGroups(machineId: String): List<RemoteModelGroup>? {
+    override fun cachedModelGroups(machineId: String): List<RemoteModelGroup>? {
         if (listCacheFile() != modelGroupsOwner) return null
         return modelGroupsCache[machineId]
     }
 
     /** 向电脑取它的模型，并记进 [cachedModelGroups]。 */
-    suspend fun modelGroups(machineId: String): List<RemoteModelGroup> {
+    override suspend fun modelGroups(machineId: String): List<RemoteModelGroup> {
         val owner = listCacheFile()
         val groups = parseModelGroups(request(machineId, "models"))
         // 请求途中换了账号：结果不属于当前账号。
@@ -228,6 +232,15 @@ class DesktopRemoteService(
 
     fun isPaired(machineId: String): Boolean = pairs.load(machineId) != null
 
+    /** 同一台电脑也用配对码配对了：账号配对多余，只删本机密钥（电脑那边由它自己删）。 */
+    fun dropSupersededPair(machineId: String) {
+        if (pairs.load(machineId) == null) return
+        pairs.remove(machineId)
+        modelGroupsCache.remove(machineId)
+        _pairsVersion.value++
+        _listChanged.tryEmit(Unit)
+    }
+
     /** 是否与任何电脑配对过；没有就不必轮询电脑列表。 */
     fun hasAnyPair(): Boolean = pairs.hasAny()
 
@@ -235,7 +248,7 @@ class DesktopRemoteService(
 
     /** 有页面需要实时内容；与 [release] 成对调用。 */
     @Synchronized
-    fun acquire() {
+    override fun acquire() {
         users++
         // 没有连接时马上就会去连：先报「连接中」，免得刚进页面的人先看到一闪「已断开」。
         if (socket == null) _link.value = DesktopLinkState.Connecting
@@ -244,13 +257,13 @@ class DesktopRemoteService(
     }
 
     @Synchronized
-    fun release() {
+    override fun release() {
         users = (users - 1).coerceAtLeast(0)
         wake.trySend(Unit)
     }
 
     /** 网络恢复、回到前台时立刻重连，而不是等退避。 */
-    fun reconnectNow() {
+    override fun reconnectNow() {
         socket?.takeIf { socketJwt != jwtProvider() }?.let {
             it.cancel()
             closed(it)
@@ -405,14 +418,14 @@ class DesktopRemoteService(
      * 向 [machineId] 发一个请求并等它的答复。电脑拒绝或送不到时抛 [DesktopRemoteException]。
      * 调用方需已 [acquire]；连接尚未建立时最多等 [CONNECT_TIMEOUT_MS]。
      */
-    suspend fun request(machineId: String, op: String, args: JsonObject = JsonObject(emptyMap())): JsonObject {
+    override suspend fun request(machineId: String, op: String, args: JsonObject): JsonObject {
         val pair = pairs.load(machineId) ?: throw DesktopRemoteException("unpaired", "配对已失效，请重新配对")
         val reply = send(machineId, op, http.json.encodeToString(JsonObject.serializer(), args), pair)
         return reply["data"] as? JsonObject ?: JsonObject(emptyMap())
     }
 
     /** 不关心结果的请求（如离开页面时的 close），在服务自己的作用域里发出，不随页面取消。 */
-    fun requestQuietly(machineId: String, op: String, args: JsonObject) {
+    override fun requestQuietly(machineId: String, op: String, args: JsonObject) {
         scope.launch { runCatching { request(machineId, op, args) } }
     }
 

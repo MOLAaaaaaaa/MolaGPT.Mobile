@@ -164,6 +164,7 @@ class SettingsViewModel(
             applyByokPrices(provider.id, fetched.mapNotNull { m -> m.pricing?.let { m.id to it } }.toMap())
             applyByokThinkingConfigs(provider.id, fetched)
             applyByokContextWindows(provider.id, fetched)
+            applyByokImageFormats(provider.id, fetched)
             fetched
         }
 
@@ -180,6 +181,31 @@ class SettingsViewModel(
         if (declared.isEmpty()) return
         val models = provider.models.map { model ->
             if (model.contextWindow != null) model else declared[model.id]?.let { model.copy(contextWindow = it) } ?: model
+        }
+        if (models != provider.models) byokProviders.upsert(provider.copy(models = models))
+    }
+
+    /**
+     * 把模型列表重新识别出的图像接口补到旧模型上。
+     * 保留明确的模型级接口；自动补全 OpenRouter 图像接口时同步其声明的编辑能力。
+     */
+    private suspend fun applyByokImageFormats(
+        providerId: String,
+        fetched: List<com.molagpt.app.core.model.ProviderModel>,
+    ) {
+        val provider = byokProviders.get(providerId) ?: return
+        if (provider.purpose != com.molagpt.app.core.model.ByokPurpose.IMAGE) return
+        val byId = fetched.associateBy { it.id }
+        val models = provider.models.map { model ->
+            val next = byId[model.id] ?: return@map model
+            if (model.imageFormat != null || next.imageFormat == null) return@map model
+            model.copy(
+                imageFormat = next.imageFormat,
+                apiUrl = next.apiUrl,
+                supportsImageEdit = if (provider.isOpenRouter && next.imageFormat == com.molagpt.app.core.model.ByokImageFormat.OPENAI_IMAGES) {
+                    next.supportsImageEdit
+                } else model.supportsImageEdit,
+            )
         }
         if (models != provider.models) byokProviders.upsert(provider.copy(models = models))
     }

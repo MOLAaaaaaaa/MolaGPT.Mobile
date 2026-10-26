@@ -25,7 +25,42 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class ByokModelApi(private val http: MolaHttp) {
     suspend fun fetchModels(provider: ByokProvider): List<ProviderModel> {
-        val url = provider.modelsEndpoint()
+        if (provider.purpose == ByokPurpose.IMAGE && provider.isOpenRouter) {
+            val images = parseImageModels(
+                fetchModelsRoot(provider, provider.endpoint("v1/images/models")), provider, ByokImageFormat.OPENAI_IMAGES,
+            ).associateBy { it.id }
+            val chatRoot = fetchModelsRoot(provider, provider.endpoint("v1/models?output_modalities=image"))
+            val chat = parseImageModels(chatRoot, provider, ByokImageFormat.OPENAI_CHAT_IMAGE).associateBy { it.id }
+            // 通用目录也列出纯图像模型；只有同时输出文字的多模态模型才真正两种接口都能用。
+            val multimodal = (chatRoot["data"] as? JsonArray).orEmpty().mapNotNull { item ->
+                val obj = item as? JsonObject ?: return@mapNotNull null
+                val outputs = ((obj["architecture"] as? JsonObject)?.get("output_modalities") as? JsonArray)
+                    ?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
+                obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { "text" in outputs }
+            }.toSet()
+            // openrouter/auto 等是路由器，不是图像模型。
+            return (images.keys + chat.keys.filterNot { it.startsWith("openrouter/") }).sorted().map { id ->
+                val image = images[id]
+                val viaChat = chat[id]
+                when {
+                    image == null -> viaChat!!.withImageFormat(provider, ByokImageFormat.OPENAI_CHAT_IMAGE)
+                    // 两种接口都能用的模型跟随服务默认，不替用户换接口。
+                    viaChat != null && id in multimodal -> image.withImageFormat(provider, provider.imageFormat)
+                        .copy(supportsImageEdit = image.supportsImageEdit || viaChat.supportsImageEdit)
+                    else -> image.withImageFormat(provider, ByokImageFormat.OPENAI_IMAGES)
+                }
+            }
+        }
+        return parseByokModels(fetchModelsRoot(provider, provider.modelsEndpoint()), provider)
+    }
+
+    /** 与服务默认一致时记为跟随服务（null）。 */
+    private fun ProviderModel.withImageFormat(provider: ByokProvider, format: ByokImageFormat): ProviderModel = copy(
+        imageFormat = format.takeIf { it != provider.imageFormat },
+        apiUrl = if (format == ByokImageFormat.OPENAI_CHAT_IMAGE) provider.chatPath else "v1/images",
+    )
+
+    private suspend fun fetchModelsRoot(provider: ByokProvider, url: String): JsonObject {
         val resp = http.client.get(url) {
             provider.applyAuthHeaders { name, value -> header(name, value) }
         }
@@ -48,7 +83,7 @@ class ByokModelApi(private val http: MolaHttp) {
                 serverResponseError("模型列表获取失败", resp.status.value, raw),
             )
         }
-        return parseByokModels(root, provider)
+        return root
     }
 
     /**
@@ -114,11 +149,11 @@ class ByokModelApi(private val http: MolaHttp) {
         return intOf(obj["top_provider"] as? JsonObject, "context_length")
     }
 
-    /** 解析 OpenRouter 等返回的 supported_parameters 数组；无该字段返回 null（表示未知，非「不支持」）。 */
-    private fun parseSupportedParameters(obj: JsonObject): Set<String>? {
-        val arr = obj["supported_parameters"] as? JsonArray ?: return null
-        val out = arr.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }
-        return out.toSet()
+    /** OpenRouter 对话目录用数组，图像目录用参数名到能力定义的对象；无字段时返回 null。 */
+    private fun parseSupportedParameters(obj: JsonObject): Set<String>? = when (val params = obj["supported_parameters"]) {
+        is JsonObject -> params.keys
+        is JsonArray -> params.mapNotNull { it.jsonPrimitive.contentOrNull?.trim()?.takeIf { s -> s.isNotEmpty() } }.toSet()
+        else -> null
     }
 
     /**
@@ -207,8 +242,16 @@ class ByokModelApi(private val http: MolaHttp) {
         }
     }
 
-    /** image 用途：仅保留图像模型，并按名称标记 supportsImageEdit。 */
-    private fun parseImageModels(root: JsonObject, provider: ByokProvider): List<ProviderModel> {
+    /**
+     * image 用途：仅保留图像模型，并按名称标记 supportsImageEdit。
+     * 中转站（New API 等）会在每个模型上声明 supported_endpoint_types，
+     * 其中 image-generation 表示该模型走 /images/generations。
+     */
+    private fun parseImageModels(
+        root: JsonObject,
+        provider: ByokProvider,
+        catalogFormat: ByokImageFormat? = null,
+    ): List<ProviderModel> {
         val data = (root["data"] as? JsonArray)
             ?: (root["models"] as? JsonArray)
             ?: return emptyList()
@@ -218,10 +261,23 @@ class ByokModelApi(private val http: MolaHttp) {
                 ?: obj["name"]?.jsonPrimitive?.contentOrNull
                 ?: return@mapNotNull null
             val id = rawName.removePrefix("models/")
-            if (id.isBlank() || !looksLikeByokImageModel(id)) return@mapNotNull null
-            // 对话补全出图格式（openai-chat-image）下，模型仍由名称判定， apiUrl 指向 chatPath。
-            val apiUrl = if (provider.imageFormat == ByokImageFormat.OPENAI_CHAT_IMAGE) provider.chatPath
-                else provider.imagePath
+            if (provider.type == ByokProviderType.GEMINI && id.startsWith("imagen-", ignoreCase = true)) return@mapNotNull null
+            val endpointTypes = (obj["supported_endpoint_types"] as? JsonArray)
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                .orEmpty()
+            val declaredImagesApi = "image-generation" in endpointTypes
+            if (id.isBlank() || !(catalogFormat != null || declaredImagesApi || looksLikeByokImageModel(id))) return@mapNotNull null
+            val imageFormat = catalogFormat ?: inferByokImageFormat(provider, id, declaredImagesApi)
+            val apiUrl = when {
+                provider.type == ByokProviderType.GEMINI -> provider.imagePath
+                (imageFormat ?: provider.imageFormat) == ByokImageFormat.OPENAI_CHAT_IMAGE -> provider.chatPath
+                provider.isOpenRouter -> "v1/images"
+                else -> provider.imagePath
+            }
+            val supportsEdit = when {
+                catalogFormat == ByokImageFormat.OPENAI_IMAGES -> "input_references" in parseSupportedParameters(obj).orEmpty()
+                else -> looksLikeByokImageEditModel(id)
+            }
             ProviderModel(
                 id = id,
                 displayName = obj["displayName"]?.jsonPrimitive?.contentOrNull
@@ -233,7 +289,8 @@ class ByokModelApi(private val http: MolaHttp) {
                 supportsReasoningEffort = false,
                 supportsToolCalling = false,
                 supportsImageGeneration = true,
-                supportsImageEdit = looksLikeByokImageEditModel(id),
+                supportsImageEdit = supportsEdit,
+                imageFormat = imageFormat,
                 supportsChat = false,
                 providerId = provider.id,
                 providerName = provider.name,
@@ -321,13 +378,15 @@ internal fun looksLikeByokChatModel(id: String): Boolean {
 internal fun looksLikeByokImageModel(id: String): Boolean {
     val lower = id.lowercase()
     val leaf = lower.substringAfterLast('/')
+    // 中转站常把同家族的视频模型（grok-imagine-video 等）一起列出。
+    if (lower.contains("video")) return false
     // OpenAI 图像：gpt-image-1 / gpt-5-image / gpt-5.4-image-2 / gpt-5.1-image-mini ...
     if (Regex("gpt-image").containsMatchIn(lower)) return true
     if (Regex("gpt-\\d+(?:\\.\\d+)?-image").containsMatchIn(lower)) return true
     if (lower.contains("dall-e") || lower.contains("dall·e")) return true
     // Google
     if (lower.contains("imagen")) return true
-    if (Regex("gemini-.*-(flash|pro)-image").containsMatchIn(lower)) return true
+    if (Regex("gemini-.*-image").containsMatchIn(lower)) return true
     // Black Forest Labs flux（flux / flux.2-flex / flux.2-pro / flux-klein ...）
     if (Regex("flux[.0-9-]*").matches(leaf) || lower.contains("flux")) return true
     // ByteDance
@@ -338,9 +397,43 @@ internal fun looksLikeByokImageModel(id: String): Boolean {
     if (lower.contains("recraft") || lower.contains("sdxl") ||
         lower.contains("stable-diffusion") || lower.contains("riverflow") ||
         lower.contains("midjourney") || lower.contains("grok-imagine")) return true
+    // Nano Banana、SeedEdit、千问图像、万相、智谱、可图、混元、Z-Image、Ideogram、即梦、HiDream
+    if (lower.contains("nano-banana") || lower.contains("seededit") || lower.contains("qwen-image") ||
+        Regex("^wanx?\\d.*(?:t2i|image)").containsMatchIn(leaf) ||
+        lower.contains("cogview") || leaf.startsWith("glm-image") || lower.contains("kolors") ||
+        lower.contains("hunyuan-image") || leaf.startsWith("z-image") || lower.contains("ideogram") ||
+        lower.contains("jimeng") || lower.contains("hidream")) return true
+    // 中转站的对话式出图模型：sora_image、grok-4-image、gpt-4o-image
+    if (CHAT_ONLY_IMAGE_RE.containsMatchIn(leaf)) return true
     // 通用兜底：image generation / image-generation 短语
     if (lower.contains("image-generation") || lower.contains("image generation")) return true
     return false
+}
+
+private val CHAT_ONLY_IMAGE_RE = Regex("^(?:sora[-_]image|grok-\\d+(?:\\.\\d+)?-image|gpt-4o-image)")
+
+/**
+ * 只能从对话接口出图的模型：Gemini 图像（Nano Banana）、OpenAI 的 gpt-N-image 多模态模型，
+ * 以及中转站的对话式出图模型。中转站转给 Gemini 原生渠道时，/images/generations 只接受 imagen。
+ */
+internal fun looksLikeChatImageModel(id: String): Boolean {
+    val leaf = id.lowercase().substringAfterLast('/')
+    return Regex("gemini-.*image").containsMatchIn(leaf) || leaf.contains("nano-banana") ||
+        Regex("^gpt-\\d+(?:\\.\\d+)?-image").containsMatchIn(leaf) || CHAT_ONLY_IMAGE_RE.containsMatchIn(leaf)
+}
+
+/**
+ * 按模型推断图像接口；与服务默认一致时返回 null，跟随服务。
+ * OpenRouter 模型目录的接口来源由拉取过程明确指定。
+ */
+fun inferByokImageFormat(provider: ByokProvider, modelId: String, declaredImagesApi: Boolean = false): ByokImageFormat? {
+    val inferred = when {
+        provider.type == ByokProviderType.GEMINI -> ByokImageFormat.OPENAI_CHAT_IMAGE
+        declaredImagesApi -> ByokImageFormat.OPENAI_IMAGES
+        looksLikeChatImageModel(modelId) -> ByokImageFormat.OPENAI_CHAT_IMAGE
+        else -> return null
+    }
+    return inferred.takeIf { it != provider.imageFormat }
 }
 
 /**
@@ -412,6 +505,11 @@ internal fun looksLikeByokImageEditModel(id: String): Boolean {
     if (Regex("recraft-v[3-9]").containsMatchIn(lower)) return true
     if (lower.contains("grok-imagine")) return true
     if (Regex("-(edit|inpaint|outpaint)\\b").containsMatchIn(lower)) return true
+    // Seedream 4 起支持参考图（3.0 只有文生图）；SeedEdit、千问图像 2/3 代、Nano Banana、Kontext、sora_image
+    if (lower.contains("seedream") && !lower.contains("t2i")) return true
+    if (lower.contains("seededit") || lower.contains("nano-banana") || lower.contains("kontext")) return true
+    if (Regex("qwen-image-(?:edit|[23])").containsMatchIn(lower)) return true
+    if (Regex("sora[-_]image").containsMatchIn(lower)) return true
     return false
 }
 

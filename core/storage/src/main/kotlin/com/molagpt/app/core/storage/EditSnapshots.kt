@@ -162,15 +162,17 @@ object EditSnapshots {
     }
 
     /** 快照时间线 → 可落库的消息实体（id 由时间戳+序号确定性生成）。 */
-    fun messagesOf(sessionId: String, timeline: JsonArray): List<MessageEntity> =
-        timeline.filterIsInstance<JsonObject>()
-            .mapIndexed { i, obj ->
-                val message = SyncMapper.jsonToMessage(sessionId, obj, i)
+    fun messagesOf(sessionId: String, timeline: JsonArray): List<MessageEntity> {
+        val objects = timeline.filterIsInstance<JsonObject>()
+        return SyncMapper.jsonToMessages(sessionId, JsonArray(objects))
+            .mapIndexed { i, message ->
+                val obj = objects[i]
                 val local = (obj["localStats"] as? JsonObject)?.mapNotNull { (key, value) ->
                     (value as? JsonPrimitive)?.contentOrNull?.let { key to it }
                 }?.toMap().orEmpty()
                 message.copy(metadataJson = MessageJson.encodeMeta(MessageJson.decodeMeta(message.metadataJson) + local))
             }
+    }
 
     fun archivedMessages(sessionId: String, raw: String?): List<com.molagpt.app.core.model.ChatMessage> {
         val obj = decode(raw) ?: return emptyList()

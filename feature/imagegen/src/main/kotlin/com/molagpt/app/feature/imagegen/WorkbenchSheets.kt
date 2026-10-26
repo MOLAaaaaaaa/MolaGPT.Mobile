@@ -81,6 +81,7 @@ import androidx.compose.ui.window.PopupProperties
 import com.molagpt.app.core.model.ByokImageFormat
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.network.isGptImageModel
 import com.molagpt.app.core.network.looksLikeByokImageReasoningModel
 import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.ToolChip
@@ -163,8 +164,8 @@ internal fun ModelMenu(
 }
 
 /**
- * 生成参数。只列当前接口认的那几项：images 接口有质量、格式、背景、审核；
- * 对话式接口和 Gemini 由模型自己决定，只剩推理开关（支持时）。
+ * 生成参数。只列当前模型认的那几项：gpt-image 有质量、格式、背景、审核；
+ * 其余模型由模型自己决定，只剩推理开关（OpenRouter 支持时）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -175,10 +176,11 @@ internal fun ParamsSheet(
     onChange: (ImageParams) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val imagesApi = provider?.imageFormat == ByokImageFormat.OPENAI_IMAGES &&
-        provider.type != com.molagpt.app.core.model.ByokProviderType.GEMINI
+    val format = if (provider != null && model != null) provider.imageFormatFor(model.id) else null
+    val imagesApi = model != null && isGptImageModel(model.id) && format == ByokImageFormat.OPENAI_IMAGES &&
+        provider?.type != com.molagpt.app.core.model.ByokProviderType.GEMINI
     val canReason = model != null && looksLikeByokImageReasoningModel(model.id) &&
-        provider?.imageFormat == ByokImageFormat.OPENAI_CHAT_IMAGE
+        provider?.isOpenRouter == true && format == ByokImageFormat.OPENAI_CHAT_IMAGE
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),

@@ -89,8 +89,10 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.molagpt.app.core.model.ByokImageFormat
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
+import com.molagpt.app.core.network.inferByokImageFormat
 import com.molagpt.app.core.model.CustomBodyParam
 import com.molagpt.app.core.model.ModelContextWindows
 import com.molagpt.app.core.model.ModelPricing
@@ -122,6 +124,7 @@ fun ByokProviderDetailScreen(
     modifier: Modifier = Modifier,
     /** 非空时进入页面即打开该模型的编辑弹层（推理参数设置深链）。 */
     initialEditModelId: String? = null,
+    showPurpose: Boolean = true,
 ) {
     val providers by viewModel.byokProviderList.collectAsStateWithLifecycle()
     val status by viewModel.byokStatus.collectAsStateWithLifecycle()
@@ -248,6 +251,7 @@ fun ByokProviderDetailScreen(
                 if (tab == 0) {
                     ConfigSection(
                         provider = provider,
+                        showPurpose = showPurpose,
                         onSave = viewModel::saveByokProvider,
                         onDraftChanged = { saveDraftRef.value = it },
                         onTest = { current ->
@@ -361,11 +365,13 @@ fun ByokProviderDetailScreen(
 
     val draft = editingModel
     if (draft != null && provider != null) {
-        val isImageProvider = provider.purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE
+        val base = saveDraftRef.value ?: provider
+        val isImageProvider = base.purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE
         ModelEditSheet(
             draft = draft,
             isImageProvider = isImageProvider,
-            providerBaseUrl = provider.baseUrl,
+            providerBaseUrl = base.baseUrl,
+            imageFormatProvider = base.takeIf { isImageProvider && it.type == ByokProviderType.OPENAI_COMPAT },
             onFetchPrices = viewModel::fetchModelPriceCandidates,
             onDismiss = { editingModel = null },
             onSave = { saved ->
@@ -431,6 +437,7 @@ private fun EndpointPreview(text: String, modifier: Modifier = Modifier) {
 @Composable
 private fun ConfigSection(
     provider: ByokProvider,
+    showPurpose: Boolean,
     onSave: (ByokProvider) -> Unit,
     onDraftChanged: (ByokProvider) -> Unit,
     onTest: (ByokProvider) -> Unit,
@@ -446,7 +453,12 @@ private fun ConfigSection(
     var apiKey by remember(provider.id) { mutableStateOf(provider.apiKey.orEmpty()) }
     var chatPath by remember(provider.id) { mutableStateOf(provider.chatPath) }
     var modelsPath by remember(provider.id) { mutableStateOf(provider.modelsPath) }
-    var imagePath by remember(provider.id) { mutableStateOf(provider.imagePath) }
+    var imagePath by remember(provider.id) {
+        mutableStateOf(
+            if (provider.type == ByokProviderType.OPENAI_COMPAT && provider.isOpenRouter && provider.imagePath.trim() in setOf("", "v1/images/generations")) "v1/images"
+            else provider.imagePath,
+        )
+    }
     var imageEditPath by remember(provider.id) { mutableStateOf(provider.imageEditPath) }
     var keyVisible by remember { mutableStateOf(false) }
     var showAdvanced by remember { mutableStateOf(false) }
@@ -457,14 +469,22 @@ private fun ConfigSection(
         "https://api.moonshot.cn" -> "https://platform.kimi.com/console/api-keys"
         "https://dashscope.aliyuncs.com/compatible-mode" -> "https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key"
         "https://open.bigmodel.cn/api/paas" -> "https://www.bigmodel.cn/apikey/platform"
+        "https://api.siliconflow.cn" -> "https://cloud.siliconflow.cn/account/ak"
+        "https://ark.cn-beijing.volces.com/api" -> "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey"
+        "https://api.x.ai" -> "https://console.x.ai/"
         else -> null
     }
 
     val isImage = purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE
-    // 图像用途兼容的服务类型：OpenAI 兼容（chat/completions 出图或 /v1/images/generations）与 Gemini（:generateContent 出图）。
-    // OpenAI Response 与 Anthropic 不支持原生图像生成，故选「图像」用途时这两类会被禁用。
     val typeSupportsImage = type == com.molagpt.app.core.model.ByokProviderType.OPENAI_COMPAT ||
         type == com.molagpt.app.core.model.ByokProviderType.GEMINI
+    val isOpenRouter = type == ByokProviderType.OPENAI_COMPAT && provider.copy(baseUrl = baseUrl).isOpenRouter
+    val defaultImagePath = when {
+        type == ByokProviderType.GEMINI -> "models/{model}:generateContent"
+        isOpenRouter -> "v1/images"
+        else -> "v1/images/generations"
+    }
+    val hasImageEditPath = type == ByokProviderType.OPENAI_COMPAT && !isOpenRouter
 
     fun current(): ByokProvider = provider.copy(
         name = name.trim().ifBlank { "未命名服务" },
@@ -488,9 +508,11 @@ private fun ConfigSection(
             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            ByokProviderType.entries.forEach { t ->
+            ByokProviderType.entries.filter { showPurpose || it == ByokProviderType.OPENAI_COMPAT || it == ByokProviderType.GEMINI }.forEach { t ->
                 SelectPill(label = protocolLabel(t), selected = type == t, onClick = {
                     type = t
+                    val openRouter = t == ByokProviderType.OPENAI_COMPAT && provider.copy(baseUrl = baseUrl).isOpenRouter
+                    if (t == ByokProviderType.GEMINI) imageFormat = ByokImageFormat.OPENAI_CHAT_IMAGE
                     // 切到不支持图像的服务类型（Response/Anthropic）时，若当前用途是图像则回落到对话。
                     val imgOk = t == com.molagpt.app.core.model.ByokProviderType.OPENAI_COMPAT ||
                         t == com.molagpt.app.core.model.ByokProviderType.GEMINI
@@ -501,48 +523,60 @@ private fun ConfigSection(
                     // 用户自定义过的路径保留。与 Desktop ProviderTypeChanged 的已知默认值守卫一致。
                     val knownChatPaths = setOf(
                         "v1/chat/completions", "v1/responses", "v1/messages",
-                        "models/{model}:streamGenerateContent",
+                        "models/{model}:streamGenerateContent", "models/{model}:generateContent",
                     )
                     if (chatPath.isBlank() || chatPath.trim() in knownChatPaths) {
                         chatPath = defaultChatPathFor(t)
                     }
-                    val knownModelsPaths = setOf("v1/models", "models")
+                    val knownModelsPaths = setOf("v1/models", "models", "v1/images/models")
                     if (modelsPath.isBlank() || modelsPath.trim() in knownModelsPaths) {
-                        modelsPath = if (t == com.molagpt.app.core.model.ByokProviderType.GEMINI) "models" else "v1/models"
+                        modelsPath = when {
+                            t == ByokProviderType.GEMINI -> "models"
+                            isImage && openRouter -> "v1/images/models"
+                            else -> "v1/models"
+                        }
+                    }
+                    if (imagePath.isBlank() || imagePath.trim() in setOf("v1/images/generations", "v1/images", "models/{model}:generateContent")) {
+                        imagePath = when {
+                            t == ByokProviderType.GEMINI -> "models/{model}:generateContent"
+                            openRouter -> "v1/images"
+                            else -> "v1/images/generations"
+                        }
                     }
                     reportDraft()
                 })
             }
         }
-        Text("用途", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            com.molagpt.app.core.model.ByokPurpose.entries.forEach { p ->
-                // 仅在类型支持图像时才可选「图像」用途。
-                val allowed = p == com.molagpt.app.core.model.ByokPurpose.CHAT || typeSupportsImage
-                SelectPill(
-                    label = if (p == com.molagpt.app.core.model.ByokPurpose.CHAT) "对话" else "图像",
-                    selected = purpose == p,
-                    enabled = allowed,
-                    onClick = {
-                        purpose = p
-                        reportDraft()
-                    },
-                )
+        if (showPurpose) {
+            Text("用途", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                com.molagpt.app.core.model.ByokPurpose.entries.forEach { p ->
+                    val allowed = p == com.molagpt.app.core.model.ByokPurpose.CHAT || typeSupportsImage
+                    SelectPill(
+                        label = if (p == com.molagpt.app.core.model.ByokPurpose.CHAT) "聊天" else "图像生成",
+                        selected = purpose == p,
+                        enabled = allowed,
+                        onClick = {
+                            purpose = p
+                            if (type == ByokProviderType.GEMINI) imageFormat = ByokImageFormat.OPENAI_CHAT_IMAGE
+                            reportDraft()
+                        },
+                    )
+                }
             }
         }
-        // 图像用途 + OpenAI 兼容才显示接口格式选择（Gemini 固定 :generateContent 出图，无需选择）。
-        if (isImage && type == com.molagpt.app.core.model.ByokProviderType.OPENAI_COMPAT) {
-            Text("接口格式", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (isImage && type == ByokProviderType.OPENAI_COMPAT) {
+            Text("默认接口", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 com.molagpt.app.core.model.ByokImageFormat.entries.forEach { f ->
                     SelectPill(
-                        label = if (f == com.molagpt.app.core.model.ByokImageFormat.OPENAI_IMAGES) "OpenAI 图像接口" else "对话补全出图",
+                        label = imageFormatLabel(f),
                         selected = imageFormat == f,
                         onClick = {
                             imageFormat = f
@@ -551,44 +585,15 @@ private fun ConfigSection(
                     )
                 }
             }
+            Text(imageFormatDescription(imageFormat), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        // OpenRouter 图像提示：OpenRouter 出图走 /v1/chat/completions 而非 /v1/images/generations。
-        // 检测到 OpenRouter 时自动展示（不占用焦点、非弹窗），并引导切换到「对话补全出图」格式。
-        if (isImage && baseUrl.contains("openrouter.ai", ignoreCase = true)) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)),
-            ) {
-                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
-                    Icon(
-                        Icons.Filled.Info,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(top = 2.dp).size(18.dp),
-                    )
-                    Column(modifier = Modifier.padding(start = 10.dp)) {
-                        Text(
-                            "OpenRouter 图像使用 /v1/chat/completions",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-                        Text(
-                            "OpenRouter 的图像生成走对话补全端点而非 /v1/images/generations，请将接口格式选为「对话补全出图」。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                        if (imageFormat != com.molagpt.app.core.model.ByokImageFormat.OPENAI_CHAT_IMAGE) {
-                            TextButton(onClick = {
-                                imageFormat = com.molagpt.app.core.model.ByokImageFormat.OPENAI_CHAT_IMAGE
-                                reportDraft()
-                            }) { Text("切换为「对话补全出图」") }
-                        }
-                    }
-                }
-            }
+        if (isImage && type == ByokProviderType.GEMINI) {
+            Text("接口", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                imageFormatLabel(ByokImageFormat.OPENAI_CHAT_IMAGE) + "：" + imageFormatDescription(ByokImageFormat.OPENAI_CHAT_IMAGE),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         OutlinedTextField(
             value = name, onValueChange = { name = it; reportDraft() },
@@ -608,6 +613,11 @@ private fun ConfigSection(
         })
         OutlinedTextField(
             value = baseUrl, onValueChange = {
+                if (type == ByokProviderType.OPENAI_COMPAT) {
+                    val openRouter = provider.copy(baseUrl = it).isOpenRouter
+                    if (openRouter && imagePath.trim() in setOf("", "v1/images/generations")) imagePath = "v1/images"
+                    else if (isOpenRouter && !openRouter && imagePath.trim() == "v1/images") imagePath = "v1/images/generations"
+                }
                 baseUrl = it
                 if (it.startsWith("http://", ignoreCase = true)) httpsEnabled = false
                 if (it.startsWith("https://", ignoreCase = true)) httpsEnabled = true
@@ -617,16 +627,15 @@ private fun ConfigSection(
             modifier = Modifier.fillMaxWidth(),
         )
         // 请求路径与拼接结果放在主区域：base + path 拼出来是什么，配置时就能看见。
-        val useImagesEndpoints = isImage && imageFormat == com.molagpt.app.core.model.ByokImageFormat.OPENAI_IMAGES
+        val useImagePath = isImage && (type == ByokProviderType.GEMINI || imageFormat == ByokImageFormat.OPENAI_IMAGES)
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (useImagesEndpoints) {
+            if (useImagePath) {
                 OutlinedTextField(
                     value = imagePath, onValueChange = { imagePath = it; reportDraft() },
-                    label = { Text("图像生成路径") }, singleLine = true,
+                    label = { Text(if (type == ByokProviderType.GEMINI) "对话接口路径" else "图像生成路径") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                // Gemini 出图与编辑都走生成路径（:generateContent），没有单独的编辑端点。
-                if (type != com.molagpt.app.core.model.ByokProviderType.GEMINI) {
+                if (hasImageEditPath) {
                     OutlinedTextField(
                         value = imageEditPath, onValueChange = { imageEditPath = it; reportDraft() },
                         label = { Text("图像编辑路径") }, singleLine = true,
@@ -636,7 +645,7 @@ private fun ConfigSection(
             } else {
                 OutlinedTextField(
                     value = chatPath, onValueChange = { chatPath = it; reportDraft() },
-                    label = { Text(if (isImage) "出图路径（chat/completions）" else "对话路径") },
+                    label = { Text(if (isImage) "对话接口路径" else "对话路径") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -646,14 +655,14 @@ private fun ConfigSection(
                     !isImage -> EndpointPreview(
                         "实际请求地址：" + joinEndpoint(baseUrl, chatPath, defaultChatPathFor(type)),
                     )
-                    !useImagesEndpoints -> EndpointPreview(
+                    !useImagePath -> EndpointPreview(
                         "生成 / 编辑地址：" + joinEndpoint(baseUrl, chatPath, "v1/chat/completions"),
                     )
-                    type == com.molagpt.app.core.model.ByokProviderType.GEMINI -> EndpointPreview(
-                        "生成地址：" + joinEndpoint(baseUrl, imagePath, "models/{model}:generateContent"),
+                    !hasImageEditPath -> EndpointPreview(
+                        "生成 / 编辑地址：" + joinEndpoint(baseUrl, imagePath, defaultImagePath),
                     )
                     else -> {
-                        EndpointPreview("生成地址：" + joinEndpoint(baseUrl, imagePath, "v1/images/generations"))
+                        EndpointPreview("生成地址：" + joinEndpoint(baseUrl, imagePath, defaultImagePath))
                         EndpointPreview("编辑地址：" + joinEndpoint(baseUrl, imageEditPath, "v1/images/edits"))
                     }
                 }
@@ -681,34 +690,64 @@ private fun ConfigSection(
             Text(if (showAdvanced) "收起高级设置" else "展开高级设置")
         }
         if (showAdvanced) {
-            // 图像服务的对话路径只在编辑大图回退时用到，留在高级设置里。
-            if (useImagesEndpoints) {
-                OutlinedTextField(
-                    value = chatPath, onValueChange = { chatPath = it; reportDraft() },
-                    label = { Text("对话路径") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+            // 单独改了接口的模型用另一组路径。
+            if (isImage && type == ByokProviderType.OPENAI_COMPAT) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (useImagePath) {
+                        OutlinedTextField(
+                            value = chatPath, onValueChange = { chatPath = it; reportDraft() },
+                            label = { Text("对话接口路径") }, singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (baseUrl.isNotBlank()) {
+                            EndpointPreview("对话接口地址：" + joinEndpoint(baseUrl, chatPath, "v1/chat/completions"))
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = imagePath, onValueChange = { imagePath = it; reportDraft() },
+                            label = { Text("图像生成路径") }, singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (hasImageEditPath) {
+                            OutlinedTextField(
+                                value = imageEditPath, onValueChange = { imageEditPath = it; reportDraft() },
+                                label = { Text("图像编辑路径") }, singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        if (baseUrl.isNotBlank()) {
+                            EndpointPreview((if (isOpenRouter) "生成 / 编辑地址：" else "生成地址：") + joinEndpoint(baseUrl, imagePath, defaultImagePath))
+                            if (hasImageEditPath) EndpointPreview("编辑地址：" + joinEndpoint(baseUrl, imageEditPath, "v1/images/edits"))
+                        }
+                    }
+                }
             }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                OutlinedTextField(
-                    value = modelsPath, onValueChange = { modelsPath = it; reportDraft() },
-                    label = { Text("模型列表路径") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (baseUrl.isNotBlank()) {
-                    EndpointPreview(
-                        "自动获取地址：" + joinEndpoint(
-                            baseUrl,
-                            modelsPath,
-                            if (type == com.molagpt.app.core.model.ByokProviderType.GEMINI) "models" else "v1/models",
-                        ),
+                if (isImage && isOpenRouter) {
+                    Text("模型列表地址", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    EndpointPreview(joinEndpoint(baseUrl, "v1/images/models", "v1/images/models"))
+                    EndpointPreview(joinEndpoint(baseUrl, "v1/models?output_modalities=image", "v1/models?output_modalities=image"))
+                } else {
+                    OutlinedTextField(
+                        value = modelsPath, onValueChange = { modelsPath = it; reportDraft() },
+                        label = { Text("模型列表路径") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
                     )
+                    if (baseUrl.isNotBlank()) {
+                        EndpointPreview(
+                            "自动获取地址：" + joinEndpoint(
+                                baseUrl,
+                                modelsPath,
+                                if (type == ByokProviderType.GEMINI) "models" else "v1/models",
+                            ),
+                        )
+                    }
                 }
             }
 
             Text("自定义请求头", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                "将作用到该服务全部请求（对话 / 模型列表 / 测试）之后追加。",
+                "附加到该服务的全部请求。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -894,6 +933,7 @@ private fun ModelCard(
                     if (model.supportsVision) add("视觉")
                     if (model.supportsImageGeneration) add("图像")
                     if (model.supportsImageEdit) add("图像编辑")
+                    model.imageFormat?.let { add(imageFormatLabel(it)) }
                 }
                 if (tags.isNotEmpty()) {
                     Row(
@@ -938,6 +978,8 @@ private fun ModelEditSheet(
     onDelete: (() -> Unit)?,
     isImageProvider: Boolean = false,
     providerBaseUrl: String = "",
+    /** 图像服务的模型可以单独选接口。 */
+    imageFormatProvider: ByokProvider? = null,
     onFetchPrices: suspend (Collection<String>) -> Map<String, List<ModelsDevPrice>>,
 ) {
     val scope = rememberCoroutineScope()
@@ -945,6 +987,12 @@ private fun ModelEditSheet(
     var displayName by remember { mutableStateOf(draft.displayName) }
     var isImage by remember { mutableStateOf(if (isImageProvider) true else draft.isImage) }
     var imageEdit by remember { mutableStateOf(draft.imageEdit) }
+    // null 表示跟随服务；新建模型时按模型 ID 推断，直到用户手动选择。
+    var imageFormat by remember { mutableStateOf(draft.imageFormat) }
+    var imageFormatPicked by remember { mutableStateOf(draft.isExisting) }
+    val modelImageFormat = if (imageFormatPicked) imageFormat
+        else imageFormatProvider?.let { inferByokImageFormat(it, modelId.trim()) }
+    val effectiveImageFormat = modelImageFormat ?: imageFormatProvider?.imageFormat
     var vision by remember { mutableStateOf(draft.vision) }
     var thinking by remember { mutableStateOf(draft.thinking) }
     var thinkingKind by remember { mutableStateOf(draft.thinkingKind) }
@@ -1130,13 +1178,36 @@ private fun ModelEditSheet(
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            if (imageFormatProvider != null && effectiveImageFormat != null) {
+                Text("接口", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SelectPill("跟随服务", selected = modelImageFormat == null, onClick = {
+                        imageFormat = null
+                        imageFormatPicked = true
+                    })
+                    ByokImageFormat.entries.forEach { f ->
+                        SelectPill(imageFormatLabel(f), selected = modelImageFormat == f, onClick = {
+                            imageFormat = f
+                            imageFormatPicked = true
+                        })
+                    }
+                }
+                Text(
+                    (if (modelImageFormat == null) "${imageFormatLabel(effectiveImageFormat)}：" else "") + imageFormatDescription(effectiveImageFormat),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             if (isImageProvider) {
                 Text("图像能力", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SelectPill("支持编辑", selected = imageEdit, onClick = { imageEdit = !imageEdit })
                 }
                 Text(
-                    "图像用途模型用于图像生成/编辑；是否支持编辑将影响图像编辑功能可用性。",
+                    "开启后可在工作台中以图片为底图编辑。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1378,6 +1449,7 @@ private fun ModelEditSheet(
                                 displayName = displayName.trim().ifBlank { modelId.trim() },
                                 isImage = isImage,
                                 imageEdit = imageEdit,
+                                imageFormat = modelImageFormat,
                                 vision = vision,
                                 thinking = thinking,
                                 thinkingKind = thinkingKind,
@@ -1629,6 +1701,7 @@ private fun ModelFetchSheet(
         if (m.supportsToolCalling) parts.add("工具")
         if (m.supportsImageGeneration) parts.add("图像")
         if (m.supportsImageEdit) parts.add("图像编辑")
+        m.imageFormat?.let { parts.add(imageFormatLabel(it)) }
         return if (parts.isEmpty()) "基础" else parts.joinToString("·")
     }
 
@@ -1986,6 +2059,7 @@ private data class ModelDraft(
     val displayName: String = "",
     val isImage: Boolean = false,
     val imageEdit: Boolean = false,
+    val imageFormat: ByokImageFormat? = null,
     val vision: Boolean = false,
     val thinking: Boolean = false,
     val thinkingKind: ThinkingParamKind = ThinkingParamKind.NONE,
@@ -2005,13 +2079,14 @@ private data class ModelDraft(
     fun toModel(provider: ByokProvider): ProviderModel = ProviderModel(
         id = modelId,
         displayName = displayName.ifBlank { modelId },
-        apiUrl = provider.chatPath,
+        apiUrl = if (isImage && (provider.type == ByokProviderType.GEMINI || (imageFormat ?: provider.imageFormat) == ByokImageFormat.OPENAI_IMAGES)) provider.imagePath else provider.chatPath,
         supportsVision = vision,
         supportsThinking = thinking,
         supportsReasoningEffort = thinking && ThinkingKinds.effortLevelsFor(thinkingKind).isNotEmpty(),
         supportsToolCalling = tools,
         supportsImageGeneration = isImage,
         supportsImageEdit = isImage && imageEdit,
+        imageFormat = imageFormat.takeIf { isImage && provider.type == ByokProviderType.OPENAI_COMPAT },
         supportsChat = !isImage,
         providerId = provider.id,
         providerName = provider.name,
@@ -2042,6 +2117,7 @@ private data class ModelDraft(
                 displayName = model.displayName.takeIf { it != model.id }.orEmpty(),
                 isImage = !model.supportsChat,
                 imageEdit = model.supportsImageEdit,
+                imageFormat = model.imageFormat,
                 vision = model.supportsVision,
                 thinking = model.supportsThinking || model.supportsReasoningEffort,
                 thinkingKind = tcfg?.kind ?: ThinkingParamKind.NONE,

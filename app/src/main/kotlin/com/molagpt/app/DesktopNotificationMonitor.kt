@@ -13,7 +13,10 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.molagpt.app.core.common.Logger
 import com.molagpt.app.core.model.DesktopConversation
+import com.molagpt.app.core.model.DesktopInfo
+import com.molagpt.app.core.network.AnonRemoteService
 import com.molagpt.app.core.network.DesktopRemoteService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
@@ -22,12 +25,14 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * 电脑上的对话需要手机时提醒：等待审批（总是提醒），以及手机发起的回合结束。
  *
- * 读的是电脑上报的对话列表（标题、是否在回答、待审批数），不读内容。应用在前台且正看着
+ * 读的是电脑上报的对话列表（标题、是否在回答、待审批数），不读内容：账号电脑读账号目录，
+ * 配对码电脑读它的密文目录。应用在前台且正看着
  * 那个对话时不提醒。应用进程被系统回收后收不到——那时回到应用会直接看到电脑的状态。
  */
 internal class DesktopNotificationMonitor(
     private val context: Context,
     private val service: DesktopRemoteService,
+    private val anon: AnonRemoteService,
     private val scope: CoroutineScope,
     private val notifyEnabled: () -> Boolean,
     private val isAuthenticated: () -> Boolean,
@@ -45,6 +50,7 @@ internal class DesktopNotificationMonitor(
         ensureChannels()
         scope.launch { runLoop() }
         scope.launch { service.listChanged.collect { wake.trySend(Unit) } }
+        scope.launch { anon.listChanged.collect { wake.trySend(Unit) } }
     }
 
     /** 手机刚在这个对话发出消息：回合结束时提醒。 */
@@ -55,7 +61,7 @@ internal class DesktopNotificationMonitor(
 
     private suspend fun runLoop() {
         while (true) {
-            if (notifyEnabled() && isAuthenticated() && service.hasAnyPair()) {
+            if (notifyEnabled() && (accountReady() || anon.pairedDeviceIds().isNotEmpty())) {
                 runCatching { poll() }.onFailure { Logger.w(TAG, "poll failed: ${it.message}") }
             } else {
                 seen.clear()
@@ -66,11 +72,29 @@ internal class DesktopNotificationMonitor(
         }
     }
 
+    private fun accountReady() = isAuthenticated() && service.hasAnyPair()
+
     private suspend fun poll() {
-        val desktops = service.listDesktops()
+        val desktops = ArrayList<DesktopInfo>()
+        var accountFailed = false
+        if (accountReady()) {
+            try {
+                service.listDesktops().filterTo(desktops) { service.isPaired(it.machineId) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                accountFailed = true
+                Logger.w(TAG, "account poll failed: ${error.message}")
+            }
+        }
+        val anonIds = anon.pairedDeviceIds().toSet()
+        val unreadable = HashSet<String>()
+        for (id in anonIds) {
+            val info = anon.directoryInfo(id)
+            if (info == null) unreadable += id else desktops += info
+        }
         val present = HashSet<String>()
         for (desktop in desktops) {
-            if (!service.isPaired(desktop.machineId)) continue
             for (conversation in desktop.conversations) {
                 val key = key(desktop.machineId, conversation.id)
                 present += key
@@ -94,7 +118,11 @@ internal class DesktopNotificationMonitor(
                 if (finished && desktop.online) post(desktop.machineName, desktop.machineId, conversation, Kind.Finished)
             }
         }
-        seen.keys.retainAll(present)
+        // 没读到的电脑保留上次的状态，否则下次读到时会把旧的待审批当成新的再提醒一遍。
+        seen.keys.removeAll { key ->
+            val machineId = key.substringBefore('/')
+            key !in present && machineId !in unreadable && !(accountFailed && machineId !in anonIds)
+        }
     }
 
     private enum class Kind { Approval, Finished }

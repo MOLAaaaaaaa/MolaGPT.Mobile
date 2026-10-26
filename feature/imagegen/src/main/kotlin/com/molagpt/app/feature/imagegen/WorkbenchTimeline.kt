@@ -391,15 +391,39 @@ private fun ImageLayout(
 
 @Composable
 private fun LoadingImage(url: String, gallery: List<String>, modifier: Modifier) {
-    var loaded by remember(url) { mutableStateOf(false) }
+    var loaded by remember(url) { mutableStateOf<Boolean?>(null) }
     Box(modifier = modifier) {
-        if (!loaded) Box(Modifier.fillMaxSize().shimmer())
         PreviewableImage(
             url = url,
             gallery = gallery,
             modifier = Modifier.fillMaxSize(),
-            onLoaded = { loaded = true },
+            onLoaded = { loaded = it },
         )
+        when (loaded) {
+            null -> Box(Modifier.fillMaxSize().shimmer())
+            false -> Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Filled.ErrorOutline,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Text(
+                        text = "图片加载失败",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+            true -> Unit
+        }
     }
 }
 

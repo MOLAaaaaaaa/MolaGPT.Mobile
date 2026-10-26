@@ -229,8 +229,8 @@ class ImageTaskManager(
             val provider = resolveProvider(run)
             val attachments = withContext(dispatchers.io) { run.refs.mapNotNull(::loadAttachment) }
             if (run.kind.isEdit && attachments.isEmpty()) throw MolaApiException(400, "参考图已不可用")
-            val canReason = looksLikeByokImageReasoningModel(run.modelId) &&
-                provider.imageFormat == ByokImageFormat.OPENAI_CHAT_IMAGE
+            val canReason = looksLikeByokImageReasoningModel(run.modelId) && provider.isOpenRouter &&
+                provider.imageFormatFor(run.modelId) == ByokImageFormat.OPENAI_CHAT_IMAGE
             val config = ByokImageWorkbenchConfig(
                 size = run.size,
                 n = run.count.coerceIn(1, MAX_COUNT),
@@ -248,16 +248,22 @@ class ImageTaskManager(
                 api.runWorkbench(provider, run.modelId, run.prompt, config, attachments, gate)
             }
             val outputs = blocking(gate) { result.hits.mapNotNull { persistHit(run.taskId, it, gate) } }
+            val failedCount = result.hits.size - outputs.size
             // 结果已经落盘，收尾的写库不能再被取消打断，否则这一版会永远停在「生成中」。
             withContext(NonCancellable) {
                 if (outputs.isEmpty()) {
-                    repository.finishVersion(versionId, ImageVersionStatus.FAILED, error = "未识别到图片", raw = result.raw)
+                    repository.finishVersion(
+                        versionId,
+                        ImageVersionStatus.FAILED,
+                        error = if (result.hits.isEmpty()) "未识别到图片" else "图片加载失败",
+                        raw = result.raw,
+                    )
                 } else {
                     repository.finishVersion(
                         versionId,
                         ImageVersionStatus.SUCCESS,
                         outputs = outputs,
-                        note = if (result.usedFallback) "已使用备用接口" else null,
+                        note = failedCount.takeIf { it > 0 }?.let { "$it 张图片加载失败" },
                     )
                 }
                 emit(run, versionId, if (outputs.isEmpty()) ImageVersionStatus.FAILED else ImageVersionStatus.SUCCESS, outputs.size)
@@ -341,13 +347,13 @@ class ImageTaskManager(
             api.download(hit.url, gate)
         }
         if (bytes == null || bytes.isEmpty()) {
-            // 下不下来的远程图至少把链接留下，界面照常尝试加载。
-            return if (hit.isData) null else ImageOutputRecord(src = hit.url)
+            return null
         }
-        val src = files.write(taskId, bytes, extensionOf(bytes))
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        return ImageOutputRecord(src = src, width = bounds.outWidth.coerceAtLeast(0), height = bounds.outHeight.coerceAtLeast(0))
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val src = files.write(taskId, bytes, extensionOf(bytes))
+        return ImageOutputRecord(src = src, width = bounds.outWidth, height = bounds.outHeight)
     }
 
     private suspend fun importLegacy(context: Context) {

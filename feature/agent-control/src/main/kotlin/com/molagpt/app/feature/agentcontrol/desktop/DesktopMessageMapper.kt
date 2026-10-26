@@ -10,6 +10,7 @@ import com.molagpt.app.core.model.SearchStatus
 import com.molagpt.app.core.model.SourceReference
 import com.molagpt.app.core.model.ToolStatus
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -42,15 +43,17 @@ object DesktopMessageMapper {
 
         if (role == Role.USER) {
             val notice = message.string("kind") == "task_notification"
-            val text = if (notice) "（后台任务完成，已通知 Agent）" else content
+            val text = if (notice) taskNotice(content) else content
             return ChatMessage(
                 messageId = id,
                 sessionId = conversationId,
-                role = Role.USER,
+                // 任务通知以 user 角色交给模型，界面按系统事件显示。
+                role = if (notice) Role.SYSTEM else Role.USER,
                 status = MessageStatus.COMPLETE,
                 createdAt = createdAt,
                 updatedAt = createdAt,
-                fragments = listOf(MessageFragment.Text("$id:t0", text)),
+                fragments = if (notice) listOf(MessageFragment.Tip("$id:t0", text))
+                    else listOf(MessageFragment.Text("$id:t0", text)),
                 rawText = text,
                 attachments = attachments(id, meta),
                 metadata = buildMap { if (truncated != null) put(TRUNCATED_KEY, truncated.toString()) },
@@ -153,22 +156,69 @@ object DesktopMessageMapper {
         return fragments
     }
 
-    private fun tool(messageId: String, tool: JsonObject, position: Int): MessageFragment.ToolCall {
+    internal fun tool(messageId: String, tool: JsonObject, position: Int): MessageFragment.ToolCall {
         val toolId = tool.string("id")?.takeIf { it.isNotBlank() } ?: "p$position"
-        val status = when (tool.string("status")?.lowercase()) {
-            "completed", "succeeded", "success" -> ToolStatus.SUCCESS
-            "failed", "cancelled", "canceled", "error", "denied" -> ToolStatus.FAILED
-            else -> ToolStatus.RUNNING
+        val name = tool.string("name").orEmpty()
+        val result = tool.string("result_preview_json")
+        val resultJson = parseObject(result)
+        val taskId = tool.string("background_task_id")
+            ?: resultJson?.takeIf { it.bool("background") == true }?.string("task_id")
+        val taskState = taskId?.let { tool.string("task_state") ?: "running" }
+        val status = when (taskState) {
+            null -> when (tool.string("status")?.lowercase()) {
+                "completed", "succeeded", "success" -> ToolStatus.SUCCESS
+                "failed", "cancelled", "canceled", "error", "denied", "interrupted" -> ToolStatus.FAILED
+                else -> ToolStatus.RUNNING
+            }
+            "running" -> ToolStatus.RUNNING
+            "completed" -> ToolStatus.SUCCESS
+            else -> ToolStatus.FAILED
         }
+        val statusLabel = when (taskState) {
+            "running" -> "后台运行中"
+            "cancelled" -> "已停止"
+            "interrupted" -> "已中断"
+            else -> null
+        }
+        val subagent = name == "spawn_agent" || name == "followup_agent"
+        val agentId = tool.string("agent_id") ?: resultJson?.string("agent_id")?.takeIf { subagent }
+        val agentLabel = resultJson?.string("label")?.takeIf { it.isNotBlank() && name == "spawn_agent" }
+        val task = if (taskState == "running" && subagent) parseObject(tool.string("arguments_json"))?.string("task") else null
         return MessageFragment.ToolCall(
             id = "$messageId:tool:$toolId",
-            name = tool.string("name").orEmpty(),
+            name = name,
             status = status,
-            label = tool.string("label")?.takeIf { it.isNotBlank() } ?: tool.string("summary")?.takeIf { it.isNotBlank() },
+            label = agentLabel?.let { "子 Agent · $it" } ?: tool.string("label")?.takeIf { it.isNotBlank() }
+                ?: tool.string("summary")?.takeIf { it.isNotBlank() },
             argsJson = tool.string("arguments_json"),
-            resultPreview = tool.string("result_preview_json") ?: tool.string("detail"),
+            resultPreview = task?.takeIf { it.isNotBlank() }?.let { "**任务**\n\n$it" } ?: result ?: tool.string("detail"),
             provider = tool.string("provider"),
+            statusLabel = statusLabel,
+            agentId = agentId,
         )
+    }
+
+    // 电脑发来的预览可能被截断，无法解析时仍显示原文。
+    private fun parseObject(text: String?): JsonObject? =
+        text?.let { runCatching { Json.parseToJsonElement(it) as? JsonObject }.getOrNull() }
+
+    private val noticeBlock = Regex("<task-notification>(.*?)</task-notification>", RegexOption.DOT_MATCHES_ALL)
+
+    internal fun taskNotice(content: String): String {
+        val lines = noticeBlock.findAll(content).map { block ->
+            fun tag(name: String): String? = Regex("<$name>(.*?)</$name>", RegexOption.DOT_MATCHES_ALL)
+                .find(block.groupValues[1])?.groupValues?.get(1)?.trim()
+            val label = tag("label")?.takeIf { it.isNotBlank() } ?: "后台任务"
+            val status = when (tag("status")) {
+                "completed" -> "已完成"
+                "failed" -> "失败"
+                "cancelled" -> "已停止"
+                "interrupted" -> "已中断"
+                else -> "已结束"
+            }
+            listOfNotNull("后台任务「$label」$status", tag("elapsed")).joinToString(" · ")
+        }.toList()
+        return lines.joinToString("\n").ifEmpty { "（后台任务完成，已通知 Agent）" }
     }
 
     private fun sources(meta: JsonObject): List<SourceReference>? {

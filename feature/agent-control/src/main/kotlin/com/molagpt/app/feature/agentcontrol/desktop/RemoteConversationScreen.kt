@@ -2,10 +2,13 @@ package com.molagpt.app.feature.agentcontrol.desktop
 
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -14,6 +17,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,22 +63,32 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -87,6 +101,7 @@ import com.molagpt.app.core.model.RemoteApprovalDecision
 import com.molagpt.app.core.model.RemoteAttachmentRules
 import com.molagpt.app.core.render.ImeDismissBackHandler
 import com.molagpt.app.core.render.MolaBottomEdge
+import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.render.MolaScaffold
 import com.molagpt.app.core.render.MolaTopBar
 import com.molagpt.app.core.render.molaGlass
@@ -99,9 +114,13 @@ import com.molagpt.app.feature.chat.persona.PersonaPickerSheet
 import com.molagpt.app.feature.chat.persona.PersonaWelcome
 import com.molagpt.app.feature.chat.ModelMenuItem
 import com.molagpt.app.feature.chat.ReadOnlyMessageList
+import com.molagpt.app.feature.chat.LocalSubagentLinks
+import com.molagpt.app.feature.chat.SubagentLinks
 import com.molagpt.app.feature.chat.topBarOverlap
 import com.molagpt.app.feature.file.CameraCapture
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 /**
  * 一个电脑上的对话。和本地对话一样显示在主页上（不是二级页）：左上角打开会话侧边栏，
@@ -132,10 +151,49 @@ fun RemoteConversationScreen(
     var modelMenuOpen by remember { mutableStateOf(false) }
     var personaSheetOpen by remember { mutableStateOf(false) }
     var restoreDraft by remember { mutableStateOf<ComposerDraft?>(null) }
+    val agentOpen = state.agentPage != null
+    val pageProgress = remember { Animatable(if (agentOpen) 1f else 0f) }
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    var retainedAgentPage by remember { mutableStateOf(state.agentPage) }
+    SideEffect { state.agentPage?.let { retainedAgentPage = it } }
+    LaunchedEffect(agentOpen) {
+        if (agentOpen) {
+            focusManager.clearFocus()
+            keyboard?.hide()
+        }
+        pageProgress.animateTo(if (agentOpen) 1f else 0f, MolaMotion.standardDecelerate())
+        if (!agentOpen) retainedAgentPage = null
+    }
     val settings = state.settings
     val homeModelMenu = draftModelMenu?.takeIf { state.messages.isEmpty() }
     val listState = rememberLazyListState()
     val overlapPx = with(LocalDensity.current) { 24.dp.toPx() }
+    val backContext = LocalContext.current
+    // 与聊天页一致：已有消息的对话按返回开启新对话。须先于子 Agent 页和收键盘的处理注册。
+    BackHandler(enabled = !drawerOpen && !agentOpen && state.draft == null && state.messages.isNotEmpty()) {
+        Toast.makeText(backContext, "已开启新对话", Toast.LENGTH_SHORT).show()
+        onNewConversation(settings?.providerId, settings?.modelId)
+    }
+    PredictiveBackHandler(enabled = agentOpen && !drawerOpen) { progress ->
+        val start = pageProgress.value
+        try {
+            progress.collect { event ->
+                pageProgress.snapTo(start * (1f - MolaMotion.StandardDecelerate.transform(event.progress)))
+            }
+            vm.closeAgent()
+        } catch (error: CancellationException) {
+            // 和侧栏一样，由独立协程回弹，不切换进出场角色。
+            scope.launch {
+                pageProgress.animateTo(
+                    if (vm.state.value.agentPage != null) 1f else 0f,
+                    MolaMotion.standardDecelerate(durationMillis = 260),
+                )
+            }
+            throw error
+        }
+    }
     ImeDismissBackHandler(enabled = !drawerOpen)
     DisposableEffect(state.conversationId) {
         onVisible(true)
@@ -162,254 +220,299 @@ fun RemoteConversationScreen(
         Unit
     }
 
-    MolaScaffold(
-        modifier = modifier,
-        contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
-        topBar = {
-            MolaTopBar(
-                overlap = { listState.topBarOverlap(overlapPx) },
-                title = {
-                    Column {
-                        Text(
-                            text = state.title.ifBlank { "新对话" },
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        // 副标题「阵营徽章 模型名 ▾」即模型选择器入口，与聊天页一致。
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                // 新对话里电脑离线也能打开：可以退回手机上的模型。
-                                .clickable(enabled = homeModelMenu != null || (settings != null && state.live)) {
-                                    modelMenuOpen = true
-                                    if (homeModelMenu == null) vm.loadModels()
-                                }
-                                .padding(end = 4.dp),
-                        ) {
-                            // 徽章前缀电脑图标：这是在电脑上运行的对话。
+    val shownAgentPage = state.agentPage ?: retainedAgentPage
+    Box(modifier.fillMaxSize().clipToBounds()) {
+        // 聊天页保持原实例；每帧只移动图层，不重新创建正文和输入区。
+        MolaScaffold(
+            modifier = Modifier.fillMaxSize()
+                .graphicsLayer {
+                    translationX = -size.width * 0.25f * pageProgress.value
+                    alpha = if (pageProgress.value == 1f) 0f else 1f
+                }
+                .then(if (shownAgentPage != null) Modifier.clearAndSetSemantics {} else Modifier),
+            contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+            topBar = {
+                MolaTopBar(
+                    overlap = { listState.topBarOverlap(overlapPx) },
+                    title = {
+                        Column {
+                            Text(
+                                text = state.title.ifBlank { "新对话" },
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            // 副标题「阵营徽章 模型名 ▾」即模型选择器入口，与聊天页一致。
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
-                                    .padding(start = 3.dp, end = 4.dp, top = 1.dp, bottom = 1.dp)
-                                    .semantics(mergeDescendants = true) { contentDescription = "在 $machineName 上运行" },
+                                    .clip(RoundedCornerShape(8.dp))
+                                    // 新对话里电脑离线也能打开：可以退回手机上的模型。
+                                    .clickable(enabled = homeModelMenu != null || (settings != null && state.live)) {
+                                        modelMenuOpen = true
+                                        if (homeModelMenu == null) vm.loadModels()
+                                    }
+                                    .padding(end = 4.dp),
                             ) {
-                                Icon(
-                                    Icons.Outlined.DesktopWindows,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(12.dp),
+                                // 徽章前缀电脑图标：这是在电脑上运行的对话。
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                                        .padding(start = 3.dp, end = 4.dp, top = 1.dp, bottom = 1.dp)
+                                        .semantics(mergeDescendants = true) { contentDescription = "在 $machineName 上运行" },
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.DesktopWindows,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(12.dp),
+                                    )
+                                    settings?.familyLabel?.let { family ->
+                                        Spacer(Modifier.width(3.dp))
+                                        Text(
+                                            text = family,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    text = state.modelLabel ?: machineName,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
                                 )
-                                settings?.familyLabel?.let { family ->
-                                    Spacer(Modifier.width(3.dp))
-                                    Text(
-                                        text = family,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        maxLines = 1,
+                                if (settings != null || homeModelMenu != null) {
+                                    Icon(
+                                        Icons.Filled.ArrowDropDown,
+                                        contentDescription = "切换模型",
+                                        tint = MaterialTheme.colorScheme.primary,
                                     )
                                 }
                             }
-                            Spacer(Modifier.width(5.dp))
-                            Text(
-                                text = state.modelLabel ?: machineName,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
+                        }
+                        if (homeModelMenu != null) {
+                            DropdownMenu(
+                                expanded = modelMenuOpen,
+                                onDismissRequest = { modelMenuOpen = false },
+                                properties = PopupProperties(focusable = false),
+                            ) {
+                                homeModelMenu { modelMenuOpen = false }
+                            }
+                        } else {
+                            RemoteModelMenu(
+                                expanded = modelMenuOpen,
+                                state = state,
+                                onDismiss = { modelMenuOpen = false },
+                                onSelect = { group, model ->
+                                    modelMenuOpen = false
+                                    vm.selectModel(group, model)
+                                },
                             )
-                            if (settings != null || homeModelMenu != null) {
-                                Icon(
-                                    Icons.Filled.ArrowDropDown,
-                                    contentDescription = "切换模型",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                )
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onOpenDrawer) {
+                            Icon(Icons.AutoMirrored.Filled.List, contentDescription = "会话列表")
+                        }
+                    },
+                    actions = {
+                        if (state.draft == null && state.messages.isNotEmpty()) {
+                            IconButton(onClick = { onNewConversation(settings?.providerId, settings?.modelId) }) {
+                                Icon(Icons.Filled.Add, contentDescription = "新对话")
                             }
                         }
-                    }
-                    if (homeModelMenu != null) {
-                        DropdownMenu(
-                            expanded = modelMenuOpen,
-                            onDismissRequest = { modelMenuOpen = false },
-                            properties = PopupProperties(focusable = false),
-                        ) {
-                            homeModelMenu { modelMenuOpen = false }
+                        IconButton(onClick = onOpenSettings) {
+                            Icon(Icons.Filled.Settings, contentDescription = "设置")
                         }
-                    } else {
-                        RemoteModelMenu(
-                            expanded = modelMenuOpen,
-                            state = state,
-                            onDismiss = { modelMenuOpen = false },
-                            onSelect = { group, model ->
-                                modelMenuOpen = false
-                                vm.selectModel(group, model)
-                            },
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onOpenDrawer) {
-                        Icon(Icons.AutoMirrored.Filled.List, contentDescription = "会话列表")
-                    }
-                },
-                actions = {
-                    if (state.draft == null && state.messages.isNotEmpty()) {
-                        IconButton(onClick = { onNewConversation(settings?.providerId, settings?.modelId) }) {
-                            Icon(Icons.Filled.Add, contentDescription = "新对话")
-                        }
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "设置")
-                    }
-                },
-            )
-        },
-        bottomBar = {
-            Box {
-                MolaBottomEdge(Modifier.matchParentSize())
-                // 底栏内边距取 ime 与导航栏的并集，与聊天页相同。
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
-                ) {
-                    StatusLine(state, onRetry = vm::reconnect, onDismiss = vm::dismissNotice)
-                    val truncated = state.messages.lastOrNull { it.metadata.containsKey(DesktopMessageMapper.TRUNCATED_KEY) }
-                    if (truncated != null && state.live) {
-                        TextButton(
-                            onClick = { vm.loadFull(truncated.messageId) },
-                            modifier = Modifier.align(Alignment.CenterHorizontally),
-                        ) { Text("查看完整内容") }
-                    }
-                    state.approvals.forEach { approval ->
-                        ApprovalCard(approval, enabled = state.live) { decision -> vm.approve(approval.requestId, decision) }
-                    }
-                    val readOnly = state.readOnly
-                    if (readOnly != null) {
-                        Text(
-                            readOnly,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        )
-                    } else {
-                        val rules = settings?.attachments
-                        Composer(
-                            glass = true,
-                            enabled = state.live,
-                            isStreaming = state.busy,
-                            enterToSend = enterToSend,
-                            enabledTools = EnabledTools(network = settings?.networkOn == true),
-                            selectedModel = settings?.composerModel(),
-                            useThinking = settings?.thinkingOn == true,
-                            reasoningEffort = settings?.effort.orEmpty(),
-                            providerBaseUrl = "",
-                            pendingAttachments = state.pendingAttachments,
-                            activePersona = null,
-                            showPersonaChip = false,
-                            showMemoryChip = false,
-                            memoryEnabled = false,
-                            onSetMemory = {},
-                            onSetWebAccess = vm::setNetwork,
-                            onToggleThinking = vm::setThinking,
-                            onSetReasoningEffort = vm::setEffort,
-                            onOpenPersonaPicker = {},
-                            onTakePhoto = {
-                                if (rules?.images != true) vm.refuseImages()
-                                else launchPicker("相机") {
-                                    val target = CameraCapture.newPhotoUri(context) ?: error("无法创建拍照文件")
-                                    pendingPhotoUri = target
-                                    takePhoto.launch(target)
-                                }
-                            },
-                            onPickImages = {
-                                if (rules?.images != true) vm.refuseImages()
-                                else launchPicker("相册") {
-                                    pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                                }
-                            },
-                            onPickFiles = {
-                                launchPicker("文件选择器") { pickDocuments.launch(pickerTypes(rules)) }
-                            },
-                            onRemoveAttachment = vm::removeAttachment,
-                            onRetryAttachment = vm::retryAttachment,
-                            holdSendForAttachments = true,
-                            onSend = { text ->
-                                vm.send(text) { failed ->
-                                    restoreDraft = ComposerDraft(failed, System.nanoTime())
-                                }
-                            },
-                            onStop = vm::stop,
-                            showAttachments = rules != null,
-                            showTools = settings != null,
-                            sendWhileStreaming = true,
-                            showReasoningWireDetail = false,
-                            restoreDraft = restoreDraft,
-                        )
-                    }
-                }
-            }
-        },
-    ) { inner ->
-        val draft = state.draft
-        if (draft != null && state.messages.isEmpty()) {
-            // 只用来显示：提示词留在电脑上，这里放的是电脑给的预览；顺序沿用电脑的排列。
-            val personas = remember(draft.personas) {
-                draft.personas.mapIndexed { index, it ->
-                    Persona(id = it.id, name = it.name, systemPrompt = it.preview, sortOrder = index)
-                }
-            }
-            PersonaWelcome(
-                activePersona = personas.firstOrNull { it.id == draft.personaId },
-                isByok = personas.isNotEmpty(),
-                onOpenPersonaPicker = { personaSheetOpen = true },
-                subtitle = "对话保存在电脑上，手机可随时继续",
-                location = "在 $machineName 上运行",
-                modifier = Modifier.padding(inner),
-            )
-            if (personaSheetOpen) {
-                PersonaPickerSheet(
-                    personas = personas,
-                    selectedPersona = personas.firstOrNull { it.id == draft.personaId },
-                    onSelect = { persona ->
-                        personaSheetOpen = false
-                        vm.selectPersona(persona.id)
                     },
-                    onManage = null,
-                    onDismiss = { personaSheetOpen = false },
+                )
+            },
+            bottomBar = {
+                Box {
+                    MolaBottomEdge(Modifier.matchParentSize())
+                    // 底栏内边距取 ime 与导航栏的并集，与聊天页相同。
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
+                    ) {
+                        StatusLine(state, onRetry = vm::reconnect, onDismiss = vm::dismissNotice)
+                        val truncated = state.messages.lastOrNull { it.metadata.containsKey(DesktopMessageMapper.TRUNCATED_KEY) }
+                        if (truncated != null && state.live) {
+                            TextButton(
+                                onClick = { vm.loadFull(truncated.messageId) },
+                                modifier = Modifier.align(Alignment.CenterHorizontally),
+                            ) { Text("查看完整内容") }
+                        }
+                        state.approvals.forEach { approval ->
+                            ApprovalCard(approval, enabled = state.live) { decision -> vm.approve(approval.requestId, decision) }
+                        }
+                        if (state.tasksSupported && (state.agents.isNotEmpty() || state.runningTasks.isNotEmpty())) {
+                            RemoteTasksPanel(
+                                tasks = state.runningTasks,
+                                agents = state.agents,
+                                enabled = state.live,
+                                onOpenAgent = vm::openAgent,
+                                onStop = vm::stopTask,
+                            )
+                        }
+                        val readOnly = state.readOnly
+                        if (readOnly != null) {
+                            Text(
+                                readOnly,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                            )
+                        } else {
+                            val rules = settings?.attachments
+                            Composer(
+                                glass = true,
+                                enabled = state.live,
+                                isStreaming = state.busy,
+                                enterToSend = enterToSend,
+                                enabledTools = EnabledTools(network = settings?.networkOn == true),
+                                selectedModel = settings?.composerModel(),
+                                useThinking = settings?.thinkingOn == true,
+                                reasoningEffort = settings?.effort.orEmpty(),
+                                providerBaseUrl = "",
+                                pendingAttachments = state.pendingAttachments,
+                                activePersona = null,
+                                showPersonaChip = false,
+                                showMemoryChip = false,
+                                memoryEnabled = false,
+                                onSetMemory = {},
+                                onSetWebAccess = vm::setNetwork,
+                                onToggleThinking = vm::setThinking,
+                                onSetReasoningEffort = vm::setEffort,
+                                onOpenPersonaPicker = {},
+                                onTakePhoto = {
+                                    if (rules?.images != true) vm.refuseImages()
+                                    else launchPicker("相机") {
+                                        val target = CameraCapture.newPhotoUri(context) ?: error("无法创建拍照文件")
+                                        pendingPhotoUri = target
+                                        takePhoto.launch(target)
+                                    }
+                                },
+                                onPickImages = {
+                                    if (rules?.images != true) vm.refuseImages()
+                                    else launchPicker("相册") {
+                                        pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    }
+                                },
+                                onPickFiles = {
+                                    launchPicker("文件选择器") { pickDocuments.launch(pickerTypes(rules)) }
+                                },
+                                onRemoveAttachment = vm::removeAttachment,
+                                onRetryAttachment = vm::retryAttachment,
+                                holdSendForAttachments = true,
+                                onSend = { text ->
+                                    vm.send(text) { failed ->
+                                        restoreDraft = ComposerDraft(failed, System.nanoTime())
+                                    }
+                                },
+                                onStop = vm::stop,
+                                showAttachments = rules != null,
+                                showTools = settings != null,
+                                sendWhileStreaming = true,
+                                showReasoningWireDetail = false,
+                                restoreDraft = restoreDraft,
+                            )
+                        }
+                    }
+                }
+            },
+        ) { inner ->
+            val draft = state.draft
+            if (draft != null && state.messages.isEmpty()) {
+                // 只用来显示：提示词留在电脑上，这里放的是电脑给的预览；顺序沿用电脑的排列。
+                val personas = remember(draft.personas) {
+                    draft.personas.mapIndexed { index, it ->
+                        Persona(id = it.id, name = it.name, systemPrompt = it.preview, sortOrder = index)
+                    }
+                }
+                PersonaWelcome(
+                    activePersona = personas.firstOrNull { it.id == draft.personaId },
+                    isByok = personas.isNotEmpty(),
+                    onOpenPersonaPicker = { personaSheetOpen = true },
+                    subtitle = "对话保存在电脑上，手机可随时继续",
+                    location = "在 $machineName 上运行",
+                    modifier = Modifier.padding(inner),
+                )
+                if (personaSheetOpen) {
+                    PersonaPickerSheet(
+                        personas = personas,
+                        selectedPersona = personas.firstOrNull { it.id == draft.personaId },
+                        onSelect = { persona ->
+                            personaSheetOpen = false
+                            vm.selectPersona(persona.id)
+                        },
+                        onManage = null,
+                        onDismiss = { personaSheetOpen = false },
+                    )
+                }
+                return@MolaScaffold
+            }
+            val agentIds = state.agents.map { it.id }
+            val subagentLinks = remember(state.tasksSupported, agentIds) {
+                if (state.tasksSupported) SubagentLinks(agentIds.toSet(), vm::openAgent) else null
+            }
+            CompositionLocalProvider(LocalSubagentLinks provides subagentLinks) {
+                ReadOnlyMessageList(
+                    messages = state.messages,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = 16.dp,
+                        end = 16.dp,
+                        top = inner.calculateTopPadding() + 12.dp,
+                        bottom = inner.calculateBottomPadding() + 16.dp,
+                    ),
+                    bottomOverlayPadding = inner.calculateBottomPadding(),
+                    listState = listState,
+                    header = if (state.hasOlder && state.live) {
+                        {
+                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                TextButton(onClick = vm::loadOlder, enabled = !state.loadingOlder) {
+                                    Text(if (state.loadingOlder) "加载中…" else "加载历史消息")
+                                }
+                            }
+                        }
+                    } else {
+                        null
+                    },
                 )
             }
-            return@MolaScaffold
         }
-        ReadOnlyMessageList(
-            messages = state.messages,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = inner.calculateTopPadding() + 12.dp,
-                bottom = inner.calculateBottomPadding() + 16.dp,
-            ),
-            bottomOverlayPadding = inner.calculateBottomPadding(),
-            listState = listState,
-            header = if (state.hasOlder && state.live) {
-                {
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        TextButton(onClick = vm::loadOlder, enabled = !state.loadingOlder) {
-                            Text(if (state.loadingOlder) "加载中…" else "加载历史消息")
-                        }
-                    }
-                }
-            } else {
-                null
-            },
-        )
+        if (shownAgentPage != null) {
+            // 阻止详情空白区域的点击穿透到底下的输入区。
+            Box(Modifier.fillMaxSize().clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {},
+            ).clearAndSetSemantics {})
+            key(shownAgentPage.agentId) {
+                RemoteAgentDetailScreen(
+                    agent = state.agents.firstOrNull { it.id == shownAgentPage.agentId },
+                    page = shownAgentPage,
+                    live = state.live,
+                    statusLine = { StatusLine(state, onRetry = vm::reconnect, onDismiss = vm::dismissNotice) },
+                    onBack = vm::closeAgent,
+                    onStop = vm::stopTask,
+                    modifier = Modifier.fillMaxSize().graphicsLayer {
+                        translationX = size.width * (1f - pageProgress.value)
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -467,7 +570,7 @@ private fun RemoteModelMenu(
 }
 
 /** 状态行要显示的内容；null 即不显示。 */
-private data class StatusModel(
+internal data class StatusModel(
     val text: String,
     val error: Boolean = false,
     val progress: Boolean = false,
@@ -512,62 +615,68 @@ private fun StatusLine(state: RemoteConversationUiState, onRetry: () -> Unit, on
         exit = fadeOut() + shrinkVertically(shrinkTowards = Alignment.Bottom),
     ) {
         shown?.let { current ->
-            StatusPill(
-                model = current,
-                onAction = if (current.error) onDismiss else onRetry,
-            )
+            Box(
+                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                StatusPill(
+                    model = current,
+                    onAction = if (current.error) onDismiss else onRetry,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun StatusPill(model: StatusModel, onAction: () -> Unit) {
+internal fun StatusPill(
+    model: StatusModel,
+    onAction: () -> Unit = {},
+    icon: ImageVector? = null,
+    onClick: (() -> Unit)? = null,
+) {
     val cs = MaterialTheme.colorScheme
-    Box(
+    Row(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
-        contentAlignment = Alignment.Center,
+            .molaGlass(RoundedCornerShape(50), elevation = 2.dp)
+            .heightIn(min = 34.dp)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(start = 12.dp, end = if (model.action != null) 4.dp else 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier
-                .molaGlass(RoundedCornerShape(50), elevation = 2.dp)
-                .heightIn(min = 34.dp)
-                .padding(start = 12.dp, end = if (model.action != null) 4.dp else 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (model.progress) {
-                CircularProgressIndicator(strokeWidth = 1.5.dp, modifier = Modifier.size(12.dp))
-            } else {
-                Box(
-                    Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(if (model.error) cs.error else cs.onSurfaceVariant.copy(alpha = 0.5f)),
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            Text(
-                model.text,
-                style = MaterialTheme.typography.labelMedium,
-                color = if (model.error) cs.error else cs.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
+        if (model.progress) {
+            CircularProgressIndicator(strokeWidth = 1.5.dp, modifier = Modifier.size(12.dp))
+        } else if (icon != null) {
+            Icon(icon, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(14.dp))
+        } else {
+            Box(
+                Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(if (model.error) cs.error else cs.onSurfaceVariant.copy(alpha = 0.5f)),
             )
-            model.action?.let { label ->
-                Text(
-                    label,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (model.error) cs.onSurfaceVariant else cs.primary,
-                    modifier = Modifier
-                        .padding(start = 4.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable(onClick = onAction)
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                )
-            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            model.text,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (model.error) cs.error else cs.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        model.action?.let { label ->
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (model.error) cs.onSurfaceVariant else cs.primary,
+                modifier = Modifier
+                    .padding(start = 4.dp)
+                    .clip(RoundedCornerShape(50))
+                    .clickable(onClick = onAction)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+            )
         }
     }
 }

@@ -41,6 +41,7 @@ fun ToolCallView(
     argsJson: String? = null,
     provider: String? = null,
     expandWhileRunning: Boolean = true,
+    statusLabel: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val title = label ?: readableToolName(name)
@@ -77,7 +78,7 @@ fun ToolCallView(
                     .padding(start = 8.dp),
             )
             Text(
-                text = statusText(status),
+                text = statusLabel ?: statusText(status),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
             )
@@ -137,6 +138,12 @@ private fun PopIn(content: @Composable () -> Unit) {
 }
 
 private fun readableToolName(name: String): String = when (name) {
+    "spawn_agent" -> "派发子 Agent"
+    "followup_agent" -> "继续派活"
+    "send_agent_message" -> "发送消息"
+    "wait_agents" -> "等待子 Agent"
+    "task_status" -> "查看任务"
+    "stop_task" -> "停止任务"
     "search_web", "web_search" -> "联网搜索"
     "fetch_url" -> "阅读网页"
     "view_image", "vision_proxy" -> "视觉理解"

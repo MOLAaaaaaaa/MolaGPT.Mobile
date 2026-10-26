@@ -24,10 +24,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -37,6 +39,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -54,10 +57,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.DesktopConversation
 import com.molagpt.app.core.render.MolaScaffold
@@ -65,6 +76,7 @@ import com.molagpt.app.core.render.MolaTopBar
 import com.molagpt.app.feature.agentcontrol.MonitorIcon
 import com.molagpt.app.feature.agentcontrol.Pill
 import com.molagpt.app.feature.agentcontrol.agentPalette
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 
 /** 「电脑」页：开启了远控的电脑与它们最近的对话；外部 Agent（Claude Code / Codex）在最下面。 */
@@ -77,7 +89,7 @@ fun DesktopsScreen(
     onExit: () -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
-    var pairing by remember { mutableStateOf<DesktopRow?>(null) }
+    var anonPairing by remember { mutableStateOf(false) }
 
     MolaScaffold(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
@@ -107,6 +119,29 @@ fun DesktopsScreen(
             state.error?.let { message ->
                 item(key = "error") { Hint(message, error = true) }
             }
+            item(key = "anon-add") {
+                val cs = MaterialTheme.colorScheme
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(cs.primary.copy(alpha = 0.08f))
+                        .clickable { anonPairing = true }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, tint = cs.primary, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("用配对码添加电脑", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "电脑端 设置 → 远程控制 → 配对新手机",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = cs.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
             if (state.loaded && state.desktops.isEmpty()) {
                 item(key = "empty") {
                     Hint("请在电脑端设置 → 远程控制中启用手机控制。")
@@ -119,8 +154,8 @@ fun DesktopsScreen(
                         pairing = state.pairingMachineId == row.info.machineId,
                         canPair = state.pairingMachineId == null && row.online,
                         onPair = { vm.pairWithAccount(row.info.machineId) },
-                        onPairWithCode = { pairing = row },
-                        onForget = { vm.forget(row.info.machineId) },
+                        onPairWithCode = { anonPairing = true },
+                        onForget = { if (row.anon) vm.forgetAnon(row.info.machineId) else vm.forget(row.info.machineId) },
                     )
                 }
                 // 未配对的电脑也列出对话：点开时先用账号配对，与侧边栏一致。
@@ -165,13 +200,160 @@ fun DesktopsScreen(
         }
     }
 
-    pairing?.let { row ->
-        PairDialog(
-            machineName = row.info.machineName,
-            onPair = { code -> vm.pair(row.info.machineId, code) },
-            onDismiss = { pairing = null },
+    if (anonPairing) {
+        AnonPairDialog(
+            onPair = { code, confirmSas, done -> vm.pairAnon(code, confirmSas, done) },
+            onDismiss = { anonPairing = false },
         )
     }
+}
+
+private const val PAIR_CODE_LENGTH = 8
+
+/** 只留配对码字母表里的字符，易混的 O、I、L 按 0、1 读，最多 8 位。 */
+private fun pairCodeInput(input: String): String = buildString {
+    for (raw in input.uppercase()) {
+        val c = when (raw) {
+            'O' -> '0'
+            'I', 'L' -> '1'
+            else -> raw
+        }
+        if (c in "0123456789ABCDEFGHJKMNPQRSTVWXYZ" && length < PAIR_CODE_LENGTH) append(c)
+    }
+}
+
+/** 显示为 XXXX-XXXX；分隔符只在显示层，输入值始终是 8 位纯字符。 */
+private object PairCodeTransformation : VisualTransformation {
+    override fun filter(text: AnnotatedString): TransformedText {
+        val raw = text.text
+        if (raw.length <= 4) return TransformedText(text, OffsetMapping.Identity)
+        return TransformedText(
+            AnnotatedString(raw.take(4) + "-" + raw.drop(4)),
+            object : OffsetMapping {
+                override fun originalToTransformed(offset: Int) = if (offset <= 4) offset else offset + 1
+                override fun transformedToOriginal(offset: Int) = if (offset <= 4) offset else offset - 1
+            },
+        )
+    }
+}
+
+/** 配对码配对：输入配对码 → 两端各显示一个校验码 → 手机和电脑都确认一致。 */
+@Composable
+private fun AnonPairDialog(
+    onPair: suspend (code: String, confirmSas: suspend (String) -> Boolean, done: (String?) -> Unit) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var code by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var sas by remember { mutableStateOf<String?>(null) }
+    var working by remember { mutableStateOf(false) }
+    // 校验码显示期间等用户回答；回答后转为等待电脑端允许。
+    var answer by remember { mutableStateOf<CompletableDeferred<Boolean>?>(null) }
+    val scope = rememberCoroutineScope()
+    val codeStyle = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Monospace, letterSpacing = 2.sp)
+    val canSubmit = !working && code.length == PAIR_CODE_LENGTH
+    val submit: () -> Unit = {
+        working = true
+        error = null
+        scope.launch {
+            onPair(
+                code,
+                { shown ->
+                    val question = CompletableDeferred<Boolean>()
+                    sas = shown
+                    answer = question
+                    question.await()
+                },
+                { failure ->
+                    answer = null
+                    if (failure == null) onDismiss()
+                    else {
+                        sas = null
+                        error = failure
+                    }
+                },
+            )
+            working = false
+        }
+    }
+    AlertDialog(
+        onDismissRequest = { if (!working) onDismiss() },
+        title = { Text(if (sas == null) "用配对码添加电脑" else "请核对校验码") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (sas == null) {
+                    Text(
+                        "输入电脑端「配对新手机」显示的 8 位配对码",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { code = pairCodeInput(it); error = null },
+                        singleLine = true,
+                        enabled = !working,
+                        placeholder = {
+                            Text(
+                                "XXXX-XXXX",
+                                style = codeStyle,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        },
+                        textStyle = codeStyle.copy(textAlign = TextAlign.Center),
+                        visualTransformation = PairCodeTransformation,
+                        // 密码类键盘让中文输入法停在英文字母，不进拼音。
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.Characters,
+                            autoCorrectEnabled = false,
+                            keyboardType = KeyboardType.Password,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { if (canSubmit) submit() }),
+                        isError = error != null,
+                        supportingText = error?.let { { Text(it) } },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    val asking = answer != null
+                    Text(
+                        if (asking) "与电脑上显示的校验码一致吗？"
+                        else "在电脑上点「允许」完成配对",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        sas!!.chunked(3).joinToString(" "),
+                        style = MaterialTheme.typography.displaySmall,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.align(Alignment.CenterHorizontally),
+                    )
+                    if (!asking) LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            }
+        },
+        confirmButton = {
+            val pending = answer
+            if (pending != null) {
+                TextButton(onClick = { pending.complete(true); answer = null }) { Text("一致") }
+            } else if (sas == null) {
+                TextButton(
+                    enabled = canSubmit,
+                    onClick = submit,
+                ) { Text(if (working) "配对中…" else "配对") }
+            }
+        },
+        dismissButton = {
+            val pending = answer
+            if (pending != null) {
+                TextButton(onClick = { pending.complete(false); answer = null }) { Text("不一致") }
+            } else {
+                TextButton(enabled = !working, onClick = onDismiss) { Text("取消") }
+            }
+        },
+    )
 }
 
 @Composable
@@ -227,7 +409,6 @@ private fun MachineHeader(
                 if (!row.paired) {
                     DropdownMenuItem(
                         text = { Text("使用配对码") },
-                        enabled = canPair,
                         onClick = {
                             menu = false
                             onPairWithCode()
@@ -305,59 +486,6 @@ private fun Hint(text: String, error: Boolean = false) {
         style = MaterialTheme.typography.bodySmall,
         color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-    )
-}
-
-@Composable
-private fun PairDialog(
-    machineName: String,
-    onPair: suspend (String) -> String?,
-    onDismiss: () -> Unit,
-) {
-    var code by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    var working by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    AlertDialog(
-        onDismissRequest = { if (!working) onDismiss() },
-        title = { Text("与「$machineName」配对") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "电脑端设置 → 远程控制中选择「配对新手机」，输入显示的 8 位配对码。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedTextField(
-                    value = code,
-                    onValueChange = { code = it.uppercase().take(12); error = null },
-                    singleLine = true,
-                    enabled = !working,
-                    placeholder = { Text("XXXX-XXXX") },
-                    textStyle = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, autoCorrectEnabled = false),
-                    isError = error != null,
-                    supportingText = error?.let { { Text(it) } },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = !working && code.count { it.isLetterOrDigit() } >= 8,
-                onClick = {
-                    working = true
-                    scope.launch {
-                        val failure = onPair(code)
-                        working = false
-                        if (failure == null) onDismiss() else error = failure
-                    }
-                },
-            ) { Text(if (working) "配对中…" else "配对") }
-        },
-        dismissButton = {
-            TextButton(enabled = !working, onClick = onDismiss) { Text("取消") }
-        },
     )
 }
 

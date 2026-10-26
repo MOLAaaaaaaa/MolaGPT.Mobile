@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,9 +17,8 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
@@ -97,130 +97,145 @@ fun SettingsScreen(
             )
         },
     ) { inner ->
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
                 .padding(inner)
-                .padding(16.dp)
                 .navigationBarsPadding(),
+            contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             // 账户入口置顶但只占一行：位置保留（Agent 控制硬依赖登录，入口要好找），
             // 体量收敛（原先是 52dp 头像 + 逐模型一行的配额表，吃掉整个首屏）。
             // 详情见 MolaAccountScreen。
-            MolaAccountEntryCard(
-                loggedIn = loggedIn,
-                username = username,
-                onClick = onOpenMolaAccount,
-            )
-
-            SectionTitle("远程控制")
-            SettingsGroup {
-                SettingsEntryRow(
-                    icon = Icons.Outlined.DesktopWindows,
-                    title = "电脑",
-                    subtitle = desktopStatus ?: "在手机上继续电脑上的对话",
-                    onClick = onOpenAgentControl,
+            item {
+                MolaAccountEntryCard(
+                    loggedIn = loggedIn,
+                    username = username,
+                    onClick = onOpenMolaAccount,
                 )
             }
 
-            SectionTitle("模型与对话")
-            ModelAndConversationCard(
-                providerCount = byokProviders.size,
-                modelCount = byokProviders.sumOf { it.models.size },
-                memoryEnabled = s.byokMemoryMasterEnabled,
-                postProcessingEnabled = s.responsePostProcessingEnabled,
-                activeRules = s.responseRegexRules.count { it.enabled },
-                toolsEnabledCount = listOf(
-                    s.byokMcpServers.any { it.enabled },
-                    s.visionProxyEnabled,
-                    s.imageGenEnabled,
-                ).count { it },
-                onOpenByokProviders = onOpenByokProviders,
-                onOpenByokTools = onOpenByokTools,
-                onOpenByokMemory = onOpenByokMemory,
-                onOpenSkills = onOpenSkills,
-                onOpenPostProcessing = onOpenPostProcessing,
-            )
-
-            SectionTitle("角色扮演")
-            RoleplayCard(
-                onOpenPersonaManagement = onOpenPersonaManagement,
-                onOpenLorebooks = onOpenLorebooks,
-            )
-
-            SectionTitle("外观与输入")
-            SettingsGroup {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    SegmentedRow(
-                        label = "主题",
-                        options = listOf("auto" to "跟随系统", "light" to "浅色", "dark" to "深色"),
-                        selected = s.themeMode,
-                        onSelect = viewModel::setThemeMode,
-                    )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                    ToggleRow(
-                        label = "Enter 键发送",
-                        checked = s.enterToSend,
-                        onChange = viewModel::setEnterToSend,
-                        subtitle = "关闭后按 Enter 键换行",
-                    )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                    ToggleRow(
-                        label = "电脑快捷入口",
-                        checked = s.showAgentControlShortcut,
-                        onChange = viewModel::setShowAgentControlShortcut,
-                        subtitle = "显示在对话页顶部",
-                        leadingIcon = Icons.Outlined.DesktopWindows,
-                    )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                    ToggleRow(
-                        label = "图像工作台快捷入口",
-                        checked = s.showImageWorkbenchShortcut,
-                        onChange = viewModel::setShowImageWorkbenchShortcut,
-                        subtitle = "显示在对话页顶部",
-                        leadingIcon = Icons.Filled.Palette,
+            item { SectionTitle("远程控制") }
+            item {
+                SettingsGroup {
+                    SettingsEntryRow(
+                        icon = Icons.Outlined.DesktopWindows,
+                        title = "电脑",
+                        subtitle = desktopStatus ?: "在手机上继续电脑上的对话",
+                        onClick = onOpenAgentControl,
                     )
                 }
             }
 
-            SectionTitle("可视化")
-            SettingsGroup {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    ToggleRow(
-                        label = "可视化回答",
-                        checked = s.visualAnswersEnabled,
-                        onChange = viewModel::setVisualAnswersEnabled,
-                        subtitle = "BYOK 模型可利用函数图像、图表、表格和网页辅助回答",
-                    )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
-                    ToggleRow(
-                        label = "网页以卡片显示",
-                        checked = s.htmlAsCard,
-                        onChange = viewModel::setHtmlAsCard,
-                        subtitle = "关闭后 HTML 内容默认显示为代码，仍可本地运行",
+            item { SectionTitle("模型与对话") }
+            item {
+                ModelAndConversationCard(
+                    providerCount = byokProviders.size,
+                    modelCount = byokProviders.sumOf { it.models.size },
+                    memoryEnabled = s.byokMemoryMasterEnabled,
+                    postProcessingEnabled = s.responsePostProcessingEnabled,
+                    activeRules = s.responseRegexRules.count { it.enabled },
+                    toolsEnabledCount = listOf(
+                        s.byokMcpServers.any { it.enabled },
+                        s.visionProxyEnabled,
+                        s.imageGenEnabled,
+                    ).count { it },
+                    onOpenByokProviders = onOpenByokProviders,
+                    onOpenByokTools = onOpenByokTools,
+                    onOpenByokMemory = onOpenByokMemory,
+                    onOpenSkills = onOpenSkills,
+                    onOpenPostProcessing = onOpenPostProcessing,
+                )
+            }
+
+            item { SectionTitle("角色扮演") }
+            item {
+                RoleplayCard(
+                    onOpenPersonaManagement = onOpenPersonaManagement,
+                    onOpenLorebooks = onOpenLorebooks,
+                )
+            }
+
+            item { SectionTitle("外观与输入") }
+            item {
+                SettingsGroup {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        SegmentedRow(
+                            label = "主题",
+                            options = listOf("auto" to "跟随系统", "light" to "浅色", "dark" to "深色"),
+                            selected = s.themeMode,
+                            onSelect = viewModel::setThemeMode,
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        ToggleRow(
+                            label = "Enter 键发送",
+                            checked = s.enterToSend,
+                            onChange = viewModel::setEnterToSend,
+                            subtitle = "关闭后按 Enter 键换行",
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        ToggleRow(
+                            label = "电脑快捷入口",
+                            checked = s.showAgentControlShortcut,
+                            onChange = viewModel::setShowAgentControlShortcut,
+                            subtitle = "显示在对话页顶部",
+                            leadingIcon = Icons.Outlined.DesktopWindows,
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        ToggleRow(
+                            label = "图像工作台快捷入口",
+                            checked = s.showImageWorkbenchShortcut,
+                            onChange = viewModel::setShowImageWorkbenchShortcut,
+                            subtitle = "显示在对话页顶部",
+                            leadingIcon = Icons.Filled.Palette,
+                        )
+                    }
+                }
+            }
+
+            item { SectionTitle("可视化") }
+            item {
+                SettingsGroup {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        ToggleRow(
+                            label = "可视化回答",
+                            checked = s.visualAnswersEnabled,
+                            onChange = viewModel::setVisualAnswersEnabled,
+                            subtitle = "BYOK 模型可利用函数图像、图表、表格和网页辅助回答",
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        ToggleRow(
+                            label = "网页以卡片显示",
+                            checked = s.htmlAsCard,
+                            onChange = viewModel::setHtmlAsCard,
+                            subtitle = "关闭后 HTML 内容默认显示为代码，仍可本地运行",
+                        )
+                    }
+                }
+            }
+
+            item { SectionTitle("关于") }
+            item {
+                SettingsGroup {
+                    SettingsEntryRow(
+                        icon = Icons.Outlined.Info,
+                        title = "关于 MolaGPT",
+                        subtitle = "版本、开源项目与许可证",
+                        onClick = onOpenAbout,
                     )
                 }
             }
 
-            SectionTitle("关于")
-            SettingsGroup {
-                SettingsEntryRow(
-                    icon = Icons.Outlined.Info,
-                    title = "关于 MolaGPT",
-                    subtitle = "版本、开源项目与许可证",
-                    onClick = onOpenAbout,
+            item {
+                Text(
+                    text = buildLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    textAlign = TextAlign.Center,
                 )
             }
-
-            Text(
-                text = buildLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                textAlign = TextAlign.Center,
-            )
         }
     }
 }
@@ -268,7 +283,7 @@ private fun MolaAccountEntryCard(
                     text = if (loggedIn) {
                         "${username ?: "已登录"} · 配额、云同步与个性化记忆"
                     } else {
-                        "登录后使用云同步与电脑控制"
+                        "登录后使用云同步与个性化记忆"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

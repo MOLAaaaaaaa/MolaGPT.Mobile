@@ -262,6 +262,8 @@ internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvi
     val type = runCatching { ByokProviderType.valueOf(type) }.getOrDefault(ByokProviderType.OPENAI_COMPAT)
     val purpose = runCatching { ByokPurpose.valueOf(purpose) }.getOrDefault(ByokPurpose.CHAT)
     val imageFormat = runCatching { ByokImageFormat.valueOf(imageFormat) }.getOrDefault(ByokImageFormat.OPENAI_IMAGES)
+    val geminiChatImage = type == ByokProviderType.GEMINI && purpose == ByokPurpose.IMAGE &&
+        imagePath.contains(":generateContent")
     val models = runCatching {
         json.decodeFromString<List<ProviderModel>>(modelsJson)
     }.getOrDefault(emptyList())
@@ -278,7 +280,7 @@ internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvi
         modelsPath = modelsPath,
         imagePath = imagePath,
         purpose = purpose,
-        imageFormat = imageFormat,
+        imageFormat = if (geminiChatImage) ByokImageFormat.OPENAI_CHAT_IMAGE else imageFormat,
         imageEditPath = imageEditPath,
         enabled = enabled,
         models = models.map {

@@ -51,7 +51,7 @@ import com.molagpt.app.core.storage.entity.StreamTaskEntity
         ImageRunEntity::class,
         ImageVersionEntity::class,
     ],
-    version = 20,
+    version = 21,
     exportSchema = false,
 )
 abstract class MolaDatabase : RoomDatabase() {
@@ -72,7 +72,34 @@ abstract class MolaDatabase : RoomDatabase() {
                 .addMigrations(object : Migration(19, 20) {
                     override fun migrate(db: SupportSQLiteDatabase) = wireHistoryStore.migrate(db)
                 })
+                .addMigrations(MIGRATION_20_21)
                 .build()
+
+        private val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                val sessions = mutableMapOf<String, MutableList<Pair<String, Long>>>()
+                db.query(
+                    """
+                    SELECT m.sessionId, m.messageId, m.createdAt
+                    FROM messages m JOIN conversations c ON c.sessionId = m.sessionId
+                    WHERE c.providerKind = 'MOLAGPT'
+                    """.trimIndent(),
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        sessions.getOrPut(cursor.getString(0)) { mutableListOf() }
+                            .add(cursor.getString(1) to cursor.getLong(2))
+                    }
+                }
+                sessions.forEach { (sessionId, messages) ->
+                    SyncMapper.cachedMessageOrderUpdates(sessionId, messages).forEach { (id, createdAt) ->
+                        db.execSQL(
+                            "UPDATE messages SET createdAt = ?, updatedAt = MAX(updatedAt, ?) WHERE messageId = ?",
+                            arrayOf<Any>(createdAt, createdAt, id),
+                        )
+                    }
+                }
+            }
+        }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {

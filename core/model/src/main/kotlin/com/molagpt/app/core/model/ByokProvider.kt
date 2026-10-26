@@ -22,7 +22,17 @@ data class ByokProvider(
     val models: List<ProviderModel> = emptyList(),
     /** BYOK: 附加到该服务全部请求（对话 / 模型列表 / 图像）的自定义请求头，auth 之后追加。 */
     val customHeaders: List<CustomHeader> = emptyList(),
-)
+) {
+    /** 该模型实际使用的图像接口：模型单独设置过就用模型的，否则跟随服务。 */
+    fun imageFormatFor(modelId: String): ByokImageFormat =
+        models.firstOrNull { it.id == modelId }?.imageFormat ?: imageFormat
+
+    val isOpenRouter: Boolean
+        get() {
+            val host = runCatching { java.net.URI(baseUrl.trim()).host.orEmpty() }.getOrDefault("").lowercase()
+            return host == "openrouter.ai" || host.endsWith(".openrouter.ai")
+        }
+}
 
 /** 用户自定义 HTTP 请求头。 */
 @Serializable
@@ -42,7 +52,11 @@ enum class ByokPurpose {
     IMAGE,
 }
 
-/** 图像生成接口格式。OPENAI_IMAGES=DALL·E/gpt-image 走 /v1/images/generations；OPENAI_CHAT_IMAGE=对话补全出图（OpenRouter/nano-banana）。 */
+/**
+ * 图像请求走专用图像接口还是对话接口。
+ * Gemini 使用 generateContent，OpenRouter 图像接口使用 /images。
+ * 枚举名称已写入持久化数据，保持不变。
+ */
 @Serializable
 enum class ByokImageFormat {
     OPENAI_IMAGES,
@@ -103,21 +117,46 @@ object ByokProviderPresets {
             type = ByokProviderType.OPENAI_COMPAT,
             baseUrl = "https://openrouter.ai/api/",
             chatPath = "v1/chat/completions",
-            modelsPath = "v1/models",
-            imagePath = "",
+            modelsPath = "v1/images/models",
+            imagePath = "v1/images",
             purpose = ByokPurpose.IMAGE,
-            imageFormat = ByokImageFormat.OPENAI_CHAT_IMAGE,
+            imageFormat = ByokImageFormat.OPENAI_IMAGES,
         ),
         ByokProvider(
             id = "gemini-image",
             name = "Gemini 图像",
             type = ByokProviderType.GEMINI,
             baseUrl = "https://generativelanguage.googleapis.com/v1beta/",
-            chatPath = "models/{model}:streamGenerateContent",
+            chatPath = "models/{model}:generateContent",
             modelsPath = "models",
             imagePath = "models/{model}:generateContent",
             purpose = ByokPurpose.IMAGE,
-            imageFormat = ByokImageFormat.OPENAI_IMAGES,
+            imageFormat = ByokImageFormat.OPENAI_CHAT_IMAGE,
+        ),
+        ByokProvider(
+            id = "ark-images",
+            name = "火山方舟 图像",
+            baseUrl = "https://ark.cn-beijing.volces.com/api/",
+            chatPath = "v3/chat/completions",
+            modelsPath = "v3/models",
+            imagePath = "v3/images/generations",
+            purpose = ByokPurpose.IMAGE,
+        ),
+        ByokProvider(
+            id = "siliconflow-images",
+            name = "SiliconFlow 图像",
+            baseUrl = "https://api.siliconflow.cn/",
+            modelsPath = "v1/models?type=image",
+            imagePath = "v1/images/generations",
+            purpose = ByokPurpose.IMAGE,
+        ),
+        ByokProvider(
+            id = "xai-images",
+            name = "xAI 图像",
+            baseUrl = "https://api.x.ai/",
+            imagePath = "v1/images/generations",
+            imageEditPath = "v1/images/edits",
+            purpose = ByokPurpose.IMAGE,
         ),
     )
 

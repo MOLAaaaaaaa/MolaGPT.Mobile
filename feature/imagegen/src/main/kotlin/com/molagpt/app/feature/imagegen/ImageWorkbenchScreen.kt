@@ -106,7 +106,7 @@ private val StarterPrompts = listOf(
 fun ImageWorkbenchScreen(
     viewModel: ImageWorkbenchViewModel,
     onBack: () -> Unit,
-    onManageModels: (providerId: String?) -> Unit,
+    onManageModels: () -> Unit,
     onOpenGallery: () -> Unit,
     onOpenBase64: () -> Unit,
     /** 当前可见的任务，用于完成通知抑制。 */
@@ -263,7 +263,7 @@ fun ImageWorkbenchScreen(
                                         },
                                         onManage = {
                                             modelMenuOpen = false
-                                            onManageModels(selection.provider?.id)
+                                            onManageModels()
                                         },
                                         onDismiss = { modelMenuOpen = false },
                                     )
@@ -362,7 +362,7 @@ fun ImageWorkbenchScreen(
                 Box(modifier = Modifier.fillMaxSize().padding(inner)) {
                     when {
                         providers == null -> Unit
-                        imageProviders.isEmpty() -> NoProviderState(onAdd = { onManageModels(null) })
+                        imageProviders.isEmpty() -> NoProviderState(onAdd = onManageModels)
                         currentTask == null || currentTask.runs.isEmpty() -> EmptyState(
                             onPick = { viewModel.prompt = it },
                         )

@@ -43,6 +43,7 @@ object ViewModelFactories {
     fun desktops(container: AppContainer) = factory {
         DesktopsViewModel(
             service = container.desktopRemoteService,
+            anon = container.anonRemoteService,
             cache = container.desktopSnapshotCache,
             deviceName = container.remoteDeviceName,
             deviceId = container.remoteDeviceId,
@@ -59,8 +60,12 @@ object ViewModelFactories {
         /** 消息已交给电脑（草稿则是电脑已建好对话）。 */
         onSent: (conversationId: String) -> Unit = {},
     ) = factory {
+        // machineId 匹配到匿名配对记录时走端到端通道，否则走账号通道。
+        val channel: com.molagpt.app.core.network.RemoteDesktopChannel =
+            if (machineId in container.anonRemoteService.pairedDeviceIds()) container.anonRemoteService
+            else container.desktopRemoteService
         RemoteConversationViewModel(
-            service = container.desktopRemoteService,
+            service = channel,
             cache = container.desktopSnapshotCache,
             files = RemoteAttachmentFiles(container.appContext),
             machineId = machineId,

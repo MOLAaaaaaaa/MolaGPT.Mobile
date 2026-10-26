@@ -23,6 +23,7 @@ import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.core.network.DesktopPush
 import com.molagpt.app.core.network.DesktopRemoteException
 import com.molagpt.app.core.network.DesktopRemoteService
+import com.molagpt.app.core.network.RemoteDesktopChannel
 import com.molagpt.app.feature.chat.StreamRenderPacing
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -86,10 +87,21 @@ data class RemoteConversationUiState(
     val conversationId: String = "",
     /** 在电脑上新建、首条消息还没发出；为 null 即普通对话。 */
     val draft: RemoteDraftUi? = null,
+    val tasksSupported: Boolean = false,
+    val runningTasks: List<RemoteRunningTask> = emptyList(),
+    val agents: List<RemoteAgent> = emptyList(),
+    val agentPage: RemoteAgentPage? = null,
 )
 
 /** 草稿可选的角色，来自电脑。 */
 data class RemoteDraftUi(val personas: List<RemotePersona>, val personaId: String?)
+
+data class RemoteAgentPage(
+    val agentId: String,
+    val activities: List<RemoteAgentActivity> = emptyList(),
+    val hasEarlier: Boolean = false,
+    val loading: Boolean = true,
+)
 
 /**
  * 一个电脑上的对话。电脑是唯一事实来源：打开时取一份快照整体替换本地内容，之后按序号应用推送，
@@ -99,7 +111,7 @@ data class RemoteDraftUi(val personas: List<RemotePersona>, val personaId: Strin
  * 首条消息用 `create` 发出，电脑这时才建对话，之后与已有对话相同。见协议文档 §5.8。
  */
 class RemoteConversationViewModel(
-    private val service: DesktopRemoteService,
+    private val service: RemoteDesktopChannel,
     private val cache: DesktopSnapshotCache,
     private val files: RemoteAttachmentFiles,
     private val machineId: String,
@@ -126,6 +138,7 @@ class RemoteConversationViewModel(
     private var seq = -1L
     private var opened = false
     private var openJob: Job? = null
+    private val openingPushes = mutableListOf<DesktopPush>()
     private var saveJob: Job? = null
 
     /** 正在逐字放出的回答：消息 id → 进度。见 [trackReveal]。 */
@@ -135,6 +148,10 @@ class RemoteConversationViewModel(
     private val revealMapped = HashMap<String, Triple<JsonObject, Int, ChatMessage>>()
     /** 消息已发出、电脑的回答还没出现：先放一条生成中的占位，与聊天页发送后立刻出现的占位一致。 */
     private var awaitingReply: AwaitingReply? = null
+    private var agentWatch: Long? = null
+    private var agentJob: Job? = null
+    // 回复会唤醒另一个协程，紧随其后的推送可能先被收集到。
+    private val pendingAgentPushes = mutableListOf<JsonObject>()
 
     /**
      * 一条回答的放出进度（按 [DesktopStreamReveal] 的时间线计字）。
@@ -178,12 +195,15 @@ class RemoteConversationViewModel(
     init {
         service.acquire()
         viewModelScope.launch(dispatchers.io) { files.sweepStale() }
-        if (!drafting) cache.load(machineId, conversationId)?.let { snapshot ->
-            conversation = snapshot.conversation
-            raw += snapshot.messages.mapNotNull { it as? JsonObject }
-            publish { it.copy(cachedAtMs = snapshot.savedAtMs) }
-        }
         viewModelScope.launch {
+            if (!drafting) {
+                val snapshot = withContext(dispatchers.io) { cache.load(machineId, conversationId) }
+                if (snapshot != null && raw.isEmpty() && !opened) {
+                    conversation = snapshot.conversation
+                    raw += snapshot.messages.mapNotNull { it as? JsonObject }
+                    publish { it.copy(cachedAtMs = snapshot.savedAtMs) }
+                }
+            }
             combine(service.link, service.onlineMachines) { link, online -> link to (machineId in online) }
                 .distinctUntilChanged()
                 .collect { (link, online) ->
@@ -201,7 +221,11 @@ class RemoteConversationViewModel(
                         openOrDraft()
                     } else {
                         opened = false
-                        publish { it.copy(live = false, opening = false) }
+                        openingPushes.clear()
+                        agentJob?.cancel()
+                        agentWatch = null
+                        pendingAgentPushes.clear()
+                        publish { it.copy(live = false, opening = false, agentPage = it.agentPage?.copy(loading = false)) }
                     }
                 }
         }
@@ -238,7 +262,12 @@ class RemoteConversationViewModel(
 
     private fun open() {
         openJob?.cancel()
-        publish { it.copy(opening = true) }
+        opened = false
+        openingPushes.clear()
+        agentJob?.cancel()
+        agentWatch = null
+        pendingAgentPushes.clear()
+        publish { it.copy(live = false, opening = true) }
         openJob = viewModelScope.launch {
             try {
                 val data = service.request(machineId, "open", buildJsonObject {
@@ -256,6 +285,8 @@ class RemoteConversationViewModel(
                 syncReveals()
                 val approvals = (data["approvals"] as? JsonArray).orEmpty()
                     .mapNotNull { (it as? JsonObject)?.let(DesktopRemoteService::parseApproval) }
+                val tasks = data["tasks"] as? JsonObject
+                val receivedAt = monotonicMs()
                 publish {
                     it.copy(
                         live = true,
@@ -267,10 +298,22 @@ class RemoteConversationViewModel(
                         approvals = approvals,
                         unpaired = false,
                         notice = null,
+                        tasksSupported = tasks != null,
+                        runningTasks = RemoteTasks.parseRunning(tasks, receivedAt),
+                        agents = RemoteTasks.parseAgents(tasks, receivedAt),
+                        agentPage = it.agentPage.takeIf { tasks != null },
                     )
                 }
+                val pending = openingPushes.toList()
+                openingPushes.clear()
+                for (push in pending) {
+                    onPush(push)
+                    if (_state.value.opening) return@launch
+                }
+                _state.value.agentPage?.let { openAgent(it.agentId) }
                 scheduleSave()
             } catch (error: DesktopRemoteException) {
+                openingPushes.clear()
                 onOpenFailed(error)
             }
         }
@@ -309,6 +352,10 @@ class RemoteConversationViewModel(
     }
 
     private fun onPush(push: DesktopPush) {
+        if (!drafting && _state.value.opening) {
+            openingPushes += push
+            return
+        }
         if (!opened || push.seq <= seq) return
         if (push.seq != seq + 1) {
             // 漏了推送：不拼补，整体重取。
@@ -343,6 +390,19 @@ class RemoteConversationViewModel(
                 open()
                 return
             }
+            "tasks" -> {
+                val receivedAt = monotonicMs()
+                _state.value = _state.value.copy(
+                    runningTasks = RemoteTasks.parseRunning(push.data, receivedAt),
+                    agents = RemoteTasks.parseAgents(push.data, receivedAt),
+                )
+                return
+            }
+            "agent" -> {
+                if (_state.value.agentPage?.loading == true && agentWatch == null) pendingAgentPushes += push.data
+                else onAgentPush(push.data)
+                return
+            }
         }
         publish { it }
         scheduleSave()
@@ -351,6 +411,9 @@ class RemoteConversationViewModel(
     private fun upsert(message: JsonObject) {
         val id = message.string("id") ?: return
         val index = raw.indexOfFirst { it.string("id") == id }
+        if (index < 0 && _state.value.hasOlder && raw.isNotEmpty()
+            && (message.long("createdAtMs") ?: 0) < (raw.first().long("createdAtMs") ?: 0)
+        ) return
         if (index >= 0) raw[index] = message
         else {
             raw += message
@@ -717,6 +780,76 @@ class RemoteConversationViewModel(
         "${item.name} 超过 ${RemoteAttachmentFiles.MAX_BYTES / 1024 / 1024} MB，无法从手机发送"
 
     fun stop() = launchQuietly("stop", buildJsonObject { put("conversationId", conversationId) })
+
+    fun stopTask(taskId: String) {
+        if (!_state.value.live) return
+        viewModelScope.launch {
+            try {
+                service.request(machineId, "stop_task", buildJsonObject {
+                    put("conversationId", conversationId)
+                    put("taskId", taskId)
+                })
+            } catch (error: DesktopRemoteException) {
+                if (error.code != "resolved") publish { it.copy(notice = error.message) }
+            }
+        }
+    }
+
+    fun openAgent(agentId: String) {
+        if (!_state.value.tasksSupported) return
+        agentJob?.cancel()
+        agentWatch = null
+        pendingAgentPushes.clear()
+        val keep = _state.value.agentPage?.takeIf { it.agentId == agentId }
+        val live = _state.value.live
+        _state.value = _state.value.copy(agentPage = keep?.copy(loading = live) ?: RemoteAgentPage(agentId, loading = live))
+        if (!live) return
+        agentJob = viewModelScope.launch {
+            try {
+                val data = service.request(machineId, "agent_open", buildJsonObject {
+                    put("conversationId", conversationId)
+                    put("agentId", agentId)
+                })
+                if (_state.value.agentPage?.agentId != agentId) return@launch
+                agentWatch = data.long("watch")
+                val activities = (data["activities"] as? JsonArray).orEmpty()
+                    .mapNotNull { (it as? JsonObject)?.let(RemoteTasks::parseActivity) }
+                _state.value = _state.value.copy(
+                    agentPage = RemoteAgentPage(agentId, activities, data.bool("hasEarlier") == true, loading = false),
+                )
+                pendingAgentPushes.forEach(::onAgentPush)
+                pendingAgentPushes.clear()
+            } catch (error: DesktopRemoteException) {
+                if (_state.value.agentPage?.agentId != agentId) return@launch
+                if (error.code == "offline" || error.code == "disconnected") {
+                    _state.value = _state.value.copy(agentPage = _state.value.agentPage?.copy(loading = false))
+                } else {
+                    publish { it.copy(agentPage = null, notice = error.message) }
+                }
+                pendingAgentPushes.clear()
+            }
+        }
+    }
+
+    fun closeAgent() {
+        agentJob?.cancel()
+        agentWatch = null
+        pendingAgentPushes.clear()
+        if (_state.value.agentPage == null) return
+        _state.value = _state.value.copy(agentPage = null)
+        if (opened) service.requestQuietly(machineId, "agent_close", JsonObject(emptyMap()))
+    }
+
+    private fun onAgentPush(data: JsonObject) {
+        val watch = agentWatch ?: return
+        val page = _state.value.agentPage ?: return
+        if (data.long("watch") != watch || data.string("agentId") != page.agentId) return
+        val items = (data["items"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        _state.value = _state.value.copy(agentPage = page.copy(
+            activities = RemoteTasks.merge(if (data.bool("reset") == true) emptyList() else page.activities, items),
+            hasEarlier = data.bool("hasEarlier") ?: page.hasEarlier,
+        ))
+    }
 
     fun approve(requestId: String, decision: String) {
         viewModelScope.launch {

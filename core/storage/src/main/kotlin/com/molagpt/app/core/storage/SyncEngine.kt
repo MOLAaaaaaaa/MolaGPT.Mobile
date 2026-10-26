@@ -83,10 +83,7 @@ class SyncEngine(
         val detail = syncApi.fetchConversation(jwt, convId) ?: return@withContext false
         val msgsArr = (detail["conversation"] as? JsonObject)?.get("messages") as? JsonArray
             ?: return@withContext false
-        messageDao.deleteBySession(sessionId)
-        msgsArr.forEachIndexed { index, mEl ->
-            (mEl as? JsonObject)?.let { messageDao.upsert(SyncMapper.jsonToMessage(sessionId, it, index)) }
-        }
+        messageDao.replaceAll(sessionId, SyncMapper.jsonToMessages(sessionId, msgsArr))
         conversationDao.markLoaded(sessionId)
         true
     }

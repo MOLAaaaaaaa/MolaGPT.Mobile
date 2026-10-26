@@ -836,7 +836,11 @@ internal fun List<ChatMessage>.toMessageRows(
                 // 正文 markdown 的所有 block 合并进单个 row，外层套 SelectionContainer：
                 // 这样跨段落可连选（长按拖拽 → 系统复制 toolbar）。拆成多行（每 block 一个 LazyColumn
                 // item）会让 SelectionContainer 止于单 block，无法跨段选择。
-                val blocks = RenderCache.blocks(fragment.markdown)
+                val blocks = if (streamingTail) {
+                    RenderCache.streamingBlocks("${message.messageId}/${fragment.id}", fragment.markdown)
+                } else {
+                    RenderCache.blocks(fragment.markdown)
+                }
                 // 尾部渐隐只给「流式中消息的最后一个片段」——中间片段已定稿，跟着虚会显得没写完。
                 addMessageRow { top ->
                     MessageListRow.AssistantText(
