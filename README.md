@@ -7,16 +7,19 @@
   ·
   <a href="https://github.com/MOLAaaaaaaa/MolaGPT.Mobile/releases">下载</a>
   ·
-  <a href="https://github.com/MOLAaaaaaaa/MolaGPT.Desktop">MolaGPT Mobile</a>
-  ·
-  <a href="./LICENSE">License</a>
+  <a href="https://github.com/MOLAaaaaaaa/MolaGPT.Desktop">MolaGPT Desktop</a>
 </p>
 
-MolaGPT Mobile 是 [MolaGPT](https://chatgpt.wljay.cn/v2) 的原生 Android 客户端，使用 Kotlin 与 Jetpack Compose 构建。除了连接 MolaGPT 账户，也支持接入 OpenAI 兼容、OpenAI Responses、Anthropic 和 Gemini 等自定义模型服务，并在移动端管理对话、工具、记忆、角色、世界书和图像工作台，还可以远程接管桌面端 Agent 会话。
+MolaGPT Mobile 是 [MolaGPT](https://chatgpt.wljay.cn/v2) 的原生 Android 客户端，使用 Kotlin 与 Jetpack Compose 构建。除了连接 MolaGPT 账户，也支持接入 OpenAI 兼容、OpenAI Responses、Anthropic 和 Gemini 等自定义模型服务，并在移动端管理对话、工具、记忆、角色、世界书和图像工作台，还可以远程继续桌面端对话和控制 Agent 会话。
+
+从 [Releases](https://github.com/MOLAaaaaaaa/MolaGPT.Mobile/releases) 下载，支持 Android 6.0 及以上的 arm64 设备。
 
 ## 截图
 
 <table>
+  <tr>
+    <td align="center"><img src="screenshots/main.png" width="200" alt="主界面"><br><sub>主界面</sub></td>
+  </tr>
   <tr>
     <td align="center"><img src="screenshots/chat.png" width="200" alt="公式与代码渲染"><br><sub>公式与代码渲染</sub></td>
     <td align="center"><img src="screenshots/web-search.png" width="200" alt="联网搜索与来源角标"><br><sub>联网搜索与来源角标</sub></td>
@@ -61,6 +64,7 @@ MolaGPT Mobile 是 [MolaGPT](https://chatgpt.wljay.cn/v2) 的原生 Android 客�
 - 支持 DuckDuckGo、Tavily、Exa 联网搜索服务，以及远程 MCP 服务器，并按工具启用或停用。
 - 支持视觉模型代理：文本模型不具备视觉能力时，可交由指定视觉模型理解图片。
 - 支持图像生成工具，让兼容工具调用的 BYOK 模型使用独立图像服务。
+- 支持导入和管理 Agent Skills，模型可以按需读取技能说明。
 
 ### 记忆与回答处理
 
@@ -86,14 +90,15 @@ MolaGPT Mobile 是 [MolaGPT](https://chatgpt.wljay.cn/v2) 的原生 Android 客�
 - 支持画图历史、本地结果保存、再次生成、基于结果继续修改及 Base64 图片解析。
 - 支持尺寸、质量、输出格式、图片数量、压缩率等模型相关参数。
 
-### Agent 控制
+### 远程控制
 
-- 在手机上查看并接管桌面端 Agent 会话，会话按电脑和项目分组，状态实时同步。
-- 可远程发送消息、停止任务、新建会话，并切换模型、推理强度和权限模式。
-- 桌面端的权限请求会推送到手机，可批准一次、本会话批准或拒绝。
-- 终端命令、文件改动、搜索和子代理等过程以工具卡片展示。
-- 等待审批、任务完成或失败时发送通知；桌面端离线时，未完成的会话会被及时标记。
-- 需要登录 MolaGPT 账户，并在桌面端启用 Agent 桥接。
+- 在手机上继续桌面端 MolaGPT Work 和 BYOK 对话，查看历史与实时回答、新建会话、发送文字和附件或停止回答。
+- 可切换模型、联网、推理强度和审批模式，在手机上处理桌面端的工具审批。
+- 查看后台任务和子 Agent 活动，停止后台任务；任务完成、失败或等待审批时可以收到通知。
+- 同一 MolaGPT 账号可以直接配对电脑；也可以使用桌面端的配对码并核对校验码，无需登录账号。
+- 开启桌面端的 Agent 桥接后，还可以在手机上查看和控制 Claude Code 与 Codex 会话，查看工具调用及审批请求。
+
+<img src="screenshots/remote-control.png" width="400" alt="远程控制入口">
 
 ## 项目结构
 
