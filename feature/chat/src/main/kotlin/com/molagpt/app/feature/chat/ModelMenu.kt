@@ -127,7 +127,7 @@ fun DesktopTargetMenuItem(target: DesktopRunTarget, onClick: () -> Unit) {
                 Text(
                     when {
                         !target.online -> "离线"
-                        !target.paired -> "在线 · 点开后配对"
+                        !target.paired -> "在线（未配对）"
                         else -> "在线"
                     },
                     style = MaterialTheme.typography.labelSmall,

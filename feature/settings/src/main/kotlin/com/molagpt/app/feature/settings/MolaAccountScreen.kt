@@ -262,9 +262,9 @@ private fun AccountHero(
             )
             Text(
                 text = when {
-                    registered -> "注册用户 · 已解锁更多模型"
-                    loggedIn -> "已登录"
-                    else -> "登录后可跨设备同步、解锁更多模型"
+                    registered -> "已登录账号"
+                    loggedIn -> "已登录账号"
+                    else -> "登录后可享跨设备同步、解锁更多模型等特性"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -12,7 +12,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.padding
@@ -47,6 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -97,12 +101,17 @@ fun SettingsScreen(
             )
         },
     ) { inner ->
+        val layoutDirection = LocalLayoutDirection.current
+        // 顶栏与手势条的留白都放进 contentPadding：视口铺满整屏，内容才能滚到玻璃顶栏下面、
+        // 小白条区域保持沉浸；这里若改成 Modifier.padding(inner)/navigationBarsPadding 会把视口削掉。
         LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .navigationBarsPadding(),
-            contentPadding = PaddingValues(16.dp),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = inner.calculateStartPadding(layoutDirection) + 16.dp,
+                end = inner.calculateEndPadding(layoutDirection) + 16.dp,
+                top = inner.calculateTopPadding() + 16.dp,
+                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 16.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             // 账户入口置顶但只占一行：位置保留（Agent 控制硬依赖登录，入口要好找），

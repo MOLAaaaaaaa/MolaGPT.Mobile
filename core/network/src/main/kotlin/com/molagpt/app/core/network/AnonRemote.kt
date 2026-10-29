@@ -468,7 +468,7 @@ class AnonRemoteService(
             }
         }
         if (!response.isSuccessful) {
-            throw AnonRemoteException(parsed?.optString("code") ?: "http_${response.code}", parsed?.optString("message") ?: "服务不可用")
+            throw AnonRemoteException(parsed?.optString("code") ?: "http_${response.code}", parsed?.optString("message") ?: "服务不可用或配对码无效")
         }
         return parsed ?: throw AnonRemoteException("bad_reply", "服务响应无效")
     }
