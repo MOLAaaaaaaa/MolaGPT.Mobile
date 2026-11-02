@@ -19,6 +19,7 @@ import com.molagpt.app.feature.session.SessionViewModel
 import com.molagpt.app.feature.settings.ByokMemoryViewModel
 import com.molagpt.app.feature.settings.PersonalizationViewModel
 import com.molagpt.app.feature.settings.SettingsViewModel
+import kotlinx.coroutines.flow.map
 
 /** 简单 ViewModel 工厂集合（手动 DI；按需把容器依赖喂给各 VM）。 */
 object ViewModelFactories {
@@ -92,6 +93,7 @@ object ViewModelFactories {
             mcpToolListApi = container.mcpToolListApi,
             credentialStore = container.credentialStore,
             dispatchers = container.dispatchers,
+            molaLoginState = container.authService.account.map { it.loggedIn },
         )
     }
 

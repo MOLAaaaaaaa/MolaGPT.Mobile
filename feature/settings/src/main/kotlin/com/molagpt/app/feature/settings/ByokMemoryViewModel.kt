@@ -189,7 +189,7 @@ class ByokMemoryViewModel(
                     r.written > 0 -> "已更新 ${r.written} 条记忆"
                     r.pending > 0 -> "${r.pending} 条待确认"
                     r.examined == 0 && r.disabled > 0 -> "记忆功能已关闭"
-                    r.examined == 0 -> "暂无新内容"
+                    r.examined == 0 -> "暂无可整理内容"
                     else -> "已检查 ${r.examined} 段内容，未发现新记忆"
                 }
                 head

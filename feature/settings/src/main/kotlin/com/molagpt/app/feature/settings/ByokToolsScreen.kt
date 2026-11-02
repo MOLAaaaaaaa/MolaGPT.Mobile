@@ -76,6 +76,7 @@ fun ByokToolsScreen(
     modifier: Modifier = Modifier,
 ) {
     val s by viewModel.settings.collectAsStateWithLifecycle()
+    val signedIn by viewModel.molaSignedIn.collectAsStateWithLifecycle()
     val visionOptions by viewModel.visionModelOptions.collectAsStateWithLifecycle()
     val imageGenOptions by viewModel.imageGenModelOptions.collectAsStateWithLifecycle()
     val titleOptions by viewModel.titleModelOptions.collectAsStateWithLifecycle()
@@ -116,7 +117,7 @@ fun ByokToolsScreen(
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
             ) {
                 Text(
-                    "以下工具仅对自定义模型生效。",
+                    "适用于自定义模型。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.86f),
                     modifier = Modifier.padding(14.dp),
@@ -126,6 +127,7 @@ fun ByokToolsScreen(
             SearchServiceCard(
                 provider = s.webSearchProvider,
                 maxResults = s.webSearchMaxResults,
+                signedIn = signedIn,
                 loadKey = viewModel::webSearchApiKey,
                 onSave = viewModel::setWebSearch,
             )
@@ -192,6 +194,7 @@ fun ByokToolsScreen(
 private fun SearchServiceCard(
     provider: String,
     maxResults: Int,
+    signedIn: Boolean,
     loadKey: (String) -> String,
     onSave: (provider: String, apiKey: String, maxResults: Int) -> Unit,
 ) {
@@ -207,8 +210,18 @@ private fun SearchServiceCard(
         searchKey != savedKey ||
         searchMax.toIntOrNull() != maxResults
     val selected = WebSearchProvider.fromId(searchProvider)
+    LaunchedEffect(signedIn, provider) {
+        if (!signedIn && WebSearchProvider.fromId(searchProvider) == WebSearchProvider.MOLAGPT) {
+            val saved = WebSearchProvider.fromId(provider)
+            val fallback = if (saved == WebSearchProvider.MOLAGPT) WebSearchProvider.DUCKDUCKGO else saved
+            searchProvider = fallback.id
+            searchKey = loadKey(fallback.id)
+            searchMax = maxResults.coerceIn(1, fallback.maxResultsLimit).toString()
+            expanded = false
+        }
+    }
 
-    SectionTitle("联网搜索服务")
+    SectionTitle("联网搜索")
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -216,10 +229,10 @@ private fun SearchServiceCard(
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             // 当前服务商：点击展开 DropdownMenu（popup，不挤压下方字段）。
-            Text("当前服务商", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("服务商", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Box {
                 OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text(selected.displayName, modifier = Modifier.weight(1f))
+                    Text(selected.displayName, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("▾", style = MaterialTheme.typography.labelSmall)
                 }
                 androidx.compose.material3.DropdownMenu(
@@ -227,16 +240,27 @@ private fun SearchServiceCard(
                 ) {
                     WebSearchProvider.entries.forEach { p ->
                         DropdownMenuItem(
-                            text = { Text(p.displayName) },
+                            text = { Text(p.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            enabled = p != WebSearchProvider.MOLAGPT || signedIn,
                             onClick = {
                                 searchProvider = p.id
                                 searchKey = loadKey(p.id)
+                                searchMax = (searchMax.toIntOrNull() ?: 6).coerceIn(1, p.maxResultsLimit).toString()
                                 expanded = false
                             },
                         )
                     }
                 }
             }
+            Text(
+                when (selected) {
+                    WebSearchProvider.MOLAGPT -> "MolaGPT 提供的开箱即用的搜索服务，登录后可用。无需 API Key，将使用少量账户额度。"
+                    WebSearchProvider.DUCKDUCKGO -> "免费使用，无需 API Key。"
+                    else -> "使用自备 API Key。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (selected.needsKey) {
                 OutlinedTextField(value = searchKey, onValueChange = { searchKey = it },
                     label = { Text("${selected.displayName} API Key") },
@@ -255,12 +279,12 @@ private fun SearchServiceCard(
                 }
             }
             OutlinedTextField(value = searchMax, onValueChange = { v -> searchMax = v.filter { it.isDigit() }.take(2) },
-                label = { Text("结果数 (1-10)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                label = { Text("查询结果上限 (1-${selected.maxResultsLimit})") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             if (isDirty) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = {
-                        onSave(searchProvider, searchKey, searchMax.toIntOrNull()?.coerceIn(1, 10) ?: 6)
-                    }) { Text("保存搜索") }
+                    TextButton(enabled = selected != WebSearchProvider.MOLAGPT || signedIn, onClick = {
+                        onSave(searchProvider, searchKey, searchMax.toIntOrNull()?.coerceIn(1, selected.maxResultsLimit) ?: 6)
+                    }) { Text("保存") }
                 }
             }
         }

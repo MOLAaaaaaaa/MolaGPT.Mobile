@@ -8,6 +8,7 @@ sealed interface DeltaCommand {
     data class AppendText(val chunk: String) : DeltaCommand
     data class AppendThinking(val chunk: String) : DeltaCommand
     data class UpsertTool(val tool: MessageFragment.ToolCall) : DeltaCommand
+    data class UpdateSubagents(val frame: kotlinx.serialization.json.JsonObject) : DeltaCommand
     data class SetSources(val refs: List<SourceReference>, val query: String? = null) : DeltaCommand
     data class SetPending(val label: String, val detail: String?) : DeltaCommand
     data class AddImage(val url: String, val prompt: String?) : DeltaCommand

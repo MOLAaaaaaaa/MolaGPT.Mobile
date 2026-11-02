@@ -27,4 +27,5 @@ data class RetryAttempt(
     val costModel: String? = null,
     val pricingSource: String? = null,
     val pricingMissing: Boolean = false,
+    val subagents: String? = null,
 )

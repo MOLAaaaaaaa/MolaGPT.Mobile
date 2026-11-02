@@ -2,6 +2,7 @@ package com.molagpt.app.core.storage
 
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatMessageMetadataKeys
+import com.molagpt.app.core.model.ServerSubagents
 import com.molagpt.app.core.model.RetryAttempt
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -42,9 +43,11 @@ object RetryAttempts {
         costModel = message.metadata[ChatMessageMetadataKeys.COST_MODEL],
         pricingSource = message.metadata[ChatMessageMetadataKeys.PRICING_SOURCE],
         pricingMissing = message.metadata[ChatMessageMetadataKeys.PRICING_MISSING] == "true",
+        subagents = message.metadata[ServerSubagents.KEY],
     )
 
     fun statsMetadata(attempt: RetryAttempt): Map<String, String> = buildMap {
+        attempt.subagents?.let { put(ServerSubagents.KEY, it) }
         attempt.promptTokens?.let { put(ChatMessageMetadataKeys.PROMPT_TOKENS, it.toString()) }
         attempt.completionTokens?.let { put(ChatMessageMetadataKeys.COMPLETION_TOKENS, it.toString()) }
         attempt.cachedTokens?.let { put(ChatMessageMetadataKeys.CACHED_TOKENS, it.toString()) }
@@ -60,6 +63,7 @@ object RetryAttempts {
     }
 
     val statsKeys = setOf(
+        ServerSubagents.KEY,
         ChatMessageMetadataKeys.PROMPT_TOKENS,
         ChatMessageMetadataKeys.COMPLETION_TOKENS,
         ChatMessageMetadataKeys.CACHED_TOKENS,

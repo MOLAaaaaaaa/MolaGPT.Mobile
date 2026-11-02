@@ -2,6 +2,7 @@ package com.molagpt.app.core.network
 
 import com.molagpt.app.core.model.AccountStatus
 import com.molagpt.app.core.model.CreditsInfo
+import com.molagpt.app.core.model.WebSearchUsage
 import com.molagpt.app.core.model.QuotaItem
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -129,6 +130,14 @@ private fun JsonObject.toCreditsInfo(): CreditsInfo? {
         byModelTokens = (this["by_model_tokens"] as? JsonObject)?.mapNotNull { (mid, v) ->
             v.prim()?.intOrNull?.let { mid to it }
         }?.toMap(),
+        webSearch = (this["web_search"] as? JsonObject)?.let { ws ->
+            val name = ws["name"]?.prim()?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@let null
+            WebSearchUsage(
+                name = name,
+                calls = ws["calls"]?.prim()?.intOrNull ?: 0,
+                uses = ws["uses"]?.prim()?.intOrNull,
+            )
+        },
     )
 }
 

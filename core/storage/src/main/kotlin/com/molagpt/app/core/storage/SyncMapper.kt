@@ -2,6 +2,7 @@ package com.molagpt.app.core.storage
 
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.Attachment
+import com.molagpt.app.core.model.ServerSubagents
 import com.molagpt.app.core.model.MessageFragment
 import com.molagpt.app.core.model.MessageStatus
 import com.molagpt.app.core.model.RetryAttempt
@@ -21,6 +22,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.text.SimpleDateFormat
@@ -59,6 +61,7 @@ object SyncMapper {
         META_ATTACHMENTS,
         META_EDIT_SNAPSHOTS,
         "sources",
+        "subagents",
         "retry",
         "response_stats",
         "thinking",
@@ -133,6 +136,9 @@ object SyncMapper {
         if (!isUser && sources.isNotEmpty()) {
             metaFields["sources"] = sourcesToJson(sources)
         }
+        meta[ServerSubagents.KEY]?.let {
+            metaFields["subagents"] = ServerSubagents.finish(syncJson.parseToJsonElement(it).jsonObject)
+        }
         // 重试版本：本地 RetryAttempt 列表 → Web 的 meta.retry（此前只读不写，换端即丢）。
         if (!isUser) {
             retryToJson(meta)?.let { metaFields["retry"] = it }
@@ -158,6 +164,7 @@ object SyncMapper {
                                 put("content", webTimelineContent(a.fragments, a.rawText))
                                 a.model?.let { put("model", it) }
                                 a.modelDisplayName?.let { put("model_label", it) }
+                                a.subagents?.let { put("subagents", syncJson.parseToJsonElement(it)) }
                             },
                         )
                     }
@@ -260,6 +267,9 @@ object SyncMapper {
             (metaObj?.get(META_EDIT_SNAPSHOTS) as? JsonObject)?.let {
                 put(META_EDIT_SNAPSHOTS, it.toString())
             }
+            (metaObj?.get("subagents") as? JsonObject)?.let {
+                put(ServerSubagents.KEY, ServerSubagents.finish(it).toString())
+            }
             encodeCloudExtra(metaObj)?.let { put(META_CLOUD_EXTRA, it) }
             model?.let { put("modelDisplayName", it) }
             if (role == Role.USER && content != contentForDisplay && (!displayContent.isNullOrBlank() || contentHasHiddenContext)) {
@@ -278,7 +288,9 @@ object SyncMapper {
             status = MessageStatus.COMPLETE.name,
             createdAt = createdAt,
             updatedAt = createdAt,
-            fragmentsJson = MessageJson.encodeFragments(normalized.fragments),
+            fragmentsJson = MessageJson.encodeFragments(normalized.fragments.map {
+                if (it is MessageFragment.ToolCall) ServerSubagents.tool(it, ServerSubagents.read(meta)) else it
+            }),
             rawText = normalized.rawText,
             model = model,
             metadataJson = MessageJson.encodeMeta(meta),
@@ -488,6 +500,14 @@ object SyncMapper {
         tools: MutableList<MessageFragment.ToolCall>,
         queries: MutableList<String>,
     ) {
+        val batch = Regex("""data-subagent-batch="([^"]+)"""").find(unit)?.groupValues?.get(1)
+        if (batch != null) {
+            tools.add(MessageFragment.ToolCall(
+                id = "tool_subagents_$batch", name = "server_subagents", status = ToolStatus.SUCCESS,
+                label = "子代理任务", agentId = "server:$batch",
+            ))
+            return
+        }
         if (containsIgnoreCase(unit, "tool-search-blockquote")) {
             val query = extractSearchChips(unit).joinToString(" / ").also {
                 if (it.isNotBlank()) queries.add(it)
@@ -717,10 +737,14 @@ object SyncMapper {
                         role = Role.ASSISTANT,
                     )
                     RetryAttempt(
-                        fragments = normalized.fragments,
+                        fragments = normalized.fragments.map {
+                            if (it is MessageFragment.ToolCall) ServerSubagents.tool(it,
+                                (item["subagents"] as? JsonObject)?.let(ServerSubagents::finish) ?: JsonObject(emptyMap())) else it
+                        },
                         rawText = normalized.rawText,
                         model = item["model"]?.jsonPrimitive?.contentOrNull,
                         modelDisplayName = item["model_label"]?.jsonPrimitive?.contentOrNull,
+                        subagents = (item["subagents"] as? JsonObject)?.let { ServerSubagents.finish(it).toString() },
                         status = MessageStatus.COMPLETE.name,
                     )
                 }
@@ -987,6 +1011,10 @@ object SyncMapper {
     }
 
     private fun webToolMarkup(tool: MessageFragment.ToolCall): String {
+        if (tool.agentId?.startsWith("server:") == true) {
+            val batch = escapeHtml(tool.agentId!!.removePrefix("server:"))
+            return "\n\n<blockquote class=\"tool-status tool-subagent-blockquote\" data-subagent-batch=\"$batch\"><p>子代理任务</p></blockquote>\n\n"
+        }
         val phase = when (tool.status) {
             ToolStatus.SUCCESS -> "completed"
             ToolStatus.FAILED -> "error"

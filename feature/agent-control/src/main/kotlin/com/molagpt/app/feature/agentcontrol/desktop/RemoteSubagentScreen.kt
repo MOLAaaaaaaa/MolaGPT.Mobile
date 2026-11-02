@@ -59,49 +59,11 @@ import com.molagpt.app.feature.chat.topBarOverlap
 
 @Composable
 internal fun RemoteAgentRow(agent: RemoteAgent, now: Long, onClick: () -> Unit) {
-    val cs = MaterialTheme.colorScheme
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(cs.surfaceVariant.copy(alpha = 0.42f))
-            .clickable(onClick = onClick)
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (agent.isRunning) {
-                CircularProgressIndicator(strokeWidth = 1.5.dp, modifier = Modifier.size(12.dp))
-                Spacer(Modifier.width(8.dp))
-            }
-            Text(
-                agent.label,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                RemoteTasks.statusText(agent.status),
-                style = MaterialTheme.typography.labelMedium,
-                color = if (agent.status == "failed") cs.error else cs.onSurfaceVariant,
-            )
-        }
-        Text(
-            agentSubtitle(agent, now),
-            style = MaterialTheme.typography.labelSmall,
-            color = cs.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        agent.currentAction?.takeIf { it.isNotBlank() }?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        agent.failure?.takeIf { it.isNotBlank() }?.let {
-            Text(it, style = MaterialTheme.typography.bodySmall, color = cs.error, maxLines = 2, overflow = TextOverflow.Ellipsis)
-        }
-    }
+    com.molagpt.app.core.render.SubagentTaskRow(
+        title = agent.label, status = RemoteTasks.statusText(agent.status), running = agent.isRunning,
+        failed = agent.status == "failed", subtitle = agentSubtitle(agent, now),
+        action = agent.currentAction, failure = agent.failure, onClick = onClick,
+    )
 }
 
 private fun agentSubtitle(agent: RemoteAgent, now: Long): String {

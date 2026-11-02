@@ -24,6 +24,7 @@ import com.molagpt.app.core.storage.SettingsStore
 import com.molagpt.app.core.storage.SyncEngine
 import com.molagpt.app.core.storage.TracksToggle
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -46,6 +47,7 @@ class SettingsViewModel(
     private val mcpToolListApi: McpToolListApi,
     private val credentialStore: CredentialStore,
     private val dispatchers: DispatcherProvider,
+    molaLoginState: Flow<Boolean>,
 ) : ViewModel() {
 
     private val _syncing = MutableStateFlow(false)
@@ -53,6 +55,9 @@ class SettingsViewModel(
 
     val settings: StateFlow<AppSettings> =
         store.settings.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
+    val molaSignedIn: StateFlow<Boolean> = molaLoginState.stateIn(
+        viewModelScope, SharingStarted.Eagerly, !credentialStore.jwt.isNullOrBlank(),
+    )
 
     // 配额状态直接转发容器级缓存：导航返回不再重拉，仅显式刷新/登录态变化才打网络。
     val status: StateFlow<AccountStatus?> = accountStatus.status

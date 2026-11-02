@@ -14,6 +14,7 @@ import com.molagpt.app.core.model.ByokMcpServer
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.ResponseRegexRule
 import com.molagpt.app.core.model.ResponseRegexRules
+import com.molagpt.app.core.model.WebSearchProvider
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -48,8 +49,8 @@ data class AppSettings(
     val toolCode: Boolean = true,
     val byokMcpServers: List<ByokMcpServer> = emptyList(),
     val disabledSkillIds: Set<String> = emptySet(),
-    /** 联网搜索服务商 id（duckduckgo/tavily/exa）；key 单独经 CredentialStore 加密存储。 */
-    val webSearchProvider: String = "duckduckgo",
+    /** 联网搜索服务商 id（molagpt/duckduckgo/tavily/exa）；key 单独经 CredentialStore 加密存储。 */
+    val webSearchProvider: String = "molagpt",
     /** 联网搜索结果数量上限（1..10）。 */
     val webSearchMaxResults: Int = 6,
     /** 外挂视觉：当前模型不支持视觉时，代理到此视觉模型。 */
@@ -162,8 +163,9 @@ class SettingsStore(private val context: Context) {
             toolCode = p[Keys.TOOL_CODE] ?: true,
             byokMcpServers = decodeMcpServers(p[Keys.BYOK_MCP_SERVERS]),
             disabledSkillIds = p[Keys.DISABLED_SKILL_IDS] ?: emptySet(),
-            webSearchProvider = p[Keys.WEB_SEARCH_PROVIDER] ?: "duckduckgo",
-            webSearchMaxResults = (p[Keys.WEB_SEARCH_MAX_RESULTS] ?: 6L).toInt(),
+            webSearchProvider = p[Keys.WEB_SEARCH_PROVIDER] ?: "molagpt",
+            webSearchMaxResults = (p[Keys.WEB_SEARCH_MAX_RESULTS] ?: 6L).toInt()
+                .coerceIn(1, WebSearchProvider.fromId(p[Keys.WEB_SEARCH_PROVIDER]).maxResultsLimit),
             visionProxyEnabled = p[Keys.VISION_PROXY_ENABLED] ?: false,
             visionProxyModelKey = p[Keys.VISION_PROXY_MODEL_KEY],
             imageGenEnabled = p[Keys.IMAGE_GEN_ENABLED] ?: false,
@@ -236,7 +238,14 @@ class SettingsStore(private val context: Context) {
         it[Keys.BYOK_MCP_SERVERS] = json.encodeToString(servers)
     }
     suspend fun setWebSearchProvider(provider: String) = edit { it[Keys.WEB_SEARCH_PROVIDER] = provider }
-    suspend fun setWebSearchMaxResults(max: Int) = edit { it[Keys.WEB_SEARCH_MAX_RESULTS] = max.coerceIn(1, 10).toLong() }
+    suspend fun resetAccountSearchProvider() = edit {
+        if (WebSearchProvider.fromId(it[Keys.WEB_SEARCH_PROVIDER]) == WebSearchProvider.MOLAGPT) {
+            it[Keys.WEB_SEARCH_PROVIDER] = WebSearchProvider.DUCKDUCKGO.id
+        }
+    }
+    suspend fun setWebSearchMaxResults(max: Int) = edit {
+        it[Keys.WEB_SEARCH_MAX_RESULTS] = max.coerceIn(1, WebSearchProvider.fromId(it[Keys.WEB_SEARCH_PROVIDER]).maxResultsLimit).toLong()
+    }
     suspend fun setVisionProxy(enabled: Boolean, modelKey: String?) = edit {
         it[Keys.VISION_PROXY_ENABLED] = enabled
         if (modelKey.isNullOrBlank()) it.remove(Keys.VISION_PROXY_MODEL_KEY) else it[Keys.VISION_PROXY_MODEL_KEY] = modelKey

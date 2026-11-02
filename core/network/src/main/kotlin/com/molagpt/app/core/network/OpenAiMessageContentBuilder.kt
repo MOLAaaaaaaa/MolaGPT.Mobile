@@ -26,6 +26,7 @@ object OpenAiMessageContentBuilder {
         includeFileParts: Boolean = false,
         replaceImagesWithText: Boolean = false,
         imageOrdinal: AtomicInteger = AtomicInteger(0),
+        includeSubagents: Boolean = false,
     ): WireMessage {
         val role = when (message.role) {
             Role.USER -> "user"
@@ -33,7 +34,7 @@ object OpenAiMessageContentBuilder {
             Role.SYSTEM -> "system"
             Role.TOOL -> "tool"
         }
-        val text = message.plainText()
+        val text = message.plainText() + if (includeSubagents) com.molagpt.app.core.model.ServerSubagents.history(message.metadata) else ""
         val images = AttachmentParts.orderedImages(message)
         val omitted = AttachmentParts.imagesAsText(message)
         // OpenAI 的 file_data 只接受 data URL，远程 URL 形态的 PDF 在这里发不出去。

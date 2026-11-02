@@ -20,15 +20,20 @@ fun byokMcpServerTokenKey(id: String): String = "byok.mcp_server.token:$id"
 
 fun ByokMcpServer.withoutToken(): ByokMcpServer = copy(token = null)
 
-/** 联网搜索服务商。DuckDuckGo 免 key（HTML 抓取），Tavily/Exa 走 JSON API 需 key。 */
-enum class WebSearchProvider(val id: String, val displayName: String, val needsKey: Boolean) {
-    DUCKDUCKGO("duckduckgo", "DuckDuckGo（免费）", false),
+/**
+ * 联网搜索服务商。MolaGPT Web Search 登录账号即可用，不需要 key，按账号周期额度计费；
+ * DuckDuckGo 免 key（HTML 抓取），Tavily/Exa 走 JSON API 需 key。
+ */
+enum class WebSearchProvider(val id: String, val displayName: String, val needsKey: Boolean, val maxResultsLimit: Int = 10) {
+    MOLAGPT("molagpt", "MolaGPT Web Search", false, maxResultsLimit = 6),
+    DUCKDUCKGO("duckduckgo", "DuckDuckGo", false),
     TAVILY("tavily", "Tavily", true),
     EXA("exa", "Exa", true);
 
     companion object {
+        /** 未设置时用内置搜索；已下线的 id 才退回不需要任何配置的 DuckDuckGo。 */
         fun fromId(id: String?): WebSearchProvider =
-            entries.firstOrNull { it.id == id } ?: DUCKDUCKGO
+            if (id.isNullOrBlank()) MOLAGPT else entries.firstOrNull { it.id == id } ?: DUCKDUCKGO
     }
 }
 
@@ -37,7 +42,9 @@ fun webSearchApiKeyKey(provider: String): String = "byok.web_search.api_key:$pro
 
 /** 运行时联网搜索配置（解密后），由 AppContainer 注入给 ByokChatService。 */
 data class WebSearchOptions(
-    val provider: WebSearchProvider = WebSearchProvider.DUCKDUCKGO,
+    val provider: WebSearchProvider = WebSearchProvider.MOLAGPT,
     val apiKey: String? = null,
     val maxResults: Int = 6,
+    /** 仅 [WebSearchProvider.MOLAGPT] 使用：当前登录账号的长 JWT；未登录为 null。 */
+    val molaJwt: String? = null,
 )

@@ -11,6 +11,7 @@ internal sealed interface WebToolArtifact {
         val label: String,
         val preview: String? = null,
         val provider: String? = null,
+        val agentId: String? = null,
     ) : WebToolArtifact
 }
 
@@ -171,6 +172,11 @@ internal class WebToolArtifactSplitter {
         }.minByOrNull { it.index }
 
     private fun parseToolStatus(raw: String): WebToolArtifact.Tool {
+        val batch = Regex("""data-subagent-batch="([^"]+)"""").find(raw)?.groupValues?.get(1)
+        if (batch != null) return WebToolArtifact.Tool(
+            id = "subagents_$batch", name = "server_subagents", status = ToolStatus.RUNNING,
+            label = "子代理任务", agentId = "server:$batch",
+        )
         val classes = raw.substringBefore('>').lowercase()
         val label = stripHtml(raw).ifBlank { "工具调用中" }
         val status = when {

@@ -51,7 +51,7 @@ class ByokMemoryConsolidator(
         val examined: Int = 0,
         /** 请求失败或读不懂模型回答的会话数。 */
         val failed: Int = 0,
-        /** 记忆开关关着而跳过的会话数。 */
+        /** 因记忆总开关关闭而跳过的会话数。 */
         val disabled: Int = 0,
         val organized: Int = 0,
     ) {
@@ -154,12 +154,12 @@ class ByokMemoryConsolidator(
         if (conversation.providerKind != ProviderKind.BYOK) return Step(Result(), advanced = false)
         conversation.personaId?.let { personaId ->
             val persona = personaRepository.get(personaId)
-                ?: return Step(Result(disabled = 1), advanced = false)
-            if (persona.isRolePlay) return Step(Result(disabled = 1), advanced = false)
+                ?: return Step(Result(), advanced = false)
+            if (persona.isRolePlay) return Step(Result(), advanced = false)
         }
         // 只有显式关掉这个会话的记忆才不学。会话级覆盖为 null 时跟随的是自动学习开关本身，
         // 不是「记忆注入」——三项子功能现在是平级的，注入关着不代表不该继续攒记忆。
-        if (conversation.byokMemoryEnabled == false) return Step(Result(disabled = 1), advanced = false)
+        if (conversation.byokMemoryEnabled == false) return Step(Result(), advanced = false)
 
         val target = resolveModel(settings.byokMemoryModelKey)
             ?: return Step(Result(), advanced = false)

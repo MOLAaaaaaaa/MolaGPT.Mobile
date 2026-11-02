@@ -83,6 +83,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -281,7 +282,11 @@ class AppContainer(
                 provider = provider,
                 apiKey = credentialStore.loadSecret(webSearchApiKeyKey(provider.id)),
                 maxResults = currentSettings.webSearchMaxResults,
+                molaJwt = if (provider == WebSearchProvider.MOLAGPT) credentialStore.jwt else null,
             )
+        },
+        onMolaLoginInvalidated = { failedJwt ->
+            if (credentialStore.jwt == failedJwt) authService.logout()
         },
         imageProviderResolver = {
             byokProviderRepository.list().firstOrNull { it.enabled && it.purpose == ByokPurpose.IMAGE }
@@ -739,6 +744,13 @@ class AppContainer(
 
         applicationScope.launch {
             authService.account.collect { desktopRemoteService.reconnectNow() }
+        }
+        applicationScope.launch {
+            combine(authService.account, settingsFlow.filterNotNull()) { account, settings ->
+                !account.loggedIn && WebSearchProvider.fromId(settings.webSearchProvider) == WebSearchProvider.MOLAGPT
+            }.distinctUntilChanged().collect { unavailable ->
+                if (unavailable) settingsStore.resetAccountSearchProvider()
+            }
         }
 
         // 设置快照：供 Compose、聊天 VM 与后台服务共用，避免多个 DataStore 订阅和首帧假默认值。

@@ -40,7 +40,6 @@ import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -49,7 +48,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.DesktopWindows
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -88,7 +86,6 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -104,7 +101,8 @@ import com.molagpt.app.core.render.MolaBottomEdge
 import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.render.MolaScaffold
 import com.molagpt.app.core.render.MolaTopBar
-import com.molagpt.app.core.render.molaGlass
+import com.molagpt.app.core.render.StatusModel
+import com.molagpt.app.core.render.StatusPill
 import com.molagpt.app.feature.agentcontrol.agentPalette
 import com.molagpt.app.feature.chat.Composer
 import com.molagpt.app.feature.chat.ComposerDraft
@@ -569,13 +567,6 @@ private fun RemoteModelMenu(
     }
 }
 
-/** 状态行要显示的内容；null 即不显示。 */
-internal data class StatusModel(
-    val text: String,
-    val error: Boolean = false,
-    val progress: Boolean = false,
-    val action: String? = null,
-)
 
 /**
  * 输入区上方的状态提示：连接中、离线、错误、配对失效。
@@ -628,58 +619,6 @@ private fun StatusLine(state: RemoteConversationUiState, onRetry: () -> Unit, on
     }
 }
 
-@Composable
-internal fun StatusPill(
-    model: StatusModel,
-    onAction: () -> Unit = {},
-    icon: ImageVector? = null,
-    onClick: (() -> Unit)? = null,
-) {
-    val cs = MaterialTheme.colorScheme
-    Row(
-        modifier = Modifier
-            .molaGlass(RoundedCornerShape(50), elevation = 2.dp)
-            .heightIn(min = 34.dp)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(start = 12.dp, end = if (model.action != null) 4.dp else 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (model.progress) {
-            CircularProgressIndicator(strokeWidth = 1.5.dp, modifier = Modifier.size(12.dp))
-        } else if (icon != null) {
-            Icon(icon, contentDescription = null, tint = cs.onSurfaceVariant, modifier = Modifier.size(14.dp))
-        } else {
-            Box(
-                Modifier
-                    .size(6.dp)
-                    .clip(CircleShape)
-                    .background(if (model.error) cs.error else cs.onSurfaceVariant.copy(alpha = 0.5f)),
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(
-            model.text,
-            style = MaterialTheme.typography.labelMedium,
-            color = if (model.error) cs.error else cs.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        model.action?.let { label ->
-            Text(
-                label,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = if (model.error) cs.onSurfaceVariant else cs.primary,
-                modifier = Modifier
-                    .padding(start = 4.dp)
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onAction)
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-            )
-        }
-    }
-}
 
 private const val SLOW_CONNECT_MS = 1_500L
 

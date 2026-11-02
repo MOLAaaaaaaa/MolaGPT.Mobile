@@ -92,7 +92,7 @@ class MolaGptChatService(
             .header("Accept", "text/event-stream")
             .post(bodyJson.toRequestBody(JSON_MEDIA))
             .build()
-        val parser = StreamParser(http.json)
+        val parser = StreamParser(http.json, serverTurn = true)
         val offset = ResumeOffset()
         try {
             val finished = collectSseRequest(httpReq, "对话请求", parser, offset)
@@ -152,7 +152,7 @@ class MolaGptChatService(
      * fetch_completed_stream.php 只用于已完成后台任务补收，不能恢复进行中的流。
      */
     override fun resumeStream(apiUrl: String, streamSessionId: String, offset: Int): Flow<StreamEvent> = flow {
-        val parser = StreamParser(http.json)
+        val parser = StreamParser(http.json, serverTurn = true)
         val counter = ResumeOffset(offset)
         val finished = collectSseRequest(
             request = buildResumeRequest(apiUrl, streamSessionId, offset),
@@ -253,7 +253,7 @@ class MolaGptChatService(
         conversationId = req.conversationId,
         model = req.modelId,
         temperature = req.temperature,
-        messages = req.messages.map { OpenAiMessageContentBuilder.build(it) },
+        messages = req.messages.map { OpenAiMessageContentBuilder.build(it, includeSubagents = true) },
         stream = req.stream,
         useThinking = req.useThinking,
         reasoningEffort = req.reasoningEffort,
@@ -264,6 +264,7 @@ class MolaGptChatService(
             deepResearch = false,
         ),
         privacyMode = req.privacyMode,
+        clientFeatures = mapOf("subagents" to 1),
     )
 
     private fun resolveAutoRoute(apiUrl: String, body: ChatRequestBody, jwt: String): AutoRouteResult {

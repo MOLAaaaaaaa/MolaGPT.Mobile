@@ -48,6 +48,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.AccountStatus
 import com.molagpt.app.core.model.CreditsInfo
 import com.molagpt.app.core.model.QuotaItem
+import com.molagpt.app.core.model.WebSearchUsage
 import com.molagpt.app.core.render.shimmer
 
 /**
@@ -318,6 +319,7 @@ private fun QuotaSection(status: AccountStatus?, loading: Boolean, onRefresh: ()
         CreditsSummary(credits)
     }
     status?.quotas?.forEach { q -> QuotaRow(q, credits) }
+    credits?.webSearch?.let { WebSearchRow(it, credits) }
     if (credits != null && status.quotas.isNotEmpty()) {
         Text(
             text = "次数按平均对话长度估算，实际随对话长短浮动。",
@@ -415,6 +417,36 @@ private fun QuotaRow(q: QuotaItem, credits: CreditsInfo?) {
                 progress = { f },
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                 color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
+/** MolaGPT Web Search：不是模型，但和模型扣同一份额度，所以单独列一行并显示窗口内已搜次数。 */
+@Composable
+private fun WebSearchRow(search: WebSearchUsage, credits: CreditsInfo) {
+    val uses = search.uses
+    val exhausted = uses != null && uses <= 0
+    val valueText = when {
+        uses == null -> "不消耗额度"
+        exhausted -> "额度不足"
+        else -> "约 $uses 次"
+    }
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(search.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(
+                text = valueText,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (exhausted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+        if (search.calls > 0) {
+            Text(
+                text = "${credits.spentLabel} ${search.calls} 次",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

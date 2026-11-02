@@ -30,6 +30,9 @@ object MolaEndpoints {
     /** 个性化数据：人格洞察 (insights) 与对话风格偏好 (style_preferences)。 */
     const val USER_DATA = "api/auth/user_data_manager.php"
 
+    /** 账号内置联网搜索：长 JWT 鉴权，按账号周期额度计费（与模型共用）。 */
+    const val ACCOUNT_SEARCH = "api/auth/account_search.php"
+
     /** 模型未提供 apiUrl 时的兜底（自动路由）。 */
     const val DEFAULT_CHAT_API = "api/auth/chatAuto.php"
 

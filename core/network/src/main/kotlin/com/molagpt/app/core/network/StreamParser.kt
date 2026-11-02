@@ -25,6 +25,7 @@ class StreamParser(
     private val json: Json,
     /** Responses 最终回答流可只接收 final_answer；通用解析默认保留全部文本。 */
     private val responseFinalAnswerOnly: Boolean = false,
+    private val serverTurn: Boolean = false,
 ) {
     private val think = InlineThinkSplitter()
     private val webArtifacts = WebToolArtifactSplitter()
@@ -48,6 +49,7 @@ class StreamParser(
             ?: return emptyList()
 
         val events = ArrayList<StreamEvent>(2)
+        (root["molagpt_subagents"] as? JsonObject)?.let { events.add(StreamEvent.Subagents(it)) }
 
         // —— 流内错误 ——
         root["error"]?.let { err ->
@@ -94,7 +96,7 @@ class StreamParser(
         // —— 结束 ——
         val finish = choice?.get("finish_reason")?.prim()?.contentOrNull
             ?: responseFinishReason(eventType)
-        if (!finish.isNullOrEmpty()) {
+        if (!serverTurn && !finish.isNullOrEmpty()) {
             finishTail(finish, parseUsage(root)).forEach(events::add)
         }
         return events
@@ -136,6 +138,7 @@ class StreamParser(
                         label = artifact.label,
                         resultPreview = artifact.preview,
                         provider = artifact.provider,
+                        agentId = artifact.agentId,
                     ),
                 )
             }

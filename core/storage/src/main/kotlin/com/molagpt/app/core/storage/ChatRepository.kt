@@ -2,6 +2,7 @@ package com.molagpt.app.core.storage
 
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.ChatMessage
+import com.molagpt.app.core.model.ServerSubagents
 import com.molagpt.app.core.model.ChatMessageMetadataKeys
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.ContextOverflow
@@ -472,9 +473,15 @@ class ChatRepository(
                 // 工具作为独立顶层 fragment。已存在则原地更新（流式状态变更），否则追加到末尾，
                 // 与思考/正文按到达顺序交错。绝不嵌进 Thinking。
                 val i = frags.indexOfFirst { it is MessageFragment.ToolCall && it.id == cmd.tool.id }
-                if (i >= 0) frags[i] = cmd.tool else frags.add(cmd.tool)
+                val tool = ServerSubagents.tool(cmd.tool, ServerSubagents.read(meta))
+                if (i >= 0) frags[i] = tool else frags.add(tool)
                 // 工具生命周期本身就是当前活动指示，不再同时显示旧 pending。
                 if (meta.containsKey("pending")) meta = meta - "pending"
+            }
+            is DeltaCommand.UpdateSubagents -> {
+                val batches = ServerSubagents.merge(ServerSubagents.read(meta), cmd.frame)
+                meta = meta + (ServerSubagents.KEY to batches.toString()) - "pending"
+                frags.replaceAll { if (it is MessageFragment.ToolCall) ServerSubagents.tool(it, batches) else it }
             }
             is DeltaCommand.SetSources -> {
                 val i = frags.indexOfFirst { it is MessageFragment.SearchResult }
@@ -503,6 +510,11 @@ class ChatRepository(
             }
             is DeltaCommand.Complete -> {
                 status = MessageStatus.COMPLETE
+                if (ServerSubagents.KEY in meta) {
+                    val batches = ServerSubagents.finish(ServerSubagents.read(meta))
+                    meta = meta + (ServerSubagents.KEY to batches.toString())
+                    frags.replaceAll { if (it is MessageFragment.ToolCall) ServerSubagents.tool(it, batches) else it }
+                }
                 collapseThinking(frags)
                 meta = meta - "pending"
                 cmd.usage?.totalTokens?.let { meta = meta + (ChatMessageMetadataKeys.TOTAL_TOKENS to it.toString()) }
@@ -539,7 +551,14 @@ class ChatRepository(
      * 规则执行失败时保留原回答；外置文件写入失败仍正常抛出。
      */
     private suspend fun applyPostProcessing(msg: ChatMessage): ChatMessage {
-        val processed = runCatching { ResponseRewrite.apply(msg) { postProcessor.process(it) } }.getOrDefault(msg)
+        val finalized = if (ServerSubagents.KEY in msg.metadata) {
+            val batches = ServerSubagents.finish(ServerSubagents.read(msg.metadata))
+            msg.copy(
+                metadata = msg.metadata + (ServerSubagents.KEY to batches.toString()),
+                fragments = msg.fragments.map { if (it is MessageFragment.ToolCall) ServerSubagents.tool(it, batches) else it },
+            )
+        } else msg
+        val processed = runCatching { ResponseRewrite.apply(finalized) { postProcessor.process(it) } }.getOrDefault(finalized)
         val stored = wireHistoryStore?.storeMetadata(msg.sessionId, processed.metadata) ?: processed.metadata
         return if (stored === processed.metadata) processed else processed.copy(metadata = stored)
     }

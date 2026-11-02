@@ -22,6 +22,7 @@ data class ChatRequestBody(
     @SerialName("reasoning_effort") val reasoningEffort: String,
     @SerialName("enabled_tools") val enabledTools: WireEnabledTools,
     @SerialName("privacy_mode") val privacyMode: Boolean,
+    @SerialName("client_features") val clientFeatures: Map<String, Int>,
     @SerialName("molagpt_routes") val molaGptRoutes: JsonObject? = null,
 )
 

@@ -53,6 +53,8 @@ data class CreditsInfo(
     val windowDays: Int = 1,
     val recoversAt: String? = null,
     val byModelTokens: Map<String, Int>? = null,
+    /** MolaGPT Web Search：和模型共用额度但不是模型，不在逐模型列表里，单独一行展示。 */
+    val webSearch: WebSearchUsage? = null,
 ) {
     val exhausted: Boolean get() = remaining <= 0.0
 
@@ -124,6 +126,12 @@ data class CreditsInfo(
         val DATE_RE = Regex("""(\d{4})-(\d{2})-(\d{2})""")
     }
 }
+
+/**
+ * MolaGPT Web Search 的用量。[uses] 是按当前余额还能搜几次（null = 搜索不扣额度），
+ * [calls] 是当前窗口内已搜次数。与模型一样不暴露点数本身。
+ */
+data class WebSearchUsage(val name: String, val calls: Int, val uses: Int?)
 
 /**
  * 单模型今日状态。

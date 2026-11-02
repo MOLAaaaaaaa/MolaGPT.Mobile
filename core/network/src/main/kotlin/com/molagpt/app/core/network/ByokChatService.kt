@@ -100,6 +100,7 @@ class ByokChatService(
         "skill failed: Skill reader is unavailable."
     },
     private val dispatchers: DispatcherProvider,
+    private val onMolaLoginInvalidated: (String) -> Unit = {},
 ) {
     fun sendMessage(request: ChatRequest): Flow<StreamEvent> = flow {
         val provider = providerResolver(request.providerId)
@@ -1714,7 +1715,50 @@ class ByokChatService(
                 ),
             )
         }
-        if (request.enabledTools.network) {
+        if (request.enabledTools.network && webSearchOptionsProvider().provider == WebSearchProvider.MOLAGPT) {
+            // 与 MolaGPT 后端给模型的 search_web 同一契约：服务端按语言 / topic / 时效在多家搜索源间
+            // 路由，路由是照着这些参数调优的，所以要让模型给出 topic、time_range，而不是一个裸关键词。
+            add(
+                ToolSpec(
+                    name = "search_web",
+                    description = "在网络上并行搜索资料，支持一次提交 1 至 5 组查询（可混合中英文）。适合查新闻、实时资料、" +
+                        "产品/库/文档状态、事实核验。topic 用于区分通用网页、新闻、金融、论文和技术资料。" +
+                        "可选 time_range 和 country；country 仅在 general 时生效，只是地域偏好。" +
+                        "需要图片或视觉比对时设置 include_images 为 true。",
+                    properties = mapOf(
+                        "queries" to ToolProperty(
+                            description = "一组 1~5 个搜索对象。每项必须包含 query 和 topic。",
+                            type = ToolPropertyType.ARRAY,
+                            itemProperties = mapOf(
+                                "query" to ToolProperty("搜索关键词"),
+                                "topic" to ToolProperty(
+                                    description = "必填。根据查询内容选择最合适的分类：\n" +
+                                        "- paper：学术论文/研究/综述/学位论文/会议论文等学术内容\n" +
+                                        "- technology：编程问题/技术原理/API用法/安全研究/源码分析/库文档等技术内容\n" +
+                                        "- news：新闻/时事/最新动态/突发事件\n" +
+                                        "- finance：股票/财报/经济数据/金融市场\n" +
+                                        "- general：日常生活/百科知识/事实查询/购物/旅游等其他通用查询",
+                                    enumValues = MOLA_SEARCH_TOPICS,
+                                ),
+                                "time_range" to ToolProperty(
+                                    description = "时间范围过滤。day=24h；week=7天；month=30天；year=1年",
+                                    enumValues = MOLA_SEARCH_TIME_RANGES,
+                                ),
+                                "country" to ToolProperty(
+                                    "优先返回特定国家的结果，仅在 topic=general 时使用；填英文国家名小写（如 china、united states、japan）",
+                                ),
+                                "include_images" to ToolProperty(
+                                    "需要图片或视觉比对时设为 true。",
+                                    ToolPropertyType.BOOLEAN,
+                                ),
+                            ),
+                            itemRequired = listOf("query", "topic"),
+                        ),
+                    ),
+                    required = listOf("queries"),
+                ),
+            )
+        } else if (request.enabledTools.network) {
             add(
                 ToolSpec(
                     name = "search_web",
@@ -1871,17 +1915,27 @@ class ByokChatService(
     private fun buildToolParameters(spec: ToolSpec, uppercaseTypes: Boolean): JsonObject = buildJsonObject {
         put("type", if (uppercaseTypes) "OBJECT" else "object")
         put("properties", buildJsonObject {
-            spec.properties.forEach { (key, property) ->
-                put(key, buildJsonObject {
-                    put("type", if (uppercaseTypes) property.type.upper else property.type.lower)
-                    put("description", property.description)
-                    if (property.enumValues.isNotEmpty()) {
-                        putJsonArray("enum") { property.enumValues.forEach { add(it) } }
-                    }
-                })
-            }
+            spec.properties.forEach { (key, property) -> put(key, buildPropertySchema(property, uppercaseTypes)) }
         })
         putJsonArray("required") { spec.required.forEach { add(it) } }
+    }
+
+    private fun buildPropertySchema(property: ToolProperty, uppercaseTypes: Boolean): JsonObject = buildJsonObject {
+        put("type", if (uppercaseTypes) property.type.upper else property.type.lower)
+        put("description", property.description)
+        if (property.enumValues.isNotEmpty()) {
+            putJsonArray("enum") { property.enumValues.forEach { add(it) } }
+        }
+        // 数组元素是对象时才展开 items；其余类型不带这一层。
+        if (property.type == ToolPropertyType.ARRAY && property.itemProperties.isNotEmpty()) {
+            put("items", buildJsonObject {
+                put("type", if (uppercaseTypes) "OBJECT" else "object")
+                put("properties", buildJsonObject {
+                    property.itemProperties.forEach { (key, item) -> put(key, buildPropertySchema(item, uppercaseTypes)) }
+                })
+                putJsonArray("required") { property.itemRequired.forEach { add(it) } }
+            })
+        }
     }
 
     private fun parseAnthropicToolCall(element: JsonElement): ToolCall? {
@@ -1945,7 +1999,9 @@ class ByokChatService(
         }
         val output = try {
             when (call.name) {
-                "search_web" -> searchWeb(call.arg("query"), call.arg("max_results")?.toIntOrNull(), citations)
+                "search_web" ->
+                    if (webSearchOptionsProvider().provider == WebSearchProvider.MOLAGPT) searchMolaGpt(call, citations)
+                    else searchWeb(call.arg("query"), call.arg("max_results")?.toIntOrNull(), citations)
                 "fetch_url" -> fetchUrl(call.arg("url"))
                 "read_skill" -> {
                     val name = call.arg("skill") ?: return ToolExecutionResult.failure("Missing skill")
@@ -2395,6 +2451,11 @@ class ByokChatService(
         val options = webSearchOptionsProvider()
         val maxResults = (requestedMax ?: options.maxResults).coerceIn(1, options.maxResults.coerceIn(1, 10))
         val outcome = when (options.provider) {
+            // 内置搜索走 searchMolaGpt（整批 queries）；这里只会被直接按 query 调用的旧路径碰到。
+            WebSearchProvider.MOLAGPT -> return searchMolaGpt(
+                ToolCall(Ids.newFragmentId(), "search_web", buildJsonObject { put("query", query) }.toString()),
+                citations,
+            )
             WebSearchProvider.TAVILY -> searchTavily(query, options.apiKey, maxResults)
             WebSearchProvider.EXA -> searchExa(query, options.apiKey, maxResults)
             WebSearchProvider.DUCKDUCKGO -> searchDuckDuckGo(query, maxResults)
@@ -2407,6 +2468,134 @@ class ByokChatService(
             ).joinToString("\n\n")
         }
     }
+
+    private data class MolaSearchQuery(
+        val query: String,
+        val topic: String? = null,
+        val timeRange: String? = null,
+        val country: String? = null,
+        val includeImages: Boolean = false,
+    )
+
+    /** 取出 `queries`（对象或纯字符串；个别模型会把数组序列化成字符串）与旧的单个 `query`，最多 5 条。 */
+    private fun parseMolaSearchQueries(call: ToolCall): List<MolaSearchQuery> {
+        val root = runCatching { http.json.parseToJsonElement(call.arguments).jsonObject }.getOrNull() ?: return emptyList()
+        var queries = root["queries"]
+        if (queries is JsonPrimitive && queries.isString) {
+            queries = runCatching { http.json.parseToJsonElement(queries.content) }.getOrNull()
+        }
+        val parsed = (queries as? JsonArray).orEmpty().mapNotNull { item ->
+            when (item) {
+                is JsonPrimitive -> item.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }?.let { MolaSearchQuery(it) }
+                is JsonObject -> {
+                    val text = item["query"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: return@mapNotNull null
+                    MolaSearchQuery(
+                        query = text,
+                        topic = item["topic"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()
+                            ?.takeIf { it in MOLA_SEARCH_TOPICS },
+                        timeRange = item["time_range"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()
+                            ?.takeIf { it in MOLA_SEARCH_TIME_RANGES },
+                        country = item["country"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()?.takeIf { it.isNotEmpty() },
+                        includeImages = item["include_images"]?.jsonPrimitive?.booleanOrNull == true,
+                    )
+                }
+                else -> null
+            }
+        }
+        val all = parsed.ifEmpty {
+            listOfNotNull(call.arg("query")?.trim()?.takeIf { it.isNotEmpty() }?.let { MolaSearchQuery(it) })
+        }
+        return all.distinctBy { it.query.lowercase() }.take(5)
+    }
+
+    /**
+     * MolaGPT Web Search：一次请求提交整批查询，服务端逐条路由并只对这一次调用扣点（与模型共用周期额度）。
+     * 未登录 / 登录失效 / 额度用尽都以「Search failed:」开头回给模型：工具卡据此标失败，
+     * 模型把原因转述给用户，而不是反复重试。
+     */
+    private fun searchMolaGpt(call: ToolCall, citations: WebSearchCitations): String {
+        val options = webSearchOptionsProvider()
+        val jwt = options.molaJwt?.takeIf { it.isNotBlank() }
+            ?: return "Search failed: $MOLA_SEARCH_NOT_SIGNED_IN"
+        val queries = parseMolaSearchQueries(call)
+        if (queries.isEmpty()) return "Missing query"
+        val body = buildJsonObject {
+            putJsonArray("queries") {
+                queries.forEach { q ->
+                    addJsonObject {
+                        put("query", q.query)
+                        q.topic?.let { put("topic", it) }
+                        q.timeRange?.let { put("time_range", it) }
+                        q.country?.let { put("country", it) }
+                        if (q.includeImages) put("include_images", true)
+                    }
+                }
+            }
+            put("max_results", options.maxResults.coerceIn(1, WebSearchProvider.MOLAGPT.maxResultsLimit))
+            put("snippet_max_chars", MOLA_SEARCH_SNIPPET_CHARS)
+        }
+        val req = Request.Builder()
+            .url(MolaEndpoints.absolute(MolaEndpoints.ACCOUNT_SEARCH))
+            .header("Accept", "application/json")
+            .header("Authorization", "Bearer $jwt")
+            .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
+            .build()
+        // 共用客户端的整体超时是 0（给 SSE 用）；搜索是一问一答，必须自己设上限。
+        val client = http.okHttp.newBuilder().callTimeout(30, java.util.concurrent.TimeUnit.SECONDS).build()
+        return runCatching {
+            client.newCall(req).execute().use { resp ->
+                val text = resp.body?.string().orEmpty()
+                if (resp.code == 401) {
+                    onMolaLoginInvalidated(jwt)
+                    return "Search failed: $MOLA_SEARCH_SESSION_EXPIRED"
+                }
+                if (!resp.isSuccessful) return "Search failed: ${molaSearchError(text) ?: "HTTP ${resp.code}"}"
+                val root = http.json.parseToJsonElement(text).jsonObject
+                val failed = mutableListOf<String>()
+                val numbered = ArrayList<Pair<WebSearchHit, Int>>()
+                val imageBlocks = mutableListOf<String>()
+                val resultQueries = (root["queries"] as? JsonArray).orEmpty()
+                var allQueriesFailed = resultQueries.isNotEmpty()
+                resultQueries.forEach { item ->
+                    val obj = item as? JsonObject ?: return@forEach
+                    val query = obj["query"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val hits = (obj["results"] as? JsonArray).orEmpty().mapNotNull { hit ->
+                        val h = hit as? JsonObject ?: return@mapNotNull null
+                        WebSearchHit(
+                            title = h["title"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                            url = h["url"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                            snippet = h["snippet"]?.jsonPrimitive?.contentOrNull,
+                            publishedDate = h["published_date"]?.jsonPrimitive?.contentOrNull,
+                        )
+                    }
+                    val queryHits = citations.absorb(query, hits)
+                    val error = obj["error"]?.jsonPrimitive?.contentOrNull
+                    if (queryHits.isEmpty() && !error.isNullOrBlank()) failed += query
+                    if (error.isNullOrBlank() || queryHits.isNotEmpty()) allQueriesFailed = false
+                    numbered += queryHits
+                    val images = obj["images"] as? JsonArray
+                    if (!images.isNullOrEmpty()) {
+                        imageBlocks += buildJsonObject {
+                            put("query", query)
+                            put("images", images)
+                        }.toString()
+                    }
+                }
+                if (allQueriesFailed) return "Search failed: 搜索服务暂时不可用，请稍后重试。"
+                val note = failed.takeIf { it.isNotEmpty() }
+                    ?.let { "以下查询搜索失败：${it.joinToString("、")}" }
+                listOfNotNull(note, citations.toolResult(numbered.distinctBy { it.second }),
+                    imageBlocks.takeIf { it.isNotEmpty() }?.joinToString("\n", prefix = "搜索图片：\n"))
+                    .joinToString("\n\n")
+            }
+        }.getOrElse { "Search failed: ${it.message}" }
+    }
+
+    private fun molaSearchError(body: String): String? = runCatching {
+        http.json.parseToJsonElement(body).jsonObject["error"]?.jsonObject?.get("message")
+            ?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+    }.getOrNull()
 
     /** 搜索的两种结局：拿到命中（可附带 provider 自己给的摘要），或一段直接回给模型的说明。 */
     private sealed interface WebSearchOutcome {
@@ -2683,7 +2872,9 @@ class ByokChatService(
         if (!shouldShowToolPreview(call.name)) return null
         if (result.status == ToolStatus.FAILED) return result.output
         return when (call.name) {
-            "search_web", "web_search" -> call.arg("query")?.takeIf { it.isNotBlank() }?.take(200)
+            "search_web", "web_search" ->
+                (call.arg("query") ?: parseMolaSearchQueries(call).joinToString(" / ") { it.query })
+                    ?.takeIf { it.isNotBlank() }?.take(200)
             "read_skill" -> "${call.arg("skill")}/${call.arg("path") ?: "SKILL.md"}"
             "fetch_url" ->
                 result.output.lineSequence().takeWhile { it.isNotBlank() }.joinToString("\n").take(400)
@@ -2940,6 +3131,16 @@ class ByokChatService(
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+        val MOLA_SEARCH_TOPICS = listOf("general", "news", "finance", "paper", "technology")
+        val MOLA_SEARCH_TIME_RANGES = listOf("day", "week", "month", "year")
+        /** 与服务端一致：模型每条结果实际只读前 800 字，多要也是白占上下文。 */
+        const val MOLA_SEARCH_SNIPPET_CHARS = 800
+        const val MOLA_SEARCH_NOT_SIGNED_IN =
+            "未登录 MolaGPT 账号，无法使用 MolaGPT Web Search。请先登录，或在「设置 → 自定义模型工具 → 联网搜索服务」中更换搜索服务。"
+        const val MOLA_SEARCH_SESSION_EXPIRED =
+            "MolaGPT 登录已失效，无法使用 MolaGPT Web Search。请重新登录，或在「设置 → 自定义模型工具 → 联网搜索服务」中更换搜索服务。"
+
         val DEPRECATED_GEMINI_PARAMS = setOf(
             "temperature", "top_p", "topP", "top_k", "topK", "thinking_budget", "thinkingBudget",
         )
@@ -3104,11 +3305,16 @@ class ByokChatService(
         val description: String,
         val type: ToolPropertyType = ToolPropertyType.STRING,
         val enumValues: List<String> = emptyList(),
+        /** [ToolPropertyType.ARRAY] 的元素是带这些字段的对象；为空则是不展开 items 的普通数组。 */
+        val itemProperties: Map<String, ToolProperty> = emptyMap(),
+        val itemRequired: List<String> = emptyList(),
     )
 
     private enum class ToolPropertyType(val lower: String, val upper: String) {
         STRING("string", "STRING"),
         INTEGER("integer", "INTEGER"),
+        BOOLEAN("boolean", "BOOLEAN"),
+        ARRAY("array", "ARRAY"),
     }
     private data class DataUrl(val mimeType: String, val base64: String)
     private data class GeminiInlineImageKey(val mimeType: String, val data: String)

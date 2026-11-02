@@ -27,7 +27,10 @@ sealed interface StreamEvent {
         val argsJson: String? = null,
         val resultPreview: String? = null,
         val provider: String? = null,
+        val agentId: String? = null,
     ) : StreamEvent
+
+    data class Subagents(val frame: kotlinx.serialization.json.JsonObject) : StreamEvent
 
     /** 图片产物。 */
     data class Image(val url: String, val prompt: String? = null) : StreamEvent

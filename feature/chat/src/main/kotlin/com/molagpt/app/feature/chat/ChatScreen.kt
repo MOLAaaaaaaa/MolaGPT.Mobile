@@ -73,6 +73,9 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.SmartToy
+import com.molagpt.app.core.render.StatusModel
+import com.molagpt.app.core.render.StatusPill
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -187,6 +190,20 @@ fun ChatScreen(
     val memoryProjection by viewModel.memoryProjection.collectAsStateWithLifecycle()
     val memoryHint by viewModel.memoryHint.collectAsStateWithLifecycle()
     val contextUsage by viewModel.contextUsage.collectAsStateWithLifecycle()
+    val serverAgents = remember(state.messages) {
+        state.messages.flatMap { message ->
+            val batches = com.molagpt.app.core.model.ServerSubagents.read(message.metadata)
+            com.molagpt.app.core.model.ServerSubagents.agents(
+                if (message.isStreaming) batches else com.molagpt.app.core.model.ServerSubagents.finish(batches),
+            )
+        }.distinctBy { it.id }
+    }
+    var subagentPanelOpen by remember(state.sessionId) { mutableStateOf(false) }
+    var subagentBatch by remember(state.sessionId) { mutableStateOf<String?>(null) }
+    val subagentLinks = SubagentLinks(serverAgents.map { "server:" + it.batch }.toSet()) {
+        subagentBatch = it.removePrefix("server:")
+        subagentPanelOpen = true
+    }
     var modelMenuOpen by remember { mutableStateOf(false) }
     /** 模型菜单里点开的电脑；为 null 时显示菜单首页。 */
     var desktopPage by remember { mutableStateOf<String?>(null) }
@@ -376,7 +393,7 @@ fun ChatScreen(
 
     // 图片预览宿主包在最外层（Scaffold 外），全屏 overlay 才能盖住顶栏和输入框。
     ImagePreviewHost(modifier = modifier.fillMaxSize()) {
-        CompositionLocalProvider(LocalVisualHost provides visualHost) {
+        CompositionLocalProvider(LocalVisualHost provides visualHost, LocalSubagentLinks provides subagentLinks) {
             Box(modifier = Modifier.fillMaxSize()) {
                 MolaScaffold(
                     modifier = Modifier.fillMaxSize().then(drawerSwipeModifier).then(
@@ -576,6 +593,18 @@ fun ChatScreen(
                         onDismiss = viewModel::dismissReasoningMismatchHint,
                     )
                 }
+                if (serverAgents.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        StatusPill(
+                            model = StatusModel("${serverAgents.size} 个子代理", progress = serverAgents.any { it.running }),
+                            icon = Icons.Outlined.SmartToy,
+                            onClick = { subagentBatch = null; subagentPanelOpen = true },
+                        )
+                    }
+                }
                 Composer(
                     glass = true,
                     enabled = state.inputEnabled && contextUsage?.manualCompacting != true,
@@ -751,6 +780,7 @@ fun ChatScreen(
                         }
                     }
                 }
+                if (subagentPanelOpen) ServerSubagentSheet(serverAgents, subagentBatch) { subagentPanelOpen = false }
                 AssistantReaderOverlay(reader)
             } // outer Box
         } // CompositionLocalProvider

@@ -2,6 +2,28 @@ package com.molagpt.app.feature.chat
 
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.Alignment
+import com.molagpt.app.core.render.shimmer
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.CompositionLocalProvider
@@ -58,7 +80,42 @@ fun FragmentRenderer(
         is MessageFragment.ToolCall -> {
             val links = LocalSubagentLinks.current
             val agentId = fragment.agentId?.takeIf { it in (links?.available ?: emptySet()) }
-            Column(modifier) {
+            if (fragment.name == "server_subagents") {
+                val colors = MaterialTheme.colorScheme
+                Row(
+                    modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        .background(colors.surfaceVariant.copy(alpha = 0.42f))
+                        .clickable(enabled = agentId != null) { agentId?.let { links?.open(it) } }
+                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (fragment.status == ToolStatus.RUNNING) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = colors.onSurfaceVariant)
+                    } else {
+                        Icon(
+                            if (fragment.status == ToolStatus.SUCCESS) Icons.Filled.Check else Icons.Filled.Warning,
+                            contentDescription = null, modifier = Modifier.size(16.dp),
+                            tint = if (fragment.status == ToolStatus.FAILED) colors.error else colors.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = fragment.label ?: "子代理任务",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).then(
+                            if (fragment.status == ToolStatus.RUNNING) Modifier.shimmer() else Modifier,
+                        ),
+                    )
+                    fragment.statusLabel?.let {
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant.copy(alpha = 0.75f))
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Icon(Icons.Filled.ChevronRight, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                }
+            } else Column(modifier) {
                 ToolCallView(
                     name = fragment.name,
                     status = fragment.status,
@@ -153,12 +210,16 @@ internal fun toolCallGroupPresentation(
 private val toolArgsJson = Json { ignoreUnknownKeys = true }
 
 private fun searchQuery(argsJson: String?): String? = runCatching {
-    argsJson
-        ?.let(toolArgsJson::parseToJsonElement)
-        ?.jsonObject
-        ?.get("query")
-        ?.jsonPrimitive
-        ?.contentOrNull
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() }
+    val root = argsJson?.let(toolArgsJson::parseToJsonElement)?.jsonObject
+    // MolaGPT 内置搜索一次提交多条查询（queries 数组）；其余服务商是单个 query。
+    root?.get("query")?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+        ?: (root?.get("queries") as? kotlinx.serialization.json.JsonArray)
+            ?.mapNotNull { item ->
+                (item as? kotlinx.serialization.json.JsonObject)?.get("query")?.jsonPrimitive?.contentOrNull
+                    ?: (item as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+            }
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.joinToString(" / ")
+            ?.takeIf { it.isNotEmpty() }
 }.getOrNull()

@@ -17,6 +17,7 @@ class ChatStreamController {
             event.thinking?.let { add(DeltaCommand.AppendThinking(it)) }
             event.text?.let { add(DeltaCommand.AppendText(it)) }
         }
+        is StreamEvent.Subagents -> listOf(DeltaCommand.UpdateSubagents(event.frame))
         is StreamEvent.Sources -> listOf(DeltaCommand.SetSources(event.refs, event.query))
         is StreamEvent.Pending -> listOf(DeltaCommand.SetPending(event.label, event.detail))
         is StreamEvent.Image -> listOf(DeltaCommand.AddImage(event.url, event.prompt))
@@ -33,6 +34,7 @@ class ChatStreamController {
                     argsJson = event.argsJson,
                     resultPreview = event.resultPreview,
                     provider = event.provider,
+                    agentId = event.agentId,
                 ),
             ),
         )
