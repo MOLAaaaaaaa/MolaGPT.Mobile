@@ -52,12 +52,15 @@ object ServerSubagents {
             val id = agent["id"]!!.jsonPrimitive.content
             agents[id] = JsonObject(agents[id]?.jsonObject.orEmpty() + agent)
         }
-        return JsonObject(batches + (batch to JsonArray(agents.values.toList())))
+        val values = agents.values.map { agent ->
+            frame["waiting"]?.let { JsonObject(agent.jsonObject + ("batch_waiting" to it)) } ?: agent
+        }
+        return JsonObject(batches + (batch to JsonArray(values)))
     }
 
     fun finish(batches: JsonObject): JsonObject = JsonObject(batches.mapValues { (_, values) ->
         JsonArray(values.jsonArray.map { value ->
-            val agent = value.jsonObject
+            val agent = JsonObject(value.jsonObject - "batch_waiting")
             if (agent["status"]?.jsonPrimitive?.content != "running") agent else JsonObject(agent + mapOf(
                 "status" to JsonPrimitive("stopped"), "ended_at" to JsonPrimitive(System.currentTimeMillis()),
             ))
@@ -70,8 +73,9 @@ object ServerSubagents {
         if (agents.isEmpty()) return tool
         val running = agents.any { it.running }
         val completed = agents.count { it.text("status") == "completed" }
+        val waiting = agents.any { it.data["batch_waiting"]?.jsonPrimitive?.booleanOrNull == true }
         return tool.copy(
-            label = "${agents.size} 个子代理",
+            label = if (waiting) "正在等待 ${agents.size} 个子代理" else "${agents.size} 个子代理",
             status = if (running) ToolStatus.RUNNING else if (completed == agents.size) ToolStatus.SUCCESS else ToolStatus.FAILED,
             statusLabel = if (running) "运行中" else "$completed 个已完成",
         )

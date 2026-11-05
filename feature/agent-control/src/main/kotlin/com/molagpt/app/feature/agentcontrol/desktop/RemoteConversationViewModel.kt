@@ -67,6 +67,8 @@ data class RemoteConversationUiState(
     /** 用户点了重试、结果还没出来。 */
     val retrying: Boolean = false,
     val busy: Boolean = false,
+    val sending: Boolean = false,
+    val settingApprovalMode: Boolean = false,
     val readOnly: String? = null,
     val messages: List<ChatMessage> = emptyList(),
     val hasOlder: Boolean = false,
@@ -176,6 +178,8 @@ class RemoteConversationViewModel(
     private var configuring = 0
 
     private data class Pending(val message: ChatMessage, var messageId: String? = null)
+    private data class PendingSend(val fingerprint: String, val cmdId: String)
+    private var pendingSend: PendingSend? = null
 
     /** 一个待发送的附件。上传逐个进行；完成后 [attachmentId] 指向电脑上暂存的那份。 */
     private class Outgoing(val id: String, val uri: Uri, val name: String, val mime: String) {
@@ -431,6 +435,7 @@ class RemoteConversationViewModel(
 
     /** 发出一条消息和已上传的附件；失败时把原文交给 [onFailed] 放回输入框，附件留在待发送区。 */
     fun send(text: String, onFailed: (String) -> Unit) {
+        if (!_state.value.live || _state.value.sending) return
         val trimmed = text.trim()
         val attached = outgoing.toList()
         if (attached.any { it.status != UploadStatus.UPLOADED }) return
@@ -438,6 +443,29 @@ class RemoteConversationViewModel(
         val creating = drafting
         val settings = currentSettings()
         if (creating && settings == null) return
+        val op = if (creating) "create" else "send"
+        val args = buildJsonObject {
+            put("conversationId", conversationId)
+            put("text", trimmed)
+            if (attached.isNotEmpty()) put("attachments", JsonArray(attached.map { JsonPrimitive(it.attachmentId) }))
+            if (creating && settings != null) {
+                put("providerId", settings.providerId)
+                put("modelId", settings.modelId)
+                draftPersonaId?.let { put("personaId", it) }
+                if (settings.networkAvailable) put("network", settings.networkOn)
+                if (settings.thinkingToggle) put("thinking", settings.thinkingOn)
+                settings.effort?.let { put("effort", it) }
+            }
+        }
+        val fingerprint = "$op:$args"
+        val retrying = pendingSend?.fingerprint == fingerprint
+        if (_state.value.busy && attached.isNotEmpty() && !retrying) {
+            publish { it.copy(notice = "电脑正在回复，请等本轮结束后再发送附件") }
+            onFailed(text)
+            return
+        }
+        val command = pendingSend?.takeIf { retrying }
+            ?: PendingSend(fingerprint, UUID.randomUUID().toString()).also { pendingSend = it }
         val now = System.currentTimeMillis()
         val local = Pending(
             ChatMessage(
@@ -475,23 +503,11 @@ class RemoteConversationViewModel(
             ),
         )
         outgoing.removeAll(attached)
-        publish { it }
+        publish { it.copy(sending = true) }
         viewModelScope.launch {
             try {
-                val data = service.request(machineId, if (creating) "create" else "send", buildJsonObject {
-                    put("conversationId", conversationId)
-                    put("text", trimmed)
-                    put("cmdId", UUID.randomUUID().toString())
-                    if (attached.isNotEmpty()) put("attachments", JsonArray(attached.map { JsonPrimitive(it.attachmentId) }))
-                    if (creating && settings != null) {
-                        put("providerId", settings.providerId)
-                        put("modelId", settings.modelId)
-                        draftPersonaId?.let { put("personaId", it) }
-                        if (settings.networkAvailable) put("network", settings.networkOn)
-                        if (settings.thinkingToggle) put("thinking", settings.thinkingOn)
-                        settings.effort?.let { put("effort", it) }
-                    }
-                })
+                val data = service.request(machineId, op, JsonObject(args + ("cmdId" to JsonPrimitive(command.cmdId))))
+                pendingSend = null
                 val messageId = data.string("messageId")
                 if (messageId != null && raw.any { it.string("id") == messageId }) optimistic.remove(local)
                 else local.messageId = messageId
@@ -500,6 +516,7 @@ class RemoteConversationViewModel(
                 onSent(conversationId)
                 publish { it }
             } catch (error: DesktopRemoteException) {
+                if (error.code !in listOf("timeout", "disconnected", "send_failed")) pendingSend = null
                 if (creating && error.code == "conflict") {
                     // 只有本机生成的 id 会撞上：上一次 create 其实成功了，只是答复丢了。
                     optimistic.remove(local)
@@ -515,6 +532,8 @@ class RemoteConversationViewModel(
                 outgoing.addAll(0, attached)
                 publish { it.copy(notice = error.message) }
                 onFailed(text)
+            } finally {
+                publish { it.copy(sending = false) }
             }
         }
     }
@@ -639,6 +658,10 @@ class RemoteConversationViewModel(
             val meta = withContext(dispatchers.io) { files.probe(uri) }
             if (meta == null) {
                 publish { it.copy(notice = "无法读取所选附件") }
+                return@launch
+            }
+            if (outgoing.size >= 10) {
+                publish { it.copy(notice = "单条消息最多添加 10 个附件") }
                 return@launch
             }
             val item = Outgoing(UUID.randomUUID().toString(), uri, meta.name, meta.mimeType)
@@ -963,6 +986,32 @@ class RemoteConversationViewModel(
     fun setThinking(on: Boolean) = configure(apply = { it.copy(thinkingOn = on) }) { put("thinking", on) }
 
     fun setEffort(level: String) = configure(apply = { it.copy(effort = level) }) { put("effort", level) }
+
+    fun setApprovalMode(mode: String) {
+        val current = currentSettings()?.approval ?: return
+        if (!_state.value.live || _state.value.settingApprovalMode || mode == current.mode) return
+        publish { it.copy(settingApprovalMode = true) }
+        viewModelScope.launch {
+            try {
+                val data = service.request(machineId, "approval_mode", buildJsonObject { put("mode", mode) })
+                val approvalJson = data["approval"] as? JsonObject
+                    ?: throw DesktopRemoteException("bad_reply", "电脑未返回审批模式")
+                val approval = DesktopRemoteService.parseApprovalMode(approvalJson)
+                    ?: throw DesktopRemoteException("bad_reply", "电脑未返回审批模式")
+                val updated = approval.copy(visible = current.visible)
+                draftSettings = draftSettings?.copy(approval = updated)
+                pendingSettings = pendingSettings?.copy(approval = updated)
+                (conversation["settings"] as? JsonObject)?.let { settings ->
+                    conversation = JsonObject(conversation + ("settings" to JsonObject(settings + ("approval" to approvalJson))))
+                }
+                scheduleSave()
+            } catch (error: DesktopRemoteException) {
+                publish { it.copy(notice = error.message) }
+            } finally {
+                publish { it.copy(settingApprovalMode = false) }
+            }
+        }
+    }
 
     private fun configure(apply: (RemoteSettings) -> RemoteSettings, args: JsonObjectBuilder.() -> Unit) {
         val current = currentSettings() ?: return

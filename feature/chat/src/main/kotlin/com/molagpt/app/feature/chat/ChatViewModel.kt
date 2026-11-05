@@ -79,6 +79,7 @@ import java.util.Locale
 class ChatViewModel(
     private val sessionId: String,
     private val chatRepository: ChatRepository,
+    private val serverToolApi: com.molagpt.app.core.network.ServerToolApi,
     private val backgroundStreams: BackgroundStreamManager,
     private val sessionRepository: SessionRepository,
     private val personaRepository: PersonaRepository,
@@ -121,6 +122,12 @@ class ChatViewModel(
     /** 写入「自动压缩」开关（与设置页同一项）。 */
     private val persistAutoCompaction: suspend (Boolean) -> Unit = {},
 ) : ViewModel() {
+    suspend fun retryServerTool(ticket: String) = serverToolApi.retry(ticket)
+
+    suspend fun downloadServerTool(ticket: String, destination: Uri) = withContext(dispatchers.io) {
+        appContext.contentResolver.openOutputStream(destination)!!.use { serverToolApi.download(ticket, it) }
+    }
+
 
     private val conversationId = Ids.conversationIdForSession(sessionId)
 

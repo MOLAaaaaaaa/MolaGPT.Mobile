@@ -1,10 +1,8 @@
 package com.molagpt.app.core.render
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,8 +10,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.DriveFileMove
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -27,10 +27,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.model.ToolStatus
+import com.molagpt.app.core.model.ServerToolInfo
 
 @Composable
 fun ToolCallView(
@@ -42,6 +42,11 @@ fun ToolCallView(
     provider: String? = null,
     expandWhileRunning: Boolean = true,
     statusLabel: String? = null,
+    serverTool: ServerToolInfo? = null,
+    onRetry: (() -> Unit)? = null,
+    onDownload: (() -> Unit)? = null,
+    actionBusy: Boolean = false,
+    actionError: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val title = label ?: readableToolName(name)
@@ -67,7 +72,14 @@ fun ToolCallView(
                 .fillMaxWidth()
                 .clickable { collapsed = !collapsed },
         ) {
-            ToolStatusIcon(status)
+            if (status == ToolStatus.RUNNING) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                ToolIcon(name, serverTool?.icon, status)
+            }
             Text(
                 text = title,
                 style = MaterialTheme.typography.labelLarge,
@@ -85,11 +97,18 @@ fun ToolCallView(
         }
 
         Text(
-            text = meta,
+            text = serverTool?.metadata ?: meta,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
             modifier = Modifier.padding(top = 4.dp),
         )
+        (actionError ?: serverTool?.error)?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp))
+        }
+        if (onRetry != null) androidx.compose.material3.TextButton(onClick = onRetry, enabled = !actionBusy) {
+            Text(if (actionBusy) "正在重试" else "重试")
+        }
+        if (onDownload != null) androidx.compose.material3.TextButton(onClick = onDownload, enabled = !actionBusy) { Text("下载文件") }
 
         AnimatedVisibility(visible = !collapsed && preview != null) {
             StreamingMarkdownView(
@@ -104,37 +123,30 @@ fun ToolCallView(
 }
 
 @Composable
-private fun ToolStatusIcon(status: ToolStatus) {
-    when (status) {
-        ToolStatus.RUNNING -> CircularProgressIndicator(
-            modifier = Modifier.size(16.dp),
-            strokeWidth = 2.dp,
-        )
-        ToolStatus.SUCCESS -> PopIn {
-            Icon(
-                Icons.Filled.CheckCircle,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.primary,
-            )
-        }
-        ToolStatus.FAILED -> PopIn {
-            Icon(
-                Icons.Filled.Warning,
-                contentDescription = null,
-                modifier = Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.error,
-            )
-        }
+private fun ToolIcon(name: String, icon: String?, status: ToolStatus) {
+    val glyph = when (icon ?: name) {
+        "book", "read_document" -> Icons.AutoMirrored.Filled.MenuBook
+        "search", "code-search", "search_document", "search_web", "web_search", "visual_search", "molagpt_fast_codebase_search" -> Icons.Filled.Search
+        "code", "python", "execute_python_code" -> Icons.Filled.Code
+        "eye", "analyze_image", "view_image", "vision_proxy", "image-analyze" -> Icons.Filled.Visibility
+        "crop", "image_file_process", "image-action" -> Icons.Filled.Crop
+        "image", "image-gen", "generate_image", "image_generation_and_editing" -> Icons.Filled.Image
+        "skill", "activate_skill" -> Icons.Filled.AutoAwesome
+        "memory", "recall_memory" -> Icons.Filled.Psychology
+        "erase", "forget_memories_by_description" -> Icons.Filled.DeleteOutline
+        "import", "molagpt_import_sandbox_to_project" -> Icons.AutoMirrored.Filled.DriveFileMove
+        "camera" -> Icons.Filled.PhotoCamera
+        "download" -> Icons.Filled.FileDownload
+        "click" -> Icons.Filled.TouchApp
+        "list" -> Icons.AutoMirrored.Filled.FormatListBulleted
+        "pdf" -> Icons.Filled.PictureAsPdf
+        "web", "steel_browser", "browser", "fetch_url", "web_fetch" -> Icons.Filled.Language
+        "mcp", "mcp_call", "mcp_list_tools" -> Icons.Filled.Extension
+        "spawn_agent", "wait_agents", "server_subagents" -> Icons.Filled.Groups
+        else -> Icons.Filled.Build
     }
-}
-
-/** 完成/失败图标弹入（spring 回弹）。 */
-@Composable
-private fun PopIn(content: @Composable () -> Unit) {
-    val scale = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { scale.animateTo(1f, MolaMotion.springy()) }
-    Box(modifier = Modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value }) { content() }
+    Icon(glyph, contentDescription = null, modifier = Modifier.size(18.dp),
+        tint = if (status == ToolStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 private fun readableToolName(name: String): String = when (name) {
@@ -156,6 +168,13 @@ private fun readableToolName(name: String): String = when (name) {
     "image-gen" -> "图片生成"
     "image-analyze" -> "图片分析"
     "image-action" -> "图片处理"
+    "read_document" -> "读取文档"
+    "search_document" -> "检索文档"
+    "molagpt_fast_codebase_search", "code-search" -> "项目代码检索"
+    "activate_skill" -> "加载技能"
+    "recall_memory" -> "查找记忆"
+    "forget_memories_by_description" -> "删除记忆"
+    "molagpt_import_sandbox_to_project" -> "导入项目文件"
     else -> name.ifBlank { "工具调用" }
 }
 
@@ -163,4 +182,5 @@ private fun statusText(status: ToolStatus): String = when (status) {
     ToolStatus.RUNNING -> "进行中"
     ToolStatus.SUCCESS -> "完成"
     ToolStatus.FAILED -> "失败"
+    ToolStatus.CANCELLED -> "已停止"
 }

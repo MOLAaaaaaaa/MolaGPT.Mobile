@@ -818,14 +818,26 @@ internal fun List<ChatMessage>.toMessageRows(
         // 来源片段不按到达位置渲染，一律挪到消息末尾。它是整条回答的汇总，不是发生在某个
         // 时刻的事件——BYOK 自带搜索一搜完就发来源，照原位画会夹在两张搜索卡中间，还会把
         // 「连续搜索合成一张卡」的判定切断（那个判定看的是相邻片段）。
-        val bodyFragments = message.fragments.filter { it !is MessageFragment.SearchResult }
+        val bodyFragments = message.fragments.filterIndexed { index, fragment ->
+            val fallback = fragment is MessageFragment.ToolCall && fragment.serverTool == null &&
+                fragment.status == ToolStatus.SUCCESS && fragment.label in setOf("处理中...", "处理中…")
+            val previous = if (fallback) message.fragments.subList(0, index).lastOrNull {
+                it !is MessageFragment.SearchResult && (it !is MessageFragment.Text || it.markdown.isNotBlank())
+            } else null
+            fragment !is MessageFragment.SearchResult && !(fallback &&
+                previous is MessageFragment.ToolCall && previous.name == "mcp" && previous.status != ToolStatus.RUNNING)
+        }
         var fragmentIndex = 0
         while (fragmentIndex < bodyFragments.size) {
             val fragment = bodyFragments[fragmentIndex]
             val searchTools = consecutiveWebSearchTools(bodyFragments, fragmentIndex)
             if (searchTools.isNotEmpty()) {
                 val displayTools = searchTools.map { tool ->
-                    if (tool.id == heldToolId) tool.copy(status = ToolStatus.RUNNING) else tool
+                    when {
+                        tool.id == heldToolId -> tool.copy(status = ToolStatus.RUNNING, label = tool.serverTool?.runningLabel ?: tool.label)
+                        !message.isStreaming && tool.serverTool != null && tool.status == ToolStatus.RUNNING -> tool.copy(status = ToolStatus.CANCELLED, label = "操作已停止")
+                        else -> tool
+                    }
                 }
                 addMessageRow { top -> MessageListRow.ToolGroup(message.messageId, displayTools, top) }
                 fragmentIndex += searchTools.size
@@ -853,10 +865,10 @@ internal fun List<ChatMessage>.toMessageRows(
                     )
                 }
             } else {
-                val displayFragment = if (fragment is MessageFragment.ToolCall && fragment.id == heldToolId) {
-                    fragment.copy(status = ToolStatus.RUNNING)
-                } else {
-                    fragment
+                val displayFragment = when {
+                    fragment is MessageFragment.ToolCall && fragment.id == heldToolId -> fragment.copy(status = ToolStatus.RUNNING, label = fragment.serverTool?.runningLabel ?: fragment.label)
+                    fragment is MessageFragment.ToolCall && !message.isStreaming && fragment.serverTool != null && fragment.status == ToolStatus.RUNNING -> fragment.copy(status = ToolStatus.CANCELLED, label = "操作已停止")
+                    else -> fragment
                 }
                 addMessageRow { top ->
                     MessageListRow.Fragment(
@@ -1034,7 +1046,14 @@ internal fun ChatMessage.heldToolProgressId(): String? {
     val modelContinued = fragments
         .asSequence()
         .drop(toolIndex + 1)
-        .any { it is MessageFragment.Text || it is MessageFragment.Thinking }
+        .any {
+            val text = when (it) {
+                is MessageFragment.Text -> it.markdown
+                is MessageFragment.Thinking -> it.text
+                else -> ""
+            }
+            text.any { c -> !c.isWhitespace() && c != '\u200B' && c != '\uFEFF' }
+        }
     return tool.id.takeUnless { modelContinued }
 }
 

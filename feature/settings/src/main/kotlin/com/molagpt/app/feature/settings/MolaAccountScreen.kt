@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -68,6 +69,7 @@ import com.molagpt.app.core.render.shimmer
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MolaAccountScreen(
+    onOpenSupport: () -> Unit = {},
     viewModel: SettingsViewModel,
     loggedIn: Boolean,
     username: String?,
@@ -75,6 +77,7 @@ fun MolaAccountScreen(
     onLogout: () -> Unit,
     onBack: () -> Unit,
     onOpenPersonalization: () -> Unit,
+
     modifier: Modifier = Modifier,
 ) {
     val s by viewModel.settings.collectAsStateWithLifecycle()
@@ -121,6 +124,8 @@ fun MolaAccountScreen(
 
             SectionTitle("配额用量 · 今日")
             QuotaSection(status = status, loading = statusLoading, onRefresh = viewModel::refreshStatus)
+
+            SupportAccountEntryCard(isDonor = status?.isDonor == true, onClick = onOpenSupport)
 
             // 云同步与个性化记忆依赖账号，游客态隐藏。
             if (loggedIn) {
@@ -263,6 +268,7 @@ private fun AccountHero(
             )
             Text(
                 text = when {
+                    loggedIn && status?.isDonor == true -> "捐赠者"
                     registered -> "已登录账号"
                     loggedIn -> "已登录账号"
                     else -> "登录后可享跨设备同步、解锁更多模型等特性"
@@ -482,6 +488,7 @@ private fun TracksCard(
     enabled: Boolean,
     onEnabledChange: (Boolean) -> Unit,
     onOpenPersonalization: () -> Unit,
+
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
@@ -580,6 +587,39 @@ private fun MolaGptToolsSection(
 }
 
 /** 粗粒度相对时间（避免引入日期库）。注意：与 Date 无关，仅用当前毫秒差。 */
+@Composable
+private fun SupportAccountEntryCard(isDonor: Boolean, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SettingsRowIcon(Icons.Outlined.FavoriteBorder)
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("支持 MolaGPT", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = if (isDonor) {
+                        "感谢你的支持 · 查看爱发电方案与感谢名单"
+                    } else {
+                        "¥66/月档位可进入「捐赠者」用户组，解锁专属模型与更高额度"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            ForwardChevron()
+        }
+    }
+}
+
 private fun relativeTime(ms: Long): String {
     val diff = System.currentTimeMillis() - ms
     return when {

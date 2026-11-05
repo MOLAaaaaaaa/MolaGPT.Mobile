@@ -28,6 +28,7 @@ sealed interface StreamEvent {
         val resultPreview: String? = null,
         val provider: String? = null,
         val agentId: String? = null,
+        val serverTool: ServerToolInfo? = null,
     ) : StreamEvent
 
     data class Subagents(val frame: kotlinx.serialization.json.JsonObject) : StreamEvent

@@ -16,6 +16,7 @@ import com.molagpt.app.core.model.ResponseRegexRule
 import com.molagpt.app.core.model.ResponseRegexRules
 import com.molagpt.app.core.model.WebSearchProvider
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
@@ -345,6 +346,27 @@ class SettingsStore(private val context: Context) {
         it[Keys.SEEN_PROMO_IDS] = ((it[Keys.SEEN_PROMO_IDS] ?: emptySet()) + id).toList().takeLast(50).toSet()
     }
 
+    /** 累计完成的对话轮数（用于里程碑式 Star / 赞助提示，不进 [AppSettings] 以免无关页面重组）。 */
+    val completedTurnCountFlow: Flow<Int> =
+        context.settingsDataStore.data
+            .map { (it[Keys.COMPLETED_TURN_COUNT] ?: 0L).toInt() }
+            .distinctUntilChanged()
+
+    suspend fun incrementCompletedTurnCount(): Int {
+        var updated = 0
+        edit { p ->
+            val next = (p[Keys.COMPLETED_TURN_COUNT] ?: 0L) + 1L
+            p[Keys.COMPLETED_TURN_COUNT] = next
+            updated = next.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        }
+        return updated
+    }
+
+    suspend fun isDonorCached(): Boolean =
+        context.settingsDataStore.data.map { it[Keys.IS_DONOR_CACHED] ?: false }.first()
+
+    suspend fun setIsDonorCached(v: Boolean) = edit { it[Keys.IS_DONOR_CACHED] = v }
+
     /** 已点过"知道了"的命令失败 key（每个只弹一次）；不进 [AppSettings] 流，避免无关订阅方重组。 */
     suspend fun seenAgentCommandFailureKeys(): Set<String> =
         context.settingsDataStore.data.map { it[Keys.SEEN_AGENT_COMMAND_FAILURES] ?: emptySet() }.first()
@@ -445,5 +467,7 @@ class SettingsStore(private val context: Context) {
         val SEEN_OPS_MESSAGE_IDS = stringSetPreferencesKey("seen_ops_message_ids")
         val SEEN_PROMO_IDS = stringSetPreferencesKey("seen_promo_ids")
         val SEEN_AGENT_COMMAND_FAILURES = stringSetPreferencesKey("seen_agent_command_failure_keys")
+        val COMPLETED_TURN_COUNT = longPreferencesKey("completed_turn_count")
+        val IS_DONOR_CACHED = booleanPreferencesKey("molagpt_is_donor")
     }
 }

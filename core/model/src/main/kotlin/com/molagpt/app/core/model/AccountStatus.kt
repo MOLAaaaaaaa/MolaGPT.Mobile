@@ -13,6 +13,7 @@ data class AccountStatus(
     /** registered | guest。 */
     val userType: String,
     val username: String?,
+    val isDonor: Boolean = false,
     val quotas: List<QuotaItem> = emptyList(),
     /** 服务端 `user.credits`；null = 后端未启用点数配额，按旧的逐模型额度渲染。 */
     val credits: CreditsInfo? = null,

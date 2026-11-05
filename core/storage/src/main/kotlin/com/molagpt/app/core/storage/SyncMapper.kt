@@ -9,6 +9,8 @@ import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.SourceReference
 import com.molagpt.app.core.model.ToolStatus
+import com.molagpt.app.core.network.WebToolArtifact
+import com.molagpt.app.core.network.WebToolArtifactSplitter
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import com.molagpt.app.core.storage.entity.MessageEntity
 import kotlinx.serialization.json.JsonArray
@@ -378,8 +380,20 @@ object SyncMapper {
         val searchQueries = mutableListOf<String>()
         var pos = 0
         var hasThinking = false
+        val toolDecoder = WebToolArtifactSplitter()
+
+        fun appendTool(tool: WebToolArtifact.Tool) {
+            val fragment = MessageFragment.ToolCall(
+                id = "tool_${tool.id}", name = tool.name, status = tool.status,
+                label = tool.label, resultPreview = tool.preview, provider = tool.provider,
+                agentId = tool.agentId, serverTool = tool.serverTool,
+            )
+            val index = fragments.indexOfFirst { it.id == fragment.id }
+            if (index < 0) fragments.add(fragment) else fragments[index] = fragment
+        }
 
         fun appendVisible(segment: String) {
+            toolDecoder.feed(segment)
             val text = cleanVisibleText(segment)
             if (text.isBlank()) return
             fragments.add(MessageFragment.Text(Ids.newFragmentId(), text))
@@ -411,7 +425,12 @@ object SyncMapper {
                 } else {
                     content.substring(openEnd + 1, close)
                 }
-                appendThinkingFragment(fragments, body)
+                toolDecoder.feed(body).forEach { artifact ->
+                    when (artifact) {
+                        is WebToolArtifact.Text -> appendThinkingFragment(fragments, artifact.text)
+                        is WebToolArtifact.Tool -> appendTool(artifact)
+                    }
+                }
                 hasThinking = true
                 pos = if (close < 0) content.length else close + THINK_CLOSE.length
                 continue
@@ -425,14 +444,10 @@ object SyncMapper {
             }
 
             val unit = content.substring(next, end)
-            if (startsWithIgnoreCase(unit, 0, "<DSanalysis") && mergeDsAnalysisWithPreviousTool(fragments, unit)) {
-                pos = end
-                continue
+            if (containsIgnoreCase(unit, "tool-search-blockquote")) {
+                extractSearchChips(unit).joinToString(" / ").takeIf { it.isNotBlank() }?.let(searchQueries::add)
             }
-
-            val tools = mutableListOf<MessageFragment.ToolCall>()
-            parseToolUnit(unit, tools, searchQueries)
-            fragments.addAll(tools)
+            toolDecoder.feed(unit).filterIsInstance<WebToolArtifact.Tool>().forEach(::appendTool)
             pos = end
         }
 
@@ -448,21 +463,6 @@ object SyncMapper {
         val thinking = text.trim()
         if (thinking.isBlank()) return
         fragments.add(MessageFragment.Thinking(Ids.newFragmentId(), thinking, collapsed = true))
-    }
-
-    private fun mergeDsAnalysisWithPreviousTool(fragments: MutableList<MessageFragment>, unit: String): Boolean {
-        val body = stripTagPair(unit, "DSanalysis").trim()
-        if (body.isBlank()) return true
-        val lastIndex = fragments.lastIndex
-        val previous = fragments.getOrNull(lastIndex) as? MessageFragment.ToolCall ?: return false
-        fragments[lastIndex] = previous.copy(
-            name = dsToolName(unit),
-            status = webToolStatus(unit),
-            label = readableDsLabel(unit),
-            resultPreview = body,
-            provider = previous.provider ?: "MolaGPT",
-        )
-        return true
     }
 
     private data class ToolPeel(
@@ -1019,9 +1019,27 @@ object SyncMapper {
             ToolStatus.SUCCESS -> "completed"
             ToolStatus.FAILED -> "error"
             ToolStatus.RUNNING -> "analyzing"
+            ToolStatus.CANCELLED -> "cancelled"
         }
         val label = tool.label?.takeIf { it.isNotBlank() } ?: readableToolStatusLabel(tool.name, tool.status)
         val safeLabel = escapeHtml(label)
+        tool.serverTool?.let { info ->
+            val attrs = " data-tool-call=\"${escapeHtml(info.callId)}\" data-tool-name=\"${escapeHtml(tool.name)}\"" +
+                (info.icon?.let { " data-tool-icon=\"${escapeHtml(it)}\"" } ?: "")
+            val details = buildString {
+                info.metadata?.let { append("<div class=\"tool-status-meta\">${escapeHtml(it)}</div>") }
+                info.error?.let { append("<div class=\"tool-status-error\">${escapeHtml(it)}</div>") }
+                info.retryTicket?.let { append("<button class=\"tool-download-retry\" data-tool-ticket=\"${escapeHtml(it)}\">重试</button>") }
+                info.fileTicket?.let { append("<button class=\"tool-retry-file\" data-tool-ticket=\"${escapeHtml(it)}\" data-filename=\"${escapeHtml(info.filename.orEmpty())}\">下载文件</button>") }
+            }
+            val body = tool.resultPreview?.takeIf { it.isNotBlank() }?.let {
+                "<DSanalysis data-tool-type=\"${webToolType(tool.name)}\"$attrs data-analysis-phase=\"$phase\">$it</DSanalysis>"
+            }.orEmpty()
+            val start = info.runningLabel?.takeIf { tool.status != ToolStatus.RUNNING }?.let {
+                "<blockquote class=\"tool-status analyzing\"$attrs><p>${escapeHtml(it)}</p></blockquote>\n\n"
+            }.orEmpty()
+            return "\n\n$start$body\n\n<blockquote class=\"tool-status $phase\"$attrs><p>$safeLabel</p>$details</blockquote>\n\n"
+        }
         val toolType = webToolType(tool.name)
         if (toolType == "web_search") {
             return webSearchMarkup(chips = searchChipsFromTool(tool, label), phase = phase)
@@ -1158,6 +1176,7 @@ object SyncMapper {
         "steel_browser", "browser", "web_fetch" -> "tool-call"
         "execute_python_code", "python" -> "python"
         "mcp" -> "mcp"
+        "molagpt_fast_codebase_search", "code-search" -> "code-search"
         else -> "tool-call"
     }
 

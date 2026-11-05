@@ -77,6 +77,7 @@ sealed interface MessageFragment {
         val provider: String? = null,
         val statusLabel: String? = null,
         val agentId: String? = null,
+        val serverTool: ServerToolInfo? = null,
     ) : MessageFragment
 
     /** 文件卡片（上传/生成的文件）。 */
@@ -106,6 +107,6 @@ sealed interface MessageFragment {
     data class Error(override val id: String, val message: String) : MessageFragment
 }
 
-enum class ToolStatus { RUNNING, SUCCESS, FAILED }
+enum class ToolStatus { RUNNING, SUCCESS, FAILED, CANCELLED }
 
 enum class SearchStatus { SEARCHING, DONE, FAILED }

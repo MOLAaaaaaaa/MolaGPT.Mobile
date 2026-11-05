@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -75,6 +76,8 @@ fun AboutScreen(
     versionName: String,
     buildTime: String,
     onBack: () -> Unit,
+    onOpenSupport: () -> Unit = {},
+    onGitHubOpened: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
@@ -114,6 +117,7 @@ fun AboutScreen(
             ProductHeader(versionName = versionName, buildTime = buildTime)
 
             ActionButtons(
+                onOpenSupport = onOpenSupport,
                 checking = checking,
                 onCheckUpdate = {
                     scope.launch {
@@ -125,6 +129,8 @@ fun AboutScreen(
                     }
                 },
                 onOpenGitHub = {
+                    onGitHubOpened()
+
                     runCatching { uriHandler.openUri(GitHubUrl) }
                         .onFailure {
                             scope.launch { snackbarHostState.showSnackbar("无法打开 GitHub 主页") }
@@ -199,9 +205,19 @@ private fun ProductHeader(versionName: String, buildTime: String) {
 }
 
 @Composable
-private fun ActionButtons(checking: Boolean, onCheckUpdate: () -> Unit, onOpenGitHub: () -> Unit) {
-    Row(
+private fun ActionButtons(
+    checking: Boolean,
+    onCheckUpdate: () -> Unit,
+    onOpenGitHub: () -> Unit,
+    onOpenSupport: () -> Unit,
+) {
+    Column(
         modifier = Modifier.fillMaxWidth().padding(bottom = 22.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Button(
@@ -228,7 +244,21 @@ private fun ActionButtons(checking: Boolean, onCheckUpdate: () -> Unit, onOpenGi
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary),
         ) {
             GitHubGlyph(modifier = Modifier.size(17.dp))
-            Text("GitHub", modifier = Modifier.padding(start = 8.dp))
+            Text("GitHub Star", modifier = Modifier.padding(start = 8.dp))
+        }
+        }
+        OutlinedButton(
+            onClick = onOpenSupport,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(999.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.FavoriteBorder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(17.dp),
+            )
+            Text("支持 MolaGPT（爱发电）", modifier = Modifier.padding(start = 8.dp))
         }
     }
 }
@@ -337,7 +367,7 @@ private fun LicenseExpander() {
 }
 
 @Composable
-private fun GitHubGlyph(modifier: Modifier = Modifier) {
+internal fun GitHubGlyph(modifier: Modifier = Modifier) {
     val color = LocalContentColor.current
     val mark = remember { PathParser().parsePathString(GitHubMarkPath).toPath() }
     Canvas(modifier = modifier) {

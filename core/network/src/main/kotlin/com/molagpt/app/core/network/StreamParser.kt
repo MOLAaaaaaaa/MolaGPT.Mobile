@@ -139,6 +139,7 @@ class StreamParser(
                         resultPreview = artifact.preview,
                         provider = artifact.provider,
                         agentId = artifact.agentId,
+                        serverTool = artifact.serverTool,
                     ),
                 )
             }

@@ -70,6 +70,7 @@ data class RemoteSettings(
     val effort: String?,
     /** 电脑能收的附件；旧版电脑不收附件，为 null。 */
     val attachments: RemoteAttachmentRules? = null,
+    val approval: RemoteApprovalMode? = null,
 ) {
     val familyLabel: String get() = if (family == "work") "Work" else "BYOK"
 
@@ -94,6 +95,20 @@ data class RemoteSettings(
                 alwaysOn = !thinkingToggle,
             ),
         )
+    }
+}
+
+data class RemoteApprovalMode(
+    val mode: String,
+    val visible: Boolean,
+    val autoSelectable: Boolean,
+    val reviewModel: String?,
+    val reviewMissing: String?,
+) {
+    val label: String get() = when (mode) {
+        "auto" -> "自动审批"
+        "full" -> "完全访问"
+        else -> "按需审批"
     }
 }
 

@@ -75,6 +75,9 @@ import com.molagpt.app.feature.session.SessionDrawer
 import com.molagpt.app.feature.session.DesktopSidebarConversation
 import com.molagpt.app.feature.session.SessionViewModel
 import com.molagpt.app.feature.settings.AboutScreen
+import com.molagpt.app.feature.settings.BuiltInPromos
+import com.molagpt.app.feature.settings.CommunityUrls
+import com.molagpt.app.feature.settings.SupportScreen
 import com.molagpt.app.feature.settings.ByokProviderDetailScreen
 import com.molagpt.app.feature.settings.ByokProvidersScreen
 import com.molagpt.app.feature.settings.ByokToolsScreen
@@ -109,6 +112,7 @@ private object Routes {
     const val MOLA_ACCOUNT = "mola_account"
     const val PERSONALIZATION = "personalization"
     const val ABOUT = "about"
+    const val SUPPORT = "support"
     const val IMAGE_WORKBENCH = "image_workbench"
     const val IMAGE_GALLERY = "image_gallery"
     const val IMAGE_BASE64 = "image_base64"
@@ -137,6 +141,24 @@ fun MolaNavHost(
 ) {
     val container = LocalAppContainer.current
     val navController = rememberNavController()
+    val navScope = androidx.compose.runtime.rememberCoroutineScope()
+    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+    val openSupport = {
+        if (navController.currentDestination?.route != Routes.SUPPORT) {
+            navController.navigate(Routes.SUPPORT) { launchSingleTop = true }
+        }
+    }
+    val markGitHubStarSeen = {
+        navScope.launch {
+            runCatching { container.settingsStore.addSeenPromoId(BuiltInPromos.GitHubStarV1.id) }
+        }
+        Unit
+    }
+    val openGitHubStar = {
+        markGitHubStarSeen()
+        runCatching { uriHandler.openUri(CommunityUrls.MobileGitHubUrl) }
+        Unit
+    }
     val openAgentControl = {
         val target = if (container.authService.isLoggedIn) Routes.AGENT_CONTROL else Routes.AGENT_LOGIN
         if (navController.currentDestination?.route != target) {
@@ -352,6 +374,8 @@ fun MolaNavHost(
                         navController.navigate(Routes.ABOUT) { launchSingleTop = true }
                     }
                 },
+                onOpenSupport = openSupport,
+                onOpenGitHub = openGitHubStar,
                 onOpenImageWorkbench = {
                     if (navController.currentDestination?.route != Routes.IMAGE_WORKBENCH) {
                         navController.navigate(Routes.IMAGE_WORKBENCH) { launchSingleTop = true }
@@ -404,6 +428,7 @@ fun MolaNavHost(
             )
             val account by container.authService.account.collectAsStateWithLifecycle()
             MolaAccountScreen(
+                onOpenSupport = openSupport,
                 viewModel = vm,
                 loggedIn = account.loggedIn,
                 username = account.username,
@@ -735,6 +760,22 @@ fun MolaNavHost(
                         }
                     }
                 },
+                onOpenSupport = openSupport,
+                onGitHubOpened = markGitHubStarSeen,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        composable(Routes.SUPPORT) {
+            SupportScreen(
+                settingsStore = container.settingsStore,
+                onBack = {
+                    if (navController.currentDestination?.route == Routes.SUPPORT) {
+                        if (!navController.popBackStack()) {
+                            navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        }
+                    }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -814,6 +855,7 @@ fun MolaNavHost(
                 navController.navigate(Routes.PERSONA_MANAGEMENT) { launchSingleTop = true }
             }
         },
+        onOpenSupport = openSupport,
     )
     }
 }

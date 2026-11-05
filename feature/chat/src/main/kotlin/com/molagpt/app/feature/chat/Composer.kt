@@ -137,12 +137,14 @@ fun Composer(
     holdSendForAttachments: Boolean = false,
     /** 工具行（角色、记忆、网络访问、推理）；拿不到可调设置时整行不显示。 */
     showTools: Boolean = true,
+    extraTools: (@Composable () -> Unit)? = null,
     /** 生成中仍可发送：输入内容加入当前回答，输入框为空时才显示停止。 */
     sendWhileStreaming: Boolean = false,
     /** 推理面板的「查看请求参数」，见 [ReasoningSheet]。 */
     showReasoningWireDetail: Boolean = true,
     /** 发送失败后放回输入框的原文；输入框已有新内容时不覆盖。 */
     restoreDraft: ComposerDraft? = null,
+    sendEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
@@ -164,7 +166,7 @@ fun Composer(
     val attachmentsUnsettled = holdSendForAttachments && pendingAttachments.any {
         it.uploadStatus != UploadStatus.UPLOADED
     }
-    val canSend = enabled && !attachmentsUnsettled && (text.isNotBlank() || hasReadyAttachment)
+    val canSend = enabled && sendEnabled && !attachmentsUnsettled && (text.isNotBlank() || hasReadyAttachment)
     val colorScheme = MaterialTheme.colorScheme
     val toolsEnabled = enabled && !isStreaming
     val showThinking = selectedModel?.let { it.supportsThinking || it.supportsReasoningEffort } == true
@@ -293,6 +295,7 @@ fun Composer(
                     onOpenLevels = { showReasoningSheet = true },
                 )
             }
+            extraTools?.invoke()
         }
 
         if (pendingAttachments.isNotEmpty()) {

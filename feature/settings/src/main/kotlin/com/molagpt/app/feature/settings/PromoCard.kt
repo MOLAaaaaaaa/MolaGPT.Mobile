@@ -24,6 +24,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -61,6 +63,7 @@ data class PromoCard(
     val highlights: List<String>,
     val primaryLabel: String,
     val footerNote: String? = null,
+    val minCompletedTurns: Int = 0,
 )
 
 object BuiltInPromos {
@@ -80,7 +83,39 @@ object BuiltInPromos {
         footerNote = " ",
     )
 
-    val all = listOf(RoleplayCardsV1)
+    /** 里程碑（累计完成 5 轮对话）：GitHub Star 引导。 */
+    val GitHubStarV1 = PromoCard(
+        id = "github-star-v1",
+        icon = Icons.Filled.Star,
+        badge = "GITHUB",
+        kicker = "开源项目",
+        title = "觉得 MolaGPT 好用？",
+        body = "MolaGPT Android 已在 GitHub 开源。如果它对你有帮助，欢迎点亮一颗 Star。",
+        highlights = listOf(
+            "开源透明，支持自有 API Key、记忆与本地工具",
+            "每一颗 Star 都能让更多人发现这个项目",
+        ),
+        primaryLabel = "前往 GitHub Star",
+        minCompletedTurns = 5,
+    )
+
+    /** 里程碑（累计完成 15 轮对话）：爱发电赞助引导。 */
+    val AfdianSupportV1 = PromoCard(
+        id = "afdian-support-v1",
+        icon = Icons.Filled.Favorite,
+        badge = "SUPPORT",
+        kicker = "爱发电",
+        title = "支持 MolaGPT 持续维护",
+        body = "如果 MolaGPT 对你有帮助，欢迎赞助支持服务器、模型 API 与后续开发。",
+        highlights = listOf(
+            "¥6 / 月：请我喝杯咖啡，分担日常维护成本",
+            "¥66 / 月：进入「捐赠者」用户组，解锁专属模型与更高可用额度",
+        ),
+        primaryLabel = "查看支持方案",
+        minCompletedTurns = 15,
+    )
+
+    val all = listOf(RoleplayCardsV1, GitHubStarV1, AfdianSupportV1)
 }
 
 /** Promo 卡底部弹窗：X / 手势 / 点遮罩关闭都算已读，由调用方落库。 */

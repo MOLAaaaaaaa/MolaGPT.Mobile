@@ -94,6 +94,7 @@ fun JsonObject.toAccountStatus(displayNameOf: (String) -> String? = { null }): A
         loggedIn = loggedIn,
         userType = type,
         username = username,
+        isDonor = user?.get("is_donor").boolish() || credits?.tier == "donor",
         quotas = quotas,
         credits = credits,
         personalizedMemoryEnabled = (user?.get("settings") as? JsonObject)

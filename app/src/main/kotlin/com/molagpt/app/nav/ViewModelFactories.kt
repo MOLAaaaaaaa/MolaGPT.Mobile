@@ -139,6 +139,7 @@ object ViewModelFactories {
         ChatViewModel(
             sessionId = sessionId,
             chatRepository = container.chatRepository,
+            serverToolApi = container.serverToolApi,
             backgroundStreams = container.backgroundStreamManager,
             sessionRepository = container.sessionRepository,
             personaRepository = container.personaRepository,

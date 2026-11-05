@@ -2,13 +2,16 @@ package com.molagpt.app.feature.settings
 
 import android.util.Log
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.storage.SettingsStore
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.async
@@ -18,8 +21,9 @@ import kotlinx.coroutines.launch
 private const val Tag = "StartupNotices"
 
 /**
- * 每次 App 进入前台（ON_START）检查一次更新、运营消息与本地 Promo。
- * 优先级：运营消息（服务端下发）> 本地 Promo（内置功能介绍）> 更新弹窗。
+ * 每次 App 进入前台（ON_START）检查一次更新、运营消息与本地 Promo；
+ * 对话完成累计轮数达到里程碑阈值时也会评估一次未读的里程碑 Promo。
+ * 优先级：运营消息（服务端下发）> 本地 Promo（功能介绍 / 里程碑引导）> 更新弹窗。
  * 三类各自按 id 只展示一次，互不抢占。
  */
 @Composable
@@ -27,12 +31,29 @@ fun StartupNoticesHost(
     versionName: String,
     settingsStore: SettingsStore,
     onOpenPersonaManagement: () -> Unit = {},
+    onOpenSupport: () -> Unit = {},
 ) {
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
     var pendingOpsMessages by remember { mutableStateOf<List<OpsMessage>>(emptyList()) }
     var pendingPromos by remember { mutableStateOf<List<PromoCard>>(emptyList()) }
+    val completedTurns by settingsStore.completedTurnCountFlow.collectAsStateWithLifecycle(initialValue = 0)
+    val uriHandler = LocalUriHandler.current
     val scope = rememberCoroutineScope()
     val inFlight = remember { AtomicBoolean(false) }
+
+    suspend fun loadEligiblePromos(turns: Int): List<PromoCard> = runCatching {
+        val seen = settingsStore.seenPromoIds()
+        val isDonor = settingsStore.isDonorCached()
+        BuiltInPromos.all.filter { promo ->
+            if (promo.id in seen) return@filter false
+            if (turns < promo.minCompletedTurns) return@filter false
+            if (promo.id == BuiltInPromos.AfdianSupportV1.id && isDonor) {
+                settingsStore.addSeenPromoId(promo.id)
+                return@filter false
+            }
+            true
+        }
+    }.getOrDefault(emptyList())
 
     LifecycleEventEffect(Lifecycle.Event.ON_START) {
         if (updateInfo != null || pendingOpsMessages.isNotEmpty() || pendingPromos.isNotEmpty()) {
@@ -49,13 +70,7 @@ fun StartupNoticesHost(
                             .getOrNull()
                     }
                     val feedJob = async { fetchOpsMessages() }
-                    // 本地 Promo 纯读 DataStore，不发请求。
-                    val promoJob = async {
-                        runCatching {
-                            val seen = settingsStore.seenPromoIds()
-                            BuiltInPromos.all.filter { it.id !in seen }
-                        }.getOrDefault(emptyList())
-                    }
+                    val promoJob = async { loadEligiblePromos(completedTurns) }
                     val update = updateJob.await()
                     val feed = feedJob.await()
                     Log.i(Tag, "result update=${update?.version} messages=${feed?.size}")
@@ -71,6 +86,15 @@ fun StartupNoticesHost(
                 inFlight.set(false)
             }
         }
+    }
+
+    LaunchedEffect(completedTurns) {
+        if (completedTurns < 5) return@LaunchedEffect
+        if (updateInfo != null || pendingOpsMessages.isNotEmpty() || pendingPromos.isNotEmpty()) {
+            return@LaunchedEffect
+        }
+        val eligible = loadEligiblePromos(completedTurns)
+        if (eligible.isNotEmpty()) pendingPromos = eligible
     }
 
     val currentMessage = pendingOpsMessages.firstOrNull()
@@ -89,7 +113,12 @@ fun StartupNoticesHost(
             onPrimary = {
                 scope.launch { settingsStore.addSeenPromoId(currentPromo.id) }
                 pendingPromos = pendingPromos.drop(1)
-                onOpenPersonaManagement()
+                when (currentPromo.id) {
+                    BuiltInPromos.RoleplayCardsV1.id -> onOpenPersonaManagement()
+                    BuiltInPromos.GitHubStarV1.id ->
+                        runCatching { uriHandler.openUri(CommunityUrls.MobileGitHubUrl) }
+                    BuiltInPromos.AfdianSupportV1.id -> onOpenSupport()
+                }
             },
             onDismiss = {
                 scope.launch { settingsStore.addSeenPromoId(currentPromo.id) }

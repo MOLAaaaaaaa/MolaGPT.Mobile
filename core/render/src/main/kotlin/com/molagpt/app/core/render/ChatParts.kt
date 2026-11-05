@@ -95,26 +95,29 @@ fun ToolChip(
     leadingIcon: ImageVector? = null,
     trailingIcon: ImageVector? = null,
     role: Role = Role.Checkbox,
+    accentColor: Color? = null,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(50)
+    val highlighted = checked || accentColor != null
+    val accent = accentColor ?: colorScheme.primary
     val containerColor by animateColorAsState(
         targetValue = when {
-            checked -> colorScheme.primary.copy(alpha = 0.14f)
+            highlighted -> accent.copy(alpha = 0.14f)
             else -> colorScheme.surfaceVariant.copy(alpha = 0.72f)
         },
         label = "toolChipContainer",
     )
     val contentColor by animateColorAsState(
         targetValue = when {
-            !enabled -> colorScheme.onSurfaceVariant.copy(alpha = 0.42f)
-            checked -> colorScheme.primary
+            !enabled -> (accentColor ?: colorScheme.onSurfaceVariant).copy(alpha = 0.42f)
+            highlighted -> accent
             else -> colorScheme.onSurfaceVariant
         },
         label = "toolChipContent",
     )
-    val borderColor = if (checked) {
-        colorScheme.primary.copy(alpha = 0.32f)
+    val borderColor = if (highlighted) {
+        accent.copy(alpha = 0.32f)
     } else {
         colorScheme.outline.copy(alpha = 0.12f)
     }

@@ -35,6 +35,7 @@ class ChatStreamController {
                     resultPreview = event.resultPreview,
                     provider = event.provider,
                     agentId = event.agentId,
+                    serverTool = event.serverTool,
                 ),
             ),
         )

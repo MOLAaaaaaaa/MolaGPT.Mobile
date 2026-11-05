@@ -191,6 +191,7 @@ class AppContainer(
     )
 
     val modelApi = ModelApi(http, modelRegistry, shortTokenManager, authApi)
+    val serverToolApi = com.molagpt.app.core.network.ServerToolApi(http, shortTokenManager)
     private val molaModelLoadMutex = Mutex()
     val byokModelApi = ByokModelApi(http)
     val modelsDevCatalog = com.molagpt.app.core.network.ModelsDevCatalog(http, java.io.File(context.cacheDir, "models-dev.json"))
@@ -206,7 +207,9 @@ class AppContainer(
         dispatchers = dispatchers,
         loader = {
             val jwt = shortTokenManager.freshToken()
-            authApi.status(jwt)?.toAccountStatus { mid -> modelRegistry.find(mid)?.displayName }
+            authApi.status(jwt)?.toAccountStatus { mid -> modelRegistry.find(mid)?.displayName }?.also { st ->
+                if (st.loggedIn) runCatching { settingsStore.setIsDonorCached(st.isDonor) }
+            }
         },
     )
 
@@ -232,6 +235,7 @@ class AppContainer(
                     // 登出/切号：清理旧账户的占位会话并重置同步游标。
                     runCatching { syncEngine.prunePlaceholders() }
                     runCatching { settingsStore.resetSyncCursor() }
+                    runCatching { settingsStore.setIsDonorCached(false) }
                 }
             }
         },
@@ -812,7 +816,10 @@ class AppContainer(
 
         // 每轮对话正常完成 → 增量推送该会话到云端。
         applicationScope.launch {
-            backgroundStreamManager.completions.collect { syncEngine.schedulePush(it.sessionId) }
+            backgroundStreamManager.completions.collect {
+                syncEngine.schedulePush(it.sessionId)
+                runCatching { settingsStore.incrementCompletedTurnCount() }
+            }
         }
     }
 

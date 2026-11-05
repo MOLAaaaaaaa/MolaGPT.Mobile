@@ -6,6 +6,7 @@ import com.molagpt.app.core.model.DesktopConversation
 import com.molagpt.app.core.model.DesktopInfo
 import com.molagpt.app.core.model.DesktopLinkState
 import com.molagpt.app.core.model.RemoteApproval
+import com.molagpt.app.core.model.RemoteApprovalMode
 import com.molagpt.app.core.model.RemoteAttachmentRules
 import com.molagpt.app.core.model.RemoteDraftDefaults
 import com.molagpt.app.core.model.RemoteModelChoice
@@ -562,6 +563,19 @@ class DesktopRemoteService(
                 attachments = attachments?.let {
                     RemoteAttachmentRules(images = it.bool("images") == true, files = it.bool("files") == true)
                 },
+                approval = parseApprovalMode(data["approval"] as? JsonObject),
+            )
+        }
+
+        fun parseApprovalMode(data: JsonObject?): RemoteApprovalMode? {
+            data ?: return null
+            val mode = data.string("mode")?.takeIf { it in listOf("approval", "auto", "full") } ?: return null
+            return RemoteApprovalMode(
+                mode = mode,
+                visible = data.bool("visible") == true,
+                autoSelectable = data.bool("autoSelectable") == true,
+                reviewModel = data.string("reviewModel"),
+                reviewMissing = data.string("reviewMissing"),
             )
         }
 

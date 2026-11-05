@@ -88,6 +88,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -244,6 +247,28 @@ fun ChatScreen(
     /** 已加载具体对话：有消息历史。此时返回应开启新对话，顶栏显示新建按钮。 */
     val isActiveConversation = state.messages.isNotEmpty() && !state.isLoadingHistory
     val context = LocalContext.current
+    val toolActionScope = rememberCoroutineScope()
+    var downloadTicket by remember { mutableStateOf<String?>(null) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
+    val saveToolFile = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        val ticket = downloadTicket
+        downloadTicket = null
+        if (uri != null && ticket != null) toolActionScope.launch {
+            try { viewModel.downloadServerTool(ticket, uri) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { downloadError = error.message ?: "文件保存失败" }
+        }
+    }
+    val toolActions = remember(viewModel, saveToolFile) {
+        ServerToolActions(viewModel::retryServerTool) { ticket, filename ->
+            downloadTicket = ticket
+            saveToolFile.launch(filename.ifBlank { "download" })
+        }
+    }
+    downloadError?.let { error ->
+        AlertDialog(onDismissRequest = { downloadError = null }, title = { Text("文件保存失败") },
+            text = { Text(error) }, confirmButton = { TextButton(onClick = { downloadError = null }) { Text("确定") } })
+    }
     val startNewChat = {
         Toast.makeText(context, "已开启新对话", Toast.LENGTH_SHORT).show()
         onNewChat()
@@ -393,7 +418,7 @@ fun ChatScreen(
 
     // 图片预览宿主包在最外层（Scaffold 外），全屏 overlay 才能盖住顶栏和输入框。
     ImagePreviewHost(modifier = modifier.fillMaxSize()) {
-        CompositionLocalProvider(LocalVisualHost provides visualHost, LocalSubagentLinks provides subagentLinks) {
+        CompositionLocalProvider(LocalVisualHost provides visualHost, LocalSubagentLinks provides subagentLinks, LocalServerToolActions provides toolActions) {
             Box(modifier = Modifier.fillMaxSize()) {
                 MolaScaffold(
                     modifier = Modifier.fillMaxSize().then(drawerSwipeModifier).then(

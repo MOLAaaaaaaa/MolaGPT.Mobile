@@ -1,8 +1,9 @@
 package com.molagpt.app.core.network
 
 import com.molagpt.app.core.model.ToolStatus
+import com.molagpt.app.core.model.ServerToolInfo
 
-internal sealed interface WebToolArtifact {
+sealed interface WebToolArtifact {
     data class Text(val text: String) : WebToolArtifact
     data class Tool(
         val id: String,
@@ -12,10 +13,11 @@ internal sealed interface WebToolArtifact {
         val preview: String? = null,
         val provider: String? = null,
         val agentId: String? = null,
+        val serverTool: ServerToolInfo? = null,
     ) : WebToolArtifact
 }
 
-internal class WebToolArtifactSplitter {
+class WebToolArtifactSplitter {
     private val carry = StringBuilder()
     private val activeToolIds = mutableMapOf<String, String>()
     private var activeDs: DsState? = null
@@ -25,6 +27,8 @@ internal class WebToolArtifactSplitter {
      */
     private var lastRunningTool: ToolRef? = null
     private var sequence = 0
+    private val managedTools = mutableMapOf<String, WebToolArtifact.Tool>()
+    private var closedMcp = false
 
     fun feed(text: String): List<WebToolArtifact> {
         carry.append(text)
@@ -48,7 +52,12 @@ internal class WebToolArtifactSplitter {
                 val keep = if (flush) 0 else longestMarkerPrefixSuffix(s)
                 val flushLen = s.length - keep
                 if (flushLen > 0) {
-                    out += WebToolArtifact.Text(s.substring(0, flushLen))
+                    val text = s.substring(0, flushLen)
+                    if (text.any { !it.isWhitespace() && it != '\u200B' && it != '\uFEFF' }) {
+                        lastRunningTool = null
+                        closedMcp = false
+                    }
+                    out += WebToolArtifact.Text(text)
                     carry.delete(0, flushLen)
                 }
                 break
@@ -61,7 +70,9 @@ internal class WebToolArtifactSplitter {
             }
 
             if (marker.type == MarkerType.DS_ANALYSIS) {
+                val before = carry.length
                 consumeDsStart(flush, out)
+                if (carry.length == before && activeDs == null) break
                 continue
             }
 
@@ -75,11 +86,15 @@ internal class WebToolArtifactSplitter {
             }
 
             val raw = s.substring(0, end + marker.endToken.length)
-            out += when (marker.type) {
+            val artifact = when (marker.type) {
                 MarkerType.TOOL_STATUS -> parseToolStatus(raw)
                 MarkerType.STEEL_STEP -> parseSteelStep(raw)
                 MarkerType.DS_ANALYSIS -> error("DSanalysis is handled by consumeDsStart")
             }
+            val redundantConnectorStatus = closedMcp && artifact.serverTool == null &&
+                artifact.status == ToolStatus.SUCCESS && artifact.label in setOf("处理中...", "处理中…")
+            if (!redundantConnectorStatus) out += artifact
+            closedMcp = false
             carry.delete(0, raw.length)
         }
         return out
@@ -101,8 +116,17 @@ internal class WebToolArtifactSplitter {
         val phase = attr(tag, "data-analysis-phase")?.lowercase()
         val showContent = toolType.lowercase() in CONTENT_VISIBLE_TOOL_TYPES
         // 分析标签完成时，优先更新最近一个仍在进行的工具卡片。
-        val prev = lastRunningTool
+        val wireId = attr(tag, "data-tool-call")
+        val managed = wireId?.let(managedTools::get) ?: lastRunningTool?.id?.let(managedTools::get)
+        val prev = managed?.let { ToolRef(it.id, toolKey(it.name), it.name, it.label, it.provider.orEmpty()) } ?: lastRunningTool
         val state = when {
+            managed != null -> DsState(
+                id = managed.id, key = toolKey(managed.name), name = managed.name,
+                label = managed.label, provider = managed.provider.orEmpty(), phase = phase,
+                showContent = showContent || toolType == "web_search", emitCard = true,
+                serverTool = managed.serverTool, managedStatus = managed.status,
+                initialPreview = managed.preview,
+            )
             // 需要显示内容的工具：有前置卡片则复用，否则独立新建。
             showContent -> DsState(
                 id = prev?.id ?: toolIdFor(toolKey(toolType), ToolStatus.RUNNING),
@@ -147,21 +171,32 @@ internal class WebToolArtifactSplitter {
         val end = text.indexOf("</DSanalysis>")
         if (end >= 0) {
             state.buffer.append(text.substring(0, end))
-            val status = when (state.phase) {
+            val status = state.managedStatus ?: when (state.phase) {
                 "error", "failed", "failure" -> ToolStatus.FAILED
+                "cancelled" -> ToolStatus.CANCELLED
                 else -> ToolStatus.SUCCESS
             }
-            if (state.emitCard) out += state.toTool(status)
+            if (state.emitCard) {
+                val tool = state.toTool(status)
+                if (state.serverTool != null) managedTools[state.id] = tool
+                out += tool
+            }
             // 关联卡片已结束：清位置锚点与其 key（后续同类工具会新建卡片）。
-            if (state.key.isNotEmpty()) activeToolIds.remove(state.key)
-            lastRunningTool = null
+            if (state.serverTool == null) {
+                if (state.key.isNotEmpty()) activeToolIds.remove(state.key)
+                lastRunningTool = null
+            }
+            closedMcp = state.name == "mcp"
             activeDs = null
             carry.delete(0, end + "</DSanalysis>".length)
         } else {
-            state.buffer.append(text)
-            carry.clear()
+            val close = "</DSanalysis>"
+            val keep = (minOf(text.length, close.length - 1) downTo 1)
+                .firstOrNull { text.endsWith(close.take(it), ignoreCase = true) } ?: 0
+            state.buffer.append(text.dropLast(keep))
+            carry.delete(0, text.length - keep)
             // 仅白名单(显内容)在流式中刷新；非白名单复用前置卡片不必刷（完成时一次性置完成）。
-            if (state.emitCard && state.showContent) out += state.toTool(ToolStatus.RUNNING)
+            if (state.emitCard && state.showContent) out += state.toTool(state.managedStatus ?: ToolStatus.RUNNING)
         }
     }
 
@@ -172,6 +207,7 @@ internal class WebToolArtifactSplitter {
         }.minByOrNull { it.index }
 
     private fun parseToolStatus(raw: String): WebToolArtifact.Tool {
+        if (attr(raw, "data-tool-call") != null) return parseManagedTool(raw)
         val batch = Regex("""data-subagent-batch="([^"]+)"""").find(raw)?.groupValues?.get(1)
         if (batch != null) return WebToolArtifact.Tool(
             id = "subagents_$batch", name = "server_subagents", status = ToolStatus.RUNNING,
@@ -180,6 +216,7 @@ internal class WebToolArtifactSplitter {
         val classes = raw.substringBefore('>').lowercase()
         val label = stripHtml(raw).ifBlank { "工具调用中" }
         val status = when {
+            "cancelled" in classes -> ToolStatus.CANCELLED
             "error" in classes -> ToolStatus.FAILED
             "completed" in classes || "success" in classes -> ToolStatus.SUCCESS
             else -> ToolStatus.RUNNING
@@ -211,6 +248,7 @@ internal class WebToolArtifactSplitter {
     }
 
     private fun parseSteelStep(raw: String): WebToolArtifact.Tool {
+        if (attr(raw, "data-tool-call") != null) return parseManagedTool(raw)
         val label = stripHtml(raw).ifBlank { "网页访问" }
         val status = if (label.contains("失败") || label.contains("错误")) ToolStatus.FAILED else ToolStatus.RUNNING
         val key = toolKey("steel_browser")
@@ -228,6 +266,42 @@ internal class WebToolArtifactSplitter {
             label = label,
             provider = provider,
         )
+    }
+
+    private fun parseManagedTool(raw: String): WebToolArtifact.Tool {
+        val id = requireNotNull(attr(raw, "data-tool-call"))
+        val previous = managedTools[id]
+        val classes = Regex("""class=["']([^"']*)["']""").find(raw)?.groupValues?.get(1).orEmpty()
+        val status = when {
+            "cancelled" in classes -> ToolStatus.CANCELLED
+            "error" in classes -> ToolStatus.FAILED
+            "completed" in classes || "success" in classes -> ToolStatus.SUCCESS
+            else -> ToolStatus.RUNNING
+        }
+        val label = Regex("""<p\b[^>]*>(.*?)</p>""", RegexOption.DOT_MATCHES_ALL)
+            .find(raw)?.groupValues?.get(1)?.let(::stripHtml).orEmpty()
+        fun field(css: String) = Regex("""<(?:div|span)\b[^>]*class=["'][^"']*\b$css\b[^"']*["'][^>]*>(.*?)</(?:div|span)>""", RegexOption.DOT_MATCHES_ALL)
+            .find(raw)?.groupValues?.get(1)?.let(::stripHtml)
+        fun ticket(css: String) = Regex("""<button\b[^>]*class=["'][^"']*\b$css\b[^"']*["'][^>]*>""")
+            .find(raw)?.value?.let { attr(it, "data-tool-ticket") }
+        val info = ServerToolInfo(
+            callId = id, icon = attr(raw, "data-tool-icon") ?: previous?.serverTool?.icon,
+            runningLabel = previous?.serverTool?.runningLabel ?: label.takeIf { status == ToolStatus.RUNNING },
+            metadata = field("tool-status-meta") ?: field("tool-steel-meta-item") ?: previous?.serverTool?.metadata,
+            error = field("tool-status-error"), retryTicket = ticket("tool-download-retry"),
+            fileTicket = ticket("tool-retry-file"), filename = attr(raw, "data-filename"),
+        )
+        val name = attr(raw, "data-tool-name") ?: previous?.name ?: "tool"
+        val tool = WebToolArtifact.Tool(
+            id = id, name = name, status = status, label = label,
+            preview = previous?.preview ?: Regex("""<span\b[^>]*class=["'][^"']*\btool-search-chip-text\b[^"']*["'][^>]*>(.*?)</span>""", RegexOption.DOT_MATCHES_ALL)
+                .findAll(raw).map { stripHtml(it.groupValues[1]) }.joinToString("\n").ifBlank { null },
+            provider = readableProvider(name), serverTool = info,
+        )
+        managedTools[id] = tool
+        if (status == ToolStatus.RUNNING) lastRunningTool = ToolRef(id, toolKey(name), name, label, tool.provider.orEmpty())
+        else if (lastRunningTool?.id == id) lastRunningTool = null
+        return tool
     }
 
     private fun toolIdFor(key: String, status: ToolStatus): String {
@@ -289,7 +363,7 @@ internal class WebToolArtifactSplitter {
 
     private fun attr(tag: String, name: String): String? {
         val pattern = Regex("""$name\s*=\s*["']([^"']*)["']""")
-        return pattern.find(tag)?.groupValues?.getOrNull(1)
+        return pattern.find(tag)?.groupValues?.getOrNull(1)?.decodeBasicHtml()
     }
 
     private fun analysisLabel(toolType: String): String = when (toolType) {
@@ -303,6 +377,14 @@ internal class WebToolArtifactSplitter {
     }
 
     private fun readableProvider(name: String): String = when (name) {
+        "read_document", "search_document" -> "会话文档"
+        "molagpt_fast_codebase_search", "code-search" -> "项目代码"
+        "activate_skill" -> "技能"
+        "recall_memory", "forget_memories_by_description" -> "记忆"
+        "molagpt_import_sandbox_to_project" -> "项目文件"
+        "analyze_image", "visual_search" -> "图片查看"
+        "image_file_process" -> "图片处理"
+        "image_generation_and_editing" -> "图片生成"
         "web_search", "search_web" -> "联网搜索"
         "steel_browser", "browser" -> "网页阅读"
         "execute_python_code", "python" -> "Python"
@@ -327,6 +409,9 @@ internal class WebToolArtifactSplitter {
         val showContent: Boolean,
         /** 是否产生/更新可见工具卡片。false=非白名单且无前置卡片，完全隐藏（仅消费文本不渲染）。 */
         val emitCard: Boolean,
+        val serverTool: ServerToolInfo? = null,
+        val managedStatus: ToolStatus? = null,
+        val initialPreview: String? = null,
         val buffer: StringBuilder = StringBuilder(),
     ) {
         fun toTool(status: ToolStatus): WebToolArtifact.Tool =
@@ -336,11 +421,12 @@ internal class WebToolArtifactSplitter {
                 status = status,
                 label = label,
                 preview = if (showContent) {
-                    buffer.toString().let { stripPreview(it) }.takeIf { it.isNotBlank() }
+                    buffer.toString().let { stripPreview(it) }.takeIf { it.isNotBlank() } ?: initialPreview
                 } else {
-                    null
+                    initialPreview
                 },
                 provider = provider,
+                serverTool = serverTool,
             )
 
         private fun stripPreview(raw: String): String = raw
@@ -379,7 +465,7 @@ internal class WebToolArtifactSplitter {
          * 分析标签内容显示白名单（data-tool-type 取值）。
          * 其余类型只更新工具卡片状态，不展开原始分析内容。
          */
-        val CONTENT_VISIBLE_TOOL_TYPES = setOf("python", "mcp", "image-action")
+        val CONTENT_VISIBLE_TOOL_TYPES = setOf("python", "mcp", "image-action", "code-search")
 
         val MARKERS = listOf(
             Marker("<blockquote class=\"tool-status", "</blockquote>", MarkerType.TOOL_STATUS),

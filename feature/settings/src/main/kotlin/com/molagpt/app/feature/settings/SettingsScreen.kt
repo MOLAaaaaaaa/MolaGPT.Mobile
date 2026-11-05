@@ -31,7 +31,9 @@ import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.DesktopWindows
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Face
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Tune
@@ -68,6 +70,8 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenMolaAccount: () -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenSupport: () -> Unit = {},
+    onOpenGitHub: () -> Unit = {},
     onOpenImageWorkbench: () -> Unit,
     onOpenAgentControl: () -> Unit,
     /** 「电脑」一行的副标题，如在线台数；为空时显示功能说明。 */
@@ -227,6 +231,20 @@ fun SettingsScreen(
             item { SectionTitle("关于") }
             item {
                 SettingsGroup {
+                    SettingsEntryRow(
+                        icon = Icons.Outlined.FavoriteBorder,
+                        title = "支持 MolaGPT",
+                        subtitle = "爱发电赞助、捐赠者权益与感谢名单",
+                        onClick = onOpenSupport,
+                        showDivider = true,
+                    )
+                    SettingsEntryRow(
+                        icon = Icons.Outlined.StarOutline,
+                        title = "GitHub 开源仓库",
+                        subtitle = "前往 GitHub 点亮 Star",
+                        onClick = onOpenGitHub,
+                        showDivider = true,
+                    )
                     SettingsEntryRow(
                         icon = Icons.Outlined.Info,
                         title = "关于 MolaGPT",

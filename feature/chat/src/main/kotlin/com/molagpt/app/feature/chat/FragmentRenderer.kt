@@ -1,6 +1,13 @@
 package com.molagpt.app.feature.chat
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,18 +19,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Alignment
-import com.molagpt.app.core.render.shimmer
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.CompositionLocalProvider
@@ -93,7 +98,7 @@ fun FragmentRenderer(
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = colors.onSurfaceVariant)
                     } else {
                         Icon(
-                            if (fragment.status == ToolStatus.SUCCESS) Icons.Filled.Check else Icons.Filled.Warning,
+                            Icons.Filled.Groups,
                             contentDescription = null, modifier = Modifier.size(16.dp),
                             tint = if (fragment.status == ToolStatus.FAILED) colors.error else colors.onSurfaceVariant,
                         )
@@ -105,9 +110,7 @@ fun FragmentRenderer(
                         fontWeight = FontWeight.Medium,
                         color = colors.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f).then(
-                            if (fragment.status == ToolStatus.RUNNING) Modifier.shimmer() else Modifier,
-                        ),
+                        modifier = Modifier.weight(1f),
                     )
                     fragment.statusLabel?.let {
                         Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant.copy(alpha = 0.75f))
@@ -116,14 +119,35 @@ fun FragmentRenderer(
                     Icon(Icons.Filled.ChevronRight, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(16.dp))
                 }
             } else Column(modifier) {
+                val actions = LocalServerToolActions.current
+                val scope = rememberCoroutineScope()
+                var actionBusy by remember(fragment.id) { mutableStateOf(false) }
+                var actionError by remember(fragment.id) { mutableStateOf<String?>(null) }
+                val tool = actions?.results?.get(fragment.id) ?: fragment
+                val retryTicket = tool.serverTool?.retryTicket
+                val fileTicket = tool.serverTool?.fileTicket
                 ToolCallView(
-                    name = fragment.name,
-                    status = fragment.status,
-                    label = fragment.label,
-                    resultPreview = fragment.resultPreview,
-                    argsJson = fragment.argsJson,
-                    provider = fragment.provider,
-                    statusLabel = fragment.statusLabel,
+                    name = tool.name,
+                    status = tool.status,
+                    label = tool.label,
+                    resultPreview = tool.resultPreview,
+                    argsJson = tool.argsJson,
+                    provider = tool.provider,
+                    statusLabel = tool.statusLabel,
+                    serverTool = tool.serverTool,
+                    actionBusy = actionBusy,
+                    actionError = actionError,
+                    onRetry = if (actions != null && retryTicket != null) ({
+                        scope.launch {
+                            actionBusy = true
+                            actionError = null
+                            try { actions.results[fragment.id] = actions.retry(retryTicket) }
+                            catch (cancelled: CancellationException) { throw cancelled }
+                            catch (error: Exception) { actionError = error.message ?: "重试失败" }
+                            finally { actionBusy = false }
+                        }
+                    }) else null,
+                    onDownload = if (actions != null && fileTicket != null) ({ actions.download(fileTicket, tool.serverTool?.filename.orEmpty()) }) else null,
                 )
                 if (agentId != null && links != null) {
                     TextButton(onClick = { links.open(agentId) }) { Text("查看子 Agent") }
@@ -183,14 +207,16 @@ internal fun toolCallGroupPresentation(
     val first = fragments.firstOrNull() ?: return null
     val running = fragments.count { it.status == ToolStatus.RUNNING }
     val failed = fragments.count { it.status == ToolStatus.FAILED }
-    val completed = fragments.size - running - failed
+    val cancelled = fragments.count { it.status == ToolStatus.CANCELLED }
+    val completed = fragments.size - running - failed - cancelled
     val status = when {
         running > 0 -> ToolStatus.RUNNING
         failed > 0 -> ToolStatus.FAILED
+        cancelled > 0 -> ToolStatus.CANCELLED
         else -> ToolStatus.SUCCESS
     }
     val preview = fragments.mapIndexed { index, fragment ->
-        val query = searchQuery(fragment.argsJson) ?: "搜索请求"
+        val query = searchQuery(fragment.argsJson) ?: fragment.resultPreview?.takeIf { it.isNotBlank() } ?: "搜索请求"
         "${index + 1}. $query"
     }.joinToString("\n")
 
@@ -200,6 +226,7 @@ internal fun toolCallGroupPresentation(
         title = when {
             status == ToolStatus.RUNNING -> "正在进行 ${fragments.size} 项搜索"
             status == ToolStatus.FAILED -> if (completed > 0) "搜索已结束" else "搜索失败"
+            status == ToolStatus.CANCELLED -> "搜索已停止"
             else -> "已完成 ${fragments.size} 次搜索"
         },
         meta = "联网搜索",

@@ -182,9 +182,13 @@ class AnonRemoteService(
     // ---- requests ------------------------------------------------------------------
 
     override suspend fun request(machineId: String, op: String, args: JsonObject): JsonObject {
-        val connection = awaitConnection(machineId)
-        val reply = connection.request(op, args)
-        return reply.optObj("data") ?: JsonObject(emptyMap())
+        try {
+            val connection = awaitConnection(machineId)
+            val reply = connection.request(op, args)
+            return reply.optObj("data") ?: JsonObject(emptyMap())
+        } catch (error: kotlinx.coroutines.TimeoutCancellationException) {
+            throw DesktopRemoteException("timeout", "电脑未响应")
+        }
     }
 
     override fun requestQuietly(machineId: String, op: String, args: JsonObject) {

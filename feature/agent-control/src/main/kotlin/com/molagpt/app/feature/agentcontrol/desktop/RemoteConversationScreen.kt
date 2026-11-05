@@ -421,7 +421,19 @@ fun RemoteConversationScreen(
                                 onStop = vm::stop,
                                 showAttachments = rules != null,
                                 showTools = settings != null,
-                                sendWhileStreaming = true,
+                                extraTools = {
+                                    settings?.approval?.takeIf { it.visible }?.let { approval ->
+                                        RemoteApprovalModeControl(
+                                            approval = approval,
+                                            machineName = machineName,
+                                            enabled = state.live,
+                                            changing = state.settingApprovalMode,
+                                            onSelect = vm::setApprovalMode,
+                                        )
+                                    }
+                                },
+                                sendWhileStreaming = state.pendingAttachments.isEmpty(),
+                                sendEnabled = !state.sending && (!state.busy || state.pendingAttachments.isEmpty()),
                                 showReasoningWireDetail = false,
                                 restoreDraft = restoreDraft,
                             )
