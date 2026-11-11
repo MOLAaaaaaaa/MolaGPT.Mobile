@@ -55,26 +55,45 @@ import androidx.compose.ui.unit.dp
 import com.molagpt.app.core.render.MolaScaffold
 import com.molagpt.app.core.render.MolaTopBar
 import com.molagpt.app.core.storage.SettingsStore
+import com.molagpt.app.core.model.MembershipInfo
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SupportScreen(
     settingsStore: SettingsStore,
+    loggedIn: Boolean,
+    membership: MembershipInfo?,
+    openingMembership: Boolean,
+    statusLoading: Boolean,
+    statusError: String?,
+    onOpenMembership: (String?) -> Unit,
+    onRefreshMembership: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { onRefreshMembership() }
 
     var snapshot by remember { mutableStateOf<SponsorsSnapshot?>(null) }
     var loading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var reloadNonce by remember { mutableIntStateOf(0) }
+    var products by remember { mutableStateOf<List<MembershipProduct>?>(null) }
+    var productsError by remember { mutableStateOf(false) }
+    var productsReloadNonce by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(Unit) {
         runCatching { settingsStore.addSeenPromoId(BuiltInPromos.AfdianSupportV1.id) }
+    }
+
+    LaunchedEffect(productsReloadNonce) {
+        productsError = false
+        fetchMembershipProducts().onSuccess { products = it }.onFailure { productsError = true }
     }
 
     LaunchedEffect(reloadNonce) {
@@ -96,7 +115,7 @@ fun SupportScreen(
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
         topBar = {
             MolaTopBar(
-                title = { Text("支持 MolaGPT") },
+                title = { Text("支持") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -122,23 +141,69 @@ fun SupportScreen(
                 modifier = Modifier.padding(horizontal = 2.dp),
             )
 
-            SectionTitle("爱发电方案")
+            SectionTitle("我的支持")
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = when {
+                            !loggedIn -> "登录后查看支持者状态"
+                            statusLoading -> "正在加载支持者状态"
+                            statusError != null -> "支持者状态暂时无法获取"
+                            membership != null -> membership.summary()
+                            else -> "暂无支持者权益"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            if (loggedIn && statusError != null) onRefreshMembership()
+                            else onOpenMembership(null)
+                        },
+                        enabled = !openingMembership && !statusLoading,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            when {
+                                openingMembership -> "正在打开…"
+                                loggedIn && statusError != null -> "重试获取状态"
+                                loggedIn -> "查看支持者状态"
+                                else -> "登录并查看"
+                            },
+                        )
+                    }
+                }
+            }
 
-            SupportPlanOption(
-                title = "小小的赞助 · ¥6 / 月",
-                subtitle = "请我喝杯咖啡，分担服务器与日常维护成本",
-                badge = null,
-                highlighted = false,
-                onClick = { openExternal(CommunityUrls.AfdianPlan6Url) },
-            )
+            SectionTitle("支持方案")
 
-            SupportPlanOption(
-                title = "超级大的赞助 · ¥66 / 月",
-                subtitle = "进入「捐赠者」用户组，使用更多模型与更高可用额度。发电时请备注 MolaGPT 用户名，或发电后加群联系我开通。",
-                badge = "捐赠者权益",
-                highlighted = true,
-                onClick = { openExternal(CommunityUrls.AfdianPlan66Url) },
-            )
+            val availableProducts = products
+            if (availableProducts == null || availableProducts.isEmpty()) {
+                Text(
+                    text = if (productsError) "无法加载支持方案，请稍后重试" else if (availableProducts == null) "正在加载支持方案…" else "暂无支持方案",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (productsError) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = { productsReloadNonce++ }) { Text("重试") }
+                        OutlinedButton(onClick = { onOpenMembership(null) }) { Text("打开支持中心") }
+                    }
+                }
+            } else {
+                availableProducts.forEach { product ->
+                    SupportPlanOption(
+                        title = "${product.name} · ¥${product.price} / ${product.durationDays} 天",
+                        subtitle = "享有对应可用模型和使用额度。",
+                        badge = null,
+                        highlighted = false,
+                        onClick = { onOpenMembership(product.id) },
+                    )
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
@@ -154,7 +219,7 @@ fun SupportScreen(
                         contentDescription = null,
                         modifier = Modifier.size(17.dp),
                     )
-                    Text("爱发电主页", modifier = Modifier.padding(start = 7.dp))
+                    Text("支持主页", modifier = Modifier.padding(start = 7.dp))
                 }
                 OutlinedButton(
                     onClick = {
@@ -185,7 +250,7 @@ fun SupportScreen(
                 val count = snapshot?.totalCount ?: 0
                 if (count > 0) {
                     Text(
-                        text = "已有 $count 位朋友赞助支持",
+                        text = "已有 $count 位朋友支持项目",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(end = 4.dp),
@@ -234,7 +299,7 @@ fun SupportScreen(
                 }
                 else -> {
                     Text(
-                        text = "暂无赞助记录",
+                        text = "暂无支持记录",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
@@ -331,7 +396,7 @@ private fun SponsorListSurface(items: List<SponsorEntry>) {
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = "捐赠日期：${item.donateDateText}",
+                            text = "支持日期：${item.donateDateText}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 2.dp),

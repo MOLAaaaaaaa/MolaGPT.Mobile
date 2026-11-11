@@ -2,6 +2,7 @@ package com.molagpt.app.core.network
 
 import com.molagpt.app.core.model.AccountStatus
 import com.molagpt.app.core.model.CreditsInfo
+import com.molagpt.app.core.model.MembershipInfo
 import com.molagpt.app.core.model.WebSearchUsage
 import com.molagpt.app.core.model.QuotaItem
 import kotlinx.serialization.json.JsonObject
@@ -10,6 +11,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 
 /**
  * 把 `status.php` 的原始 JSON 解析成 [AccountStatus]（个人中心用）。
@@ -40,6 +42,7 @@ fun JsonObject.toAccountStatus(displayNameOf: (String) -> String? = { null }): A
     val tokensUsage = user?.get("tokens_usage") as? JsonObject
     val modelStatus = this["model_status"] as? JsonObject
     val credits = (user?.get("credits") as? JsonObject)?.toCreditsInfo()
+    val membership = (user?.get("membership") as? JsonObject)?.toMembershipInfo()
 
     val quotas = modelStatus?.entries?.mapNotNull { (mid, st) ->
         val s = st as? JsonObject ?: return@mapNotNull null
@@ -94,7 +97,8 @@ fun JsonObject.toAccountStatus(displayNameOf: (String) -> String? = { null }): A
         loggedIn = loggedIn,
         userType = type,
         username = username,
-        isDonor = user?.get("is_donor").boolish() || credits?.tier == "donor",
+        isDonor = membership?.isMember ?: (user?.get("is_donor").boolish() || credits?.tier in setOf("donor", "premium")),
+        membership = membership,
         quotas = quotas,
         credits = credits,
         personalizedMemoryEnabled = (user?.get("settings") as? JsonObject)
@@ -108,7 +112,7 @@ fun JsonObject.toAccountStatus(displayNameOf: (String) -> String? = { null }): A
  * 这些原因下模型对当前用户根本不存在，留在配额列表里只是噪音。
  * `unpriced` 不在其中：那是「后台漏了定价」，标出来比藏起来有用。
  */
-private val STRUCTURALLY_HIDDEN_REASONS = setOf("model_not_found", "model_disabled", "donor_only")
+private val STRUCTURALLY_HIDDEN_REASONS = setOf("model_not_found", "model_disabled", "donor_only", "premium_only")
 
 /** `user.tokens_usage[mid]`，当日口径。 */
 private fun sameDayTokens(tokensUsage: JsonObject?, mid: String): Int? =
@@ -159,3 +163,16 @@ private fun kotlinx.serialization.json.JsonElement?.boolishOrNull(): Boolean? {
         else -> null
     }
 }
+
+fun JsonObject.toMembershipInfo(): MembershipInfo = MembershipInfo(
+    groupKey = this["group_key"]?.prim()?.contentOrNull,
+    displayName = this["display_name"]?.prim()?.contentOrNull,
+    tier = this["tier"]?.prim()?.contentOrNull ?: "registered",
+    expiresAt = this["expires_at"]?.prim()?.longOrNull,
+    serverTime = this["server_time"]?.prim()?.longOrNull ?: 0L,
+    policyVersion = this["policy_version"]?.prim()?.intOrNull ?: 0,
+    donorUntil = this["donor_until"]?.prim()?.longOrNull,
+    premiumUntil = this["premium_until"]?.prim()?.longOrNull,
+    sourceStatus = this["source_status"]?.prim()?.contentOrNull ?: "none",
+    isPermanent = this["is_permanent"].boolish(),
+)

@@ -68,20 +68,22 @@ class StreamParser(
         val delta = choice?.get("delta") as? JsonObject
 
         // —— 增量正文 / 推理 ——
-        val contentText = delta?.get("content")?.prim()?.contentOrNull
-            ?: root["content"]?.prim()?.contentOrNull
-            ?: responseTextDelta(root, eventType)
         var thinking = delta?.get("reasoning_content")?.prim()?.contentOrNull
             ?: delta?.get("reasoning")?.prim()?.contentOrNull
             ?: responseThinkingDelta(root, eventType)
         if (!thinking.isNullOrEmpty()) {
             events.add(StreamEvent.Delta(thinking = thinking))
         }
-        if (!contentText.isNullOrEmpty()) {
-            webArtifacts.feed(contentText).forEach { artifact ->
+        val appendText: (String) -> Unit = { text ->
+            webArtifacts.feed(text).forEach { artifact ->
                 appendArtifact(artifact, events)
             }
         }
+        forEachOpenAiContentPart(
+            delta?.get("content") ?: root["content"] ?: responseTextDelta(root, eventType)?.let(::JsonPrimitive),
+            onText = appendText,
+            onThinking = { if (it.isNotEmpty()) events.add(StreamEvent.Delta(thinking = it)) },
+        )
 
         // —— 工具调用（简化：标记运行中；完整合成属后续增强）——
         (delta?.get("tool_calls") as? JsonArray)?.forEach { tc ->

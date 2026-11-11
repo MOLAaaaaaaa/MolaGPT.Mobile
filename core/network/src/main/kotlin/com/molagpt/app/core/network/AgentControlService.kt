@@ -143,7 +143,7 @@ class AgentControlService(
     /** Agent 的普通 JSON 调用专用客户端（共享连接池）。共享的 [MolaHttp.okHttp]
      *  为 SSE 把 read/call 超时都设成了 0——半开 socket 会让列表/历史/命令调用
      *  永久挂起，详情页看起来像冻结。这里的调用都是小 JSON，必须有整体超时。 */
-    private val jsonHttp = http.okHttp.newBuilder()
+    private val jsonHttp = http.accountOkHttp.newBuilder()
         .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .build()

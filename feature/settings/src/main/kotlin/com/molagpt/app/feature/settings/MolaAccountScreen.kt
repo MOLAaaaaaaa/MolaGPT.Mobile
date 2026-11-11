@@ -83,6 +83,7 @@ fun MolaAccountScreen(
     val s by viewModel.settings.collectAsStateWithLifecycle()
     val status by viewModel.status.collectAsStateWithLifecycle()
     val statusLoading by viewModel.statusLoading.collectAsStateWithLifecycle()
+    val statusError by viewModel.statusError.collectAsStateWithLifecycle()
     val syncing by viewModel.syncing.collectAsStateWithLifecycle()
 
     // 配额只在真正打开本页时才确保拉取（命中容器级缓存则不重拉）。
@@ -122,10 +123,10 @@ fun MolaAccountScreen(
 
             if (!loggedIn) GuestBenefitsCard(onOpenLogin = onOpenLogin)
 
-            SectionTitle("配额用量 · 今日")
-            QuotaSection(status = status, loading = statusLoading, onRefresh = viewModel::refreshStatus)
+            SectionTitle("配额用量")
+            QuotaSection(status = status, loading = statusLoading, error = statusError, onRefresh = viewModel::refreshStatus)
 
-            SupportAccountEntryCard(isDonor = status?.isDonor == true, onClick = onOpenSupport)
+            SupportAccountEntryCard(status = status, onClick = onOpenSupport)
 
             // 云同步与个性化记忆依赖账号，游客态隐藏。
             if (loggedIn) {
@@ -268,7 +269,8 @@ private fun AccountHero(
             )
             Text(
                 text = when {
-                    loggedIn && status?.isDonor == true -> "捐赠者"
+                    loggedIn && status?.membership != null -> status.membership?.summary().orEmpty()
+                    loggedIn && status?.isDonor == true -> "支持者"
                     registered -> "已登录账号"
                     loggedIn -> "已登录账号"
                     else -> "登录后可享跨设备同步、解锁更多模型等特性"
@@ -286,16 +288,17 @@ private fun AccountHero(
 }
 
 @Composable
-private fun QuotaSection(status: AccountStatus?, loading: Boolean, onRefresh: () -> Unit) {
+private fun QuotaSection(status: AccountStatus?, loading: Boolean, error: String?, onRefresh: () -> Unit) {
     val credits = status?.credits
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(
             text = when {
                 status == null && loading -> "正在获取配额…"
+                status == null && error != null -> "配额状态暂时无法获取"
                 status == null -> "未获取到配额"
-                status.quotas.isEmpty() -> "暂无配额信息"
                 // 档位与结算口径由 CreditsSummary 给，这里不重复。
                 credits != null -> "额度用量"
+                status.quotas.isEmpty() -> "暂无配额信息"
                 else -> "额度每日重置"
             },
             style = MaterialTheme.typography.bodySmall,
@@ -588,7 +591,7 @@ private fun MolaGptToolsSection(
 
 /** 粗粒度相对时间（避免引入日期库）。注意：与 Date 无关，仅用当前毫秒差。 */
 @Composable
-private fun SupportAccountEntryCard(isDonor: Boolean, onClick: () -> Unit) {
+private fun SupportAccountEntryCard(status: AccountStatus?, onClick: () -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
         shape = RoundedCornerShape(18.dp),
@@ -603,13 +606,10 @@ private fun SupportAccountEntryCard(isDonor: Boolean, onClick: () -> Unit) {
         ) {
             SettingsRowIcon(Icons.Outlined.FavoriteBorder)
             Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text("支持 MolaGPT", style = MaterialTheme.typography.bodyLarge)
+                Text("支持者状态", style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    text = if (isDonor) {
-                        "感谢你的支持 · 查看爱发电方案与感谢名单"
-                    } else {
-                        "¥66/月档位可进入「捐赠者」用户组，解锁专属模型与更高额度"
-                    },
+                    text = status?.membership?.summary()
+                        ?: "查看支持者状态与支持方案",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 2.dp),

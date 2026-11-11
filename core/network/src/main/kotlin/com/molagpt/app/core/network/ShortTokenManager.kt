@@ -12,6 +12,7 @@ import io.ktor.http.isSuccess
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 统一短 token 管理。
@@ -33,41 +34,60 @@ class ShortTokenManager(
     /** 读本地长 token（登录态）；游客为 null。 */
     private val longTokenProvider: () -> String?,
     /** auth.php 续签了长 token 时回存。 */
-    private val onRenewedLongToken: (String) -> Unit,
+    private val onRenewedLongToken: (String, String) -> Boolean,
     /** 长 token 失效（ua_mismatch / 被降级）时清登录态。 */
-    private val onLoginInvalidated: () -> Unit,
+    private val onLoginInvalidated: (String) -> Boolean,
 ) {
     @Volatile private var cachedToken: String? = null
     @Volatile private var cachedExpiresAtMs: Long = 0L
     private val mutex = Mutex()
+    private val cacheGate = Any()
+    private val generation = AtomicLong()
 
     /** 取一个有效短 token；命中缓存则直接返回，否则换取。失败抛 [MolaApiException]。 */
     suspend fun freshToken(): String {
+        val expectedGeneration = generation.get()
         cached()?.let { return it }
         return mutex.withLock {
-            cached() ?: refresh()
+            while (true) {
+                if (generation.get() != expectedGeneration) throw MolaApiException(null, "登录账户已变化，请重试")
+                cached()?.let { return@withLock it }
+                try {
+                    return@withLock refresh(expectedGeneration)
+                } catch (_: SessionChanged) {
+                    // 同一会话的访问令牌刷新后重取；切换账户不能继续先前发起的操作。
+                    if (generation.get() != expectedGeneration)
+                        throw MolaApiException(null, "登录账户已变化，请重试")
+                }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
         }
     }
 
     /** 登录/登出后调用：丢弃缓存，强制下次以新身份重新换取。 */
     fun invalidate() {
-        cachedToken = null
-        cachedExpiresAtMs = 0L
+        synchronized(cacheGate) {
+            generation.incrementAndGet()
+            cachedToken = null
+            cachedExpiresAtMs = 0L
+        }
     }
 
-    private fun cached(): String? {
+    private fun cached(): String? = synchronized(cacheGate) {
         val t = cachedToken ?: return null
-        return if (System.currentTimeMillis() < cachedExpiresAtMs - REFRESH_THRESHOLD_MS) t else null
+        if (System.currentTimeMillis() < cachedExpiresAtMs - REFRESH_THRESHOLD_MS) t else null
     }
 
-    private suspend fun refresh(): String = withContext(dispatchers.io) {
+    private suspend fun refresh(expectedGeneration: Long): String = withContext(dispatchers.io) {
         val challenge = fetchChallenge()
         val number = altchaSolver.solve(challenge)
             ?: throw MolaApiException(null, "人机验证求解失败，请重试")
         val payload = altchaSolver.buildPayload(challenge, number)
         val longToken = longTokenProvider()
+        if (generation.get() != expectedGeneration) throw SessionChanged()
 
-        val resp = http.client.get(MolaEndpoints.absolute(MolaEndpoints.SHORT_TOKEN_AUTH)) {
+        val resp = http.accountClient.get(MolaEndpoints.absolute(MolaEndpoints.SHORT_TOKEN_AUTH)) {
             header(HEADER_ALTCHA, payload)
             header(HttpHeaders.CacheControl, "no-cache")
             if (!longToken.isNullOrBlank()) header(HttpHeaders.Authorization, "Bearer $longToken")
@@ -84,24 +104,35 @@ class ShortTokenManager(
         body.error?.let { throw MolaApiException(null, "鉴权失败：$it") }
         val token = body.token.takeIf { it.isNotBlank() }
             ?: throw MolaApiException(null, "服务端未返回令牌")
+        if (generation.get() != expectedGeneration || longTokenProvider() != longToken)
+            throw SessionChanged()
 
         // 登录失效降级：本地带了长 token，但服务端没认（UA 不符或非 registered）→ 清登录、继续用游客短 token。
         // 服务端关了游客聊天时，降级后什么都发不出去，直接让用户重新登录。
         if (!longToken.isNullOrBlank() && (body.uaMismatch || body.userType != "registered")) {
             Logger.w("ShortToken", "login downgraded to guest (uaMismatch=${body.uaMismatch}, type=${body.userType})")
-            onLoginInvalidated()
+            if (!onLoginInvalidated(longToken)) throw SessionChanged()
             if (!body.guestChatEnabled) throw MolaAuthExpiredException()
-        } else if (!body.renewedLoginToken.isNullOrBlank()) {
-            onRenewedLongToken(body.renewedLoginToken!!)
+            throw SessionChanged()
+        }
+        val renewed = body.renewedLoginToken?.takeIf { it.isNotBlank() && !longToken.isNullOrBlank() }
+        if (renewed != null && !onRenewedLongToken(longToken!!, renewed)) {
+            throw SessionChanged()
         }
 
-        cachedToken = token
-        cachedExpiresAtMs = System.currentTimeMillis() + TOKEN_TTL_MS
+        synchronized(cacheGate) {
+            if (generation.get() != expectedGeneration || longTokenProvider() != (renewed ?: longToken))
+                throw SessionChanged()
+            cachedToken = token
+            cachedExpiresAtMs = System.currentTimeMillis() + TOKEN_TTL_MS
+        }
         token
     }
 
+    private class SessionChanged : Exception()
+
     private suspend fun fetchChallenge(): AltchaChallenge {
-        val resp = http.client.get(MolaEndpoints.absolute(MolaEndpoints.CHALLENGE)) {
+        val resp = http.accountClient.get(MolaEndpoints.absolute(MolaEndpoints.CHALLENGE)) {
             header(HttpHeaders.CacheControl, "no-cache")
         }
         if (!resp.status.isSuccess()) {

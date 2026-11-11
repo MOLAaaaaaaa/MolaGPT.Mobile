@@ -23,6 +23,8 @@ class MolaHttp(
     enableLogging: Boolean = false,
     loadDeviceCookie: () -> String? = { null },
     saveDeviceCookie: (String?) -> Unit = {},
+    resolveAccountToken: (String) -> String = { it },
+    onAccountTokenRejected: (String) -> Unit = {},
 ) {
     val json: Json = Json {
         ignoreUnknownKeys = true
@@ -47,9 +49,45 @@ class MolaHttp(
         }
         .build()
 
-    val client: HttpClient = HttpClient(OkHttp) {
+    val accountOkHttp: OkHttpClient = okHttp.newBuilder()
+        .retryOnConnectionFailure(false)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .addInterceptor { chain ->
+            val url = chain.request().url
+            require(url.isHttps && url.host == "chatgpt.wljay.cn" && url.port == 443 &&
+                url.username.isEmpty() && url.password.isEmpty()) {
+                "MolaGPT 账户请求只能访问官方 HTTPS 地址"
+            }
+            val request = chain.request()
+            val authorization = request.header("Authorization")
+            val authorized = if (authorization?.startsWith("Bearer ", ignoreCase = true) == true) {
+                val token = try {
+                    resolveAccountToken(authorization.substring(7))
+                } catch (error: java.io.IOException) {
+                    throw error
+                } catch (_: Exception) {
+                    throw java.io.IOException("无法续期登录会话，请稍后重试")
+                }
+                request.newBuilder().header("Authorization", "Bearer " + token).build()
+            } else request
+            val response = chain.proceed(authorized)
+            if (response.code == 401) {
+                authorized.header("Authorization")?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }
+                    ?.substring(7)?.let(onAccountTokenRejected)
+            }
+            response
+        }
+        .build()
+
+    val client: HttpClient = createClient(okHttp, enableLogging, true)
+    val accountClient: HttpClient = createClient(accountOkHttp, enableLogging, false)
+
+    private fun createClient(engineClient: OkHttpClient, enableLogging: Boolean, redirects: Boolean): HttpClient =
+        HttpClient(OkHttp) {
         expectSuccess = false
-        engine { preconfigured = okHttp }
+        followRedirects = redirects
+        engine { preconfigured = engineClient }
         install(ContentNegotiation) { json(json) }
         if (enableLogging) {
             install(Logging) {
@@ -64,6 +102,7 @@ class MolaHttp(
     }
 
     fun close() {
+        accountClient.close()
         client.close()
     }
 }

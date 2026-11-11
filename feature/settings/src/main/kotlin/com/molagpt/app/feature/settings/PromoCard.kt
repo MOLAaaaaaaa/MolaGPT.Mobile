@@ -99,17 +99,17 @@ object BuiltInPromos {
         minCompletedTurns = 5,
     )
 
-    /** 里程碑（累计完成 15 轮对话）：爱发电赞助引导。 */
+    /** 里程碑（累计完成 15 轮对话）：项目支持引导。 */
     val AfdianSupportV1 = PromoCard(
         id = "afdian-support-v1",
         icon = Icons.Filled.Favorite,
         badge = "SUPPORT",
-        kicker = "爱发电",
+        kicker = "支持项目",
         title = "支持 MolaGPT 持续维护",
-        body = "如果 MolaGPT 对你有帮助，欢迎赞助支持服务器、模型 API 与后续开发。",
+        body = "如果 MolaGPT 对你有帮助，欢迎支持服务器、模型 API 与后续开发。",
         highlights = listOf(
-            "¥6 / 月：请我喝杯咖啡，分担日常维护成本",
-            "¥66 / 月：进入「捐赠者」用户组，解锁专属模型与更高可用额度",
+            "¥6 / 月：基础支持者权益，含对应模型和每日额度",
+            "¥66 / 月：支持者权益，含对应模型和每日额度",
         ),
         primaryLabel = "查看支持方案",
         minCompletedTurns = 15,

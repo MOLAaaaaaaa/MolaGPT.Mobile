@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         maybeRequestNotificationPermission()
         handleOpenNotificationIntent(intent)
+        handleOAuthIntent(intent)
         setContent {
             val settings by container.settingsFlow.collectAsStateWithLifecycle()
             val byokModelsReady by container.byokModelsReady.collectAsStateWithLifecycle()
@@ -86,6 +87,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleOpenNotificationIntent(intent)
+        handleOAuthIntent(intent)
     }
 
     override fun onStart() {
@@ -96,6 +98,13 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         container.setAppForeground(false)
+    }
+
+    private fun handleOAuthIntent(intent: Intent?) {
+        val uri = intent?.data ?: return
+        if (uri.scheme != "molagpt" || uri.host != "oauth_callback") return
+        intent.data = null
+        container.handleOAuthCallback(uri)
     }
 
     private fun handleOpenNotificationIntent(intent: Intent?) {

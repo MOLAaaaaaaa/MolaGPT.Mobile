@@ -258,7 +258,7 @@ private fun ActionButtons(
                 tint = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.size(17.dp),
             )
-            Text("支持 MolaGPT（爱发电）", modifier = Modifier.padding(start = 8.dp))
+            Text("支持 MolaGPT", modifier = Modifier.padding(start = 8.dp))
         }
     }
 }

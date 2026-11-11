@@ -55,7 +55,6 @@ benchmarkMacro = "1.5.0"
 uiautomator = "2.3.0"
 
 # —— 测试 ——
-junit = "4.13.2"
 androidxJunit = "1.2.1"
 espresso = "3.6.1"
 
@@ -122,10 +121,8 @@ androidx-benchmark-macro-junit4 = { group = "androidx.benchmark", name = "benchm
 androidx-test-uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }
 
 # 测试
-junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxJunit" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
-kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
 
 [bundles]
 compose = [

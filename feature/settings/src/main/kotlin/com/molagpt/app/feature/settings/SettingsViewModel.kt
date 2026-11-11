@@ -62,6 +62,7 @@ class SettingsViewModel(
     // 配额状态直接转发容器级缓存：导航返回不再重拉，仅显式刷新/登录态变化才打网络。
     val status: StateFlow<AccountStatus?> = accountStatus.status
     val statusLoading: StateFlow<Boolean> = accountStatus.loading
+    val statusError: StateFlow<String?> = accountStatus.error
     val byokProviderList: StateFlow<List<ByokProvider>> =
         byokProviders.providers.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     private val _byokStatus = MutableStateFlow<String?>(null)

@@ -186,10 +186,14 @@ object ViewModelFactories {
 
     /** 短 token → status.php → AccountStatus（设置页 / 个性化页共用，含读回服务端个性化开关）。 */
     private suspend fun loadAccountStatus(container: AppContainer): AccountStatus? {
-        val jwt = container.shortTokenManager.freshToken()
-        return container.authApi.status(jwt)?.toAccountStatus { mid ->
+        val accountToken = container.credentialStore.sessionTokens()?.accessToken
+        val loaded = container.authApi.status(accountToken)?.toAccountStatus { mid ->
             container.modelRegistry.find(mid)?.displayName
         }
+        if (accountToken != null && loaded?.loggedIn != true) {
+            throw IllegalStateException("账号状态未返回当前账户")
+        }
+        return loaded
     }
 
     private inline fun <reified VM : ViewModel> factory(crossinline create: () -> VM) =

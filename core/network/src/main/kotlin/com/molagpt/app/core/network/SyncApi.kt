@@ -69,7 +69,7 @@ class SyncApi(private val http: MolaHttp) {
     }
 
     private suspend fun post(jwt: String, body: JsonObject): JsonObject? = runCatching {
-        val resp = http.client.post(url) {
+        val resp = http.accountClient.post(url) {
             header(HttpHeaders.Authorization, "Bearer $jwt")
             contentType(ContentType.Application.Json)
             setBody(http.json.encodeToString(JsonObject.serializer(), body))

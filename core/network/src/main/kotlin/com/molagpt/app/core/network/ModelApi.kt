@@ -33,8 +33,8 @@ import kotlinx.serialization.json.jsonPrimitive
 class ModelApi(
     private val http: MolaHttp,
     private val registry: ModelRegistry,
-    private val shortTokenManager: ShortTokenManager,
     private val authApi: AuthApi,
+    private val accountTokenProvider: () -> String? = { null },
 ) {
     suspend fun refresh(): List<ProviderModel> {
         registry.beginRefresh()
@@ -47,7 +47,7 @@ class ModelApi(
 
     private suspend fun refreshInternal(): List<ProviderModel> {
         val text = withTimeoutOrNull(MODEL_CONFIG_TIMEOUT_MS) {
-            val resp = http.client.get(MolaEndpoints.absolute(MolaEndpoints.MODEL_CONFIG))
+            val resp = http.accountClient.get(MolaEndpoints.absolute(MolaEndpoints.MODEL_CONFIG))
             if (!resp.status.isSuccess()) {
                 Logger.w("ModelApi", "model config failed: HTTP ${resp.status.value}")
                 return@withTimeoutOrNull null
@@ -122,8 +122,9 @@ class ModelApi(
     /** status.php 的 model_status → 「模型 key → 配额状态」。失败/超时返回 null（调用方据此不过滤）。 */
     private suspend fun fetchModelStatuses(): Map<String, ModelQuotaStatus>? = withTimeoutOrNull(STATUS_TIMEOUT_MS) {
         runCatching {
-            val jwt = shortTokenManager.freshToken()
-            val status = authApi.status(jwt) ?: return@runCatching null
+            // status.php validates the persistent account access token. A chat short
+            // token contains purpose claims and is intentionally treated as guest.
+            val status = authApi.status(accountTokenProvider()) ?: return@runCatching null
             val modelStatus = status["model_status"] as? JsonObject ?: return@runCatching null
             modelStatus.entries.associate { (key, value) ->
                 val o = value as? JsonObject

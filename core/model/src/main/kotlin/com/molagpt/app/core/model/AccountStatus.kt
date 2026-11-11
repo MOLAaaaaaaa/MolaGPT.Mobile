@@ -14,6 +14,7 @@ data class AccountStatus(
     val userType: String,
     val username: String?,
     val isDonor: Boolean = false,
+    val membership: MembershipInfo? = null,
     val quotas: List<QuotaItem> = emptyList(),
     /** 服务端 `user.credits`；null = 后端未启用点数配额，按旧的逐模型额度渲染。 */
     val credits: CreditsInfo? = null,
@@ -79,7 +80,8 @@ data class CreditsInfo(
      */
     val tierLabel: String
         get() = when (tier) {
-            "donor" -> "捐赠者"
+            "donor" -> "支持者"
+            "premium" -> "高级支持者"
             "new" -> "新账号"
             "guest" -> "访客"
             else -> "注册用户"

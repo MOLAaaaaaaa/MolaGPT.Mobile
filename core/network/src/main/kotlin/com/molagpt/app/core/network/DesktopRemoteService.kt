@@ -88,13 +88,13 @@ class DesktopRemoteService(
     private val base = MolaEndpoints.BASE_URL.trimEnd('/')
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
 
-    private val jsonHttp = http.okHttp.newBuilder()
+    private val jsonHttp = http.accountOkHttp.newBuilder()
         .callTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
 
     // 长连接：没有整体超时，靠中转每 20 秒的 ping 与 OkHttp 的 pingInterval 发现断线。
-    private val socketHttp = http.okHttp.newBuilder()
+    private val socketHttp = http.accountOkHttp.newBuilder()
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
 

@@ -89,6 +89,7 @@ class MolaGptChatService(
         val httpReq = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer $jwt")
+            .header("Idempotency-Key", request.streamSessionId)
             .header("Accept", "text/event-stream")
             .post(bodyJson.toRequestBody(JSON_MEDIA))
             .build()
@@ -120,7 +121,7 @@ class MolaGptChatService(
     override suspend fun stopGeneration(streamSessionId: String) {
         val jwt = runCatching { shortTokenManager.freshToken() }.getOrNull() ?: return
         runCatching {
-            http.client.post(MolaEndpoints.absolute(MolaEndpoints.STOP_STREAM)) {
+            http.accountClient.post(MolaEndpoints.absolute(MolaEndpoints.STOP_STREAM)) {
                 header(HttpHeaders.Authorization, "Bearer $jwt")
                 contentType(ContentType.Application.Json)
                 setBody(buildJsonObject { put("session_id", streamSessionId) })
@@ -131,7 +132,7 @@ class MolaGptChatService(
     override suspend fun checkStreamStatus(streamSessionId: String): StreamStatus? = withContext(dispatchers.io) {
         val jwt = runCatching { shortTokenManager.freshToken() }.getOrNull() ?: return@withContext null
         runCatching {
-            val resp = http.client.post(MolaEndpoints.absolute(MolaEndpoints.CHECK_STREAM_STATUS)) {
+            val resp = http.accountClient.post(MolaEndpoints.absolute(MolaEndpoints.CHECK_STREAM_STATUS)) {
                 header(HttpHeaders.Authorization, "Bearer $jwt")
                 contentType(ContentType.Application.Json)
                 setBody(buildJsonObject { putJsonArray("session_ids") { add(streamSessionId) } })
@@ -180,7 +181,7 @@ class MolaGptChatService(
             .header("Authorization", "Bearer $jwt")
             .post(multipart)
             .build()
-        http.okHttp.newCall(req).execute().use { resp ->
+        http.accountOkHttp.newCall(req).execute().use { resp ->
             if (resp.code == 401) throw MolaAuthExpiredException()
             val text = resp.body?.string().orEmpty()
             val fileObj = runCatching {
@@ -207,7 +208,7 @@ class MolaGptChatService(
         val assistantPreview = request.lastAssistantText.orEmpty().trim().take(1000)
         if (user.isBlank() || assistantPreview.isBlank()) return fallback
         return runCatching {
-            val resp = http.client.post(MolaEndpoints.absolute(MolaEndpoints.GENERATE_TITLE)) {
+            val resp = http.accountClient.post(MolaEndpoints.absolute(MolaEndpoints.GENERATE_TITLE)) {
                 header(HttpHeaders.Authorization, "Bearer $jwt")
                 contentType(ContentType.Application.Json)
                 setBody(
@@ -275,7 +276,7 @@ class MolaGptChatService(
             .header("Authorization", "Bearer $jwt")
             .post(bodyJson.toRequestBody(JSON_MEDIA))
             .build()
-        http.okHttp.newCall(req).execute().use { resp ->
+        http.accountOkHttp.newCall(req).execute().use { resp ->
             if (resp.code == 401) throw MolaAuthExpiredException()
             val text = resp.body?.string().orEmpty().trimStart('\uFEFF')
             if (!resp.isSuccessful) {
@@ -411,7 +412,7 @@ class MolaGptChatService(
         parser: StreamParser,
         offset: ResumeOffset,
     ): Boolean {
-        val call = http.okHttp.newCall(request)
+        val call = http.accountOkHttp.newCall(request)
         try {
             call.execute().use { resp ->
                 if (resp.code == 401) throw MolaAuthExpiredException()

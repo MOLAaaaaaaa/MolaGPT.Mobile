@@ -270,7 +270,7 @@ class UserDataApi(private val http: MolaHttp) {
      * 提前 return 会把用户最需要看到的拒绝原因丢掉。由 [write] 按 `success` 字段判定成败。
      */
     private suspend fun post(jwt: String, body: JsonObject): JsonObject? = runCatching {
-        val resp = http.client.post(url) {
+        val resp = http.accountClient.post(url) {
             header(HttpHeaders.Authorization, "Bearer $jwt")
             contentType(ContentType.Application.Json)
             setBody(http.json.encodeToString(JsonObject.serializer(), body))

@@ -16,7 +16,7 @@ import java.io.OutputStream
 import java.util.concurrent.TimeUnit
 
 class ServerToolApi(private val http: MolaHttp, private val tokens: ShortTokenManager) {
-    private val client = http.okHttp.newBuilder().readTimeout(2, TimeUnit.MINUTES).callTimeout(2, TimeUnit.MINUTES).build()
+    private val client = http.accountOkHttp.newBuilder().readTimeout(2, TimeUnit.MINUTES).callTimeout(2, TimeUnit.MINUTES).build()
 
     private suspend fun request(ticket: String, action: String): Request {
         val token = tokens.freshToken()

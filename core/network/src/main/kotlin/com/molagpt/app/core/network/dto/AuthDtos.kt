@@ -8,12 +8,15 @@ data class LoginRequest(
     val username: String,
     /** sha256(明文密码) 的小写十六进制。 */
     val password: String,
+    @SerialName("session_protocol") val sessionProtocol: Int = 2,
 )
 
 /** oauth_exchange.php 入参：一次性 handoff code。 */
 @Serializable
 data class OAuthExchangeRequest(
     val code: String,
+    @SerialName("code_verifier") val codeVerifier: String,
+    @SerialName("session_protocol") val sessionProtocol: Int = 2,
 )
 
 @Serializable
@@ -22,6 +25,10 @@ data class LoginResponse(
     val token: String? = null,
     val message: String? = null,
     val userInfo: UserInfoDto? = null,
+    @SerialName("refresh_token") val refreshToken: String? = null,
+    @SerialName("expires_at") val expiresAt: Long? = null,
+    @SerialName("expires_in") val expiresIn: Int? = null,
+    @SerialName("session_protocol") val sessionProtocol: Int = 1,
 )
 
 @Serializable

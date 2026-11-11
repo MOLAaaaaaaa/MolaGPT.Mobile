@@ -42,5 +42,4 @@ dependencies {
     // LaTeX：JLaTeXMath Android 版，使用原生 Canvas 渲染。
     implementation(libs.jlatexmath.android)
 
-    testImplementation(libs.junit)
 }

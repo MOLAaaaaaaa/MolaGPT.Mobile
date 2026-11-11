@@ -17,11 +17,30 @@ import kotlinx.serialization.json.longOrNull
 object CommunityUrls {
     const val MobileGitHubUrl = "https://github.com/MOLAaaaaaaa/MolaGPT.Mobile"
     const val AfdianHomeUrl = "https://afdian.com/a/molagpt"
-    const val AfdianPlan6Url =
-        "https://afdian.com/order/create?plan_id=c459a9a2558011f0ab0d52540025c377&product_type=0"
-    const val AfdianPlan66Url =
-        "https://afdian.com/order/create?plan_id=a01180ce558011f099fd52540025c377&product_type=0"
     const val SponsorsApiUrl = "https://chatgpt.wljay.cn/v2/api/sponsors.php?page=1"
+}
+
+data class MembershipProduct(val id: String, val name: String, val price: String, val durationDays: Int)
+
+suspend fun fetchMembershipProducts(): Result<List<MembershipProduct>> = withContext(Dispatchers.IO) {
+    runCatching {
+        val conn = URL("https://chatgpt.wljay.cn/v2/api/auth/membership_products.php").openConnection()
+        conn.setRequestProperty("User-Agent", UserAgentProvider.FIXED_UA)
+        conn.setRequestProperty("X-MolaGPT-Client", UserAgentProvider.CLIENT_MARKER)
+        conn.connectTimeout = 10_000
+        conn.readTimeout = 10_000
+        val root = remoteFeedJson.parseToJsonElement(conn.getInputStream().bufferedReader().readText().trimStart(Char(0xFEFF))) as JsonObject
+        check((root["success"] as? JsonPrimitive)?.contentOrNull == "true")
+        (root["products"] as JsonArray).map { item ->
+            val product = item as JsonObject
+            MembershipProduct(
+                id = (product["id"] as JsonPrimitive).content,
+                name = (product["name"] as JsonPrimitive).content,
+                price = (product["price_cny"] as JsonPrimitive).content,
+                durationDays = (product["duration_days"] as JsonPrimitive).content.toInt(),
+            )
+        }
+    }
 }
 
 data class SponsorEntry(

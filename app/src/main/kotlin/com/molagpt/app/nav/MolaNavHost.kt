@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.Lifecycle
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -34,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -140,6 +142,7 @@ fun MolaNavHost(
     modifier: Modifier = Modifier,
 ) {
     val container = LocalAppContainer.current
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
     val navController = rememberNavController()
     val navScope = androidx.compose.runtime.rememberCoroutineScope()
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -231,9 +234,16 @@ fun MolaNavHost(
     ) {
         composable(Routes.LOGIN) {
             val vm: AuthViewModel = viewModel(factory = ViewModelFactories.auth(container))
+            val previousState = remember { navController.previousBackStackEntry?.savedStateHandle }
             LoginScreen(
                 viewModel = vm,
                 onLoggedIn = {
+                    previousState?.let { state ->
+                        if (state.get<Boolean>("membership_pending") == true) {
+                            state["membership_generation"] = container.credentialStore.sessionTokens()?.generation
+                            state["membership_confirmed"] = true
+                        }
+                    }
                     if (!navController.popBackStack()) {
                         navController.navigate(Routes.CHAT) {
                             popUpTo(Routes.LOGIN) { inclusive = true }
@@ -437,7 +447,16 @@ fun MolaNavHost(
                         navController.navigate(Routes.LOGIN) { launchSingleTop = true }
                     }
                 },
-                onLogout = { container.authService.logout() },
+                onLogout = {
+                    navScope.launch {
+                        if (!container.authService.logoutRemote()) {
+                            android.widget.Toast.makeText(
+                                appContext, "服务器会话撤销未确认，请联系管理员撤销旧会话。",
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
+                },
                 onBack = {
                     if (navController.currentDestination?.route == Routes.MOLA_ACCOUNT) {
                         navController.popBackStack()
@@ -766,9 +785,67 @@ fun MolaNavHost(
             )
         }
 
-        composable(Routes.SUPPORT) {
+        composable(Routes.SUPPORT) { backStackEntry ->
+            val account by container.authService.account.collectAsStateWithLifecycle()
+            val status by container.accountStatusCache.status.collectAsStateWithLifecycle()
+            var openingMembership by remember { mutableStateOf(false) }
+            val supportScope = rememberCoroutineScope()
+            val supportState = backStackEntry.savedStateHandle
+            val membershipConfirmed by supportState.getStateFlow("membership_confirmed", false).collectAsStateWithLifecycle()
+            LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+                if (supportState.get<Boolean>("membership_pending") == true &&
+                    supportState.get<Boolean>("membership_confirmed") != true) {
+                    supportState.remove<String>("membership_product")
+                    supportState["membership_pending"] = false
+                }
+            }
+            fun openMembership(productKey: String?) {
+                if (!account.loggedIn) {
+                    supportState["membership_product"] = productKey
+                    supportState["membership_pending"] = true
+                    supportState["membership_confirmed"] = false
+                    navController.navigate(Routes.LOGIN) { launchSingleTop = true }
+                } else if (!openingMembership) {
+                    openingMembership = true
+                    supportScope.launch {
+                        try {
+                            val session = container.credentialStore.sessionTokens()
+                                ?: throw IllegalStateException("请先登录")
+                            val url = container.authApi.membershipPortal(session.accessToken, productKey)
+                            if (container.credentialStore.sessionTokens()?.generation != session.generation)
+                                throw IllegalStateException("登录账户已变化，请重试")
+                            if (navController.currentBackStackEntry != backStackEntry) return@launch
+                            uriHandler.openUri(url)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            android.widget.Toast.makeText(appContext, "无法打开支持页面，请稍后重试", android.widget.Toast.LENGTH_LONG).show()
+                        } finally {
+                            openingMembership = false
+                        }
+                    }
+                }
+            }
+            LaunchedEffect(account.loggedIn, account.username, membershipConfirmed) {
+                container.accountStatusCache.ensure(force = true)
+                if (account.loggedIn && membershipConfirmed) {
+                    val productKey = supportState.remove<String>("membership_product")
+                    val generation = supportState.remove<Long>("membership_generation")
+                    supportState["membership_pending"] = false
+                    supportState["membership_confirmed"] = false
+                    if (generation != null && container.credentialStore.sessionTokens()?.generation == generation)
+                        openMembership(productKey)
+                }
+            }
             SupportScreen(
                 settingsStore = container.settingsStore,
+                loggedIn = account.loggedIn,
+                membership = status?.membership,
+                statusLoading = container.accountStatusCache.loading.collectAsStateWithLifecycle().value,
+                statusError = container.accountStatusCache.error.collectAsStateWithLifecycle().value,
+                openingMembership = openingMembership,
+                onRefreshMembership = { container.accountStatusCache.ensure(force = true) },
+                onOpenMembership = ::openMembership,
                 onBack = {
                     if (navController.currentDestination?.route == Routes.SUPPORT) {
                         if (!navController.popBackStack()) {

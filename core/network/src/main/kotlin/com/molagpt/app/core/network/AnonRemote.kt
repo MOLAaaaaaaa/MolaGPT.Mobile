@@ -81,11 +81,11 @@ class AnonRemoteService(
     private val authority = "chatgpt.wljay.cn"
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
 
-    private val jsonHttp = http.okHttp.newBuilder()
+    private val jsonHttp = http.accountOkHttp.newBuilder()
         .callTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
-    private val socketHttp = http.okHttp.newBuilder()
+    private val socketHttp = http.accountOkHttp.newBuilder()
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
 

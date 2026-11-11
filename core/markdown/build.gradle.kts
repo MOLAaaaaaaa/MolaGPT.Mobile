@@ -16,5 +16,4 @@ dependencies {
     // mola-ui 围栏里的 JSON 只按树读，不需要序列化插件。
     implementation(libs.kotlinx.serialization.json)
 
-    testImplementation(libs.junit)
 }

@@ -32,8 +32,13 @@ class AccountStatusCache(
     private val _loading = MutableStateFlow(false)
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
 
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
     private var lastLoadedAt: Long = 0L
     private val mutex = Mutex()
+    private val stateGate = Any()
+    private var generation = 0L
 
     /** 缓存是否仍新鲜（有值且在窗口内）。 */
     private fun isFresh(): Boolean = _status.value != null && (nowProvider() - lastLoadedAt) < freshnessWindowMs
@@ -43,26 +48,51 @@ class AccountStatusCache(
      * 导航返回应调用 force=false；用户点“刷新”用 force=true。
      */
     fun ensure(force: Boolean = false) {
-        if (!force && (isFresh() || _loading.value)) return
+        val requestedGeneration = synchronized(stateGate) {
+            if (!force && (isFresh() || _loading.value)) return
+            generation
+        }
         scope.launch {
             mutex.withLock {
-                if (!force && isFresh()) return@withLock
-                _loading.value = true
-                runCatching { withContext(dispatchers.io) { loader() } }
-                    .onSuccess {
-                        if (it != null) {
-                            _status.value = it
+                synchronized(stateGate) {
+                    if (generation != requestedGeneration || (!force && isFresh())) return@withLock
+                    _loading.value = true
+                    _error.value = null
+                }
+                try {
+                    val loaded = withContext(dispatchers.io) { loader() }
+                    if (loaded == null) throw IllegalStateException("状态接口没有返回有效数据")
+                    synchronized(stateGate) {
+                        if (generation == requestedGeneration) {
+                            _status.value = loaded
                             lastLoadedAt = nowProvider()
                         }
                     }
-                _loading.value = false
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (error: Exception) {
+                    synchronized(stateGate) {
+                        if (generation == requestedGeneration) {
+                            _error.value = error.message?.takeIf { it.isNotBlank() } ?: "状态暂时无法获取"
+                        }
+                    }
+                } finally {
+                    synchronized(stateGate) {
+                        if (generation == requestedGeneration) _loading.value = false
+                    }
+                }
             }
         }
     }
 
     /** 登录态变化：清空缓存，下次 ensure 必拉取（游客/登录可用额度不同）。 */
     fun invalidate() {
-        _status.value = null
-        lastLoadedAt = 0L
+        synchronized(stateGate) {
+            generation++
+            _status.value = null
+            _error.value = null
+            lastLoadedAt = 0L
+            _loading.value = false
+        }
     }
 }

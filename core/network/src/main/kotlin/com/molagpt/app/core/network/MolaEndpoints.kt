@@ -1,5 +1,7 @@
 package com.molagpt.app.core.network
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 /**
  * MolaGPT 真实后端端点（基址 `https://chatgpt.wljay.cn/v2/`，全 HTTPS）。
  * 对话端点不在此列——按所选模型的相对 `apiUrl`（来自 model_config_public.php）动态解析。
@@ -8,6 +10,9 @@ object MolaEndpoints {
     const val BASE_URL = "https://chatgpt.wljay.cn/v2/"
 
     const val LOGIN = "api/auth/login.php"
+    const val LOGOUT = "api/auth/logout.php"
+    const val SESSION_REFRESH = "api/auth/session_refresh.php"
+    const val MEMBERSHIP_PORTAL = "api/auth/membership_portal.php"
     const val OAUTH_EXCHANGE = "api/auth/oauth_exchange.php"
     const val STATUS = "api/auth/status.php"
     const val MODEL_CONFIG = "api/auth/model_config_public.php"
@@ -36,6 +41,17 @@ object MolaEndpoints {
     /** 模型未提供 apiUrl 时的兜底（自动路由）。 */
     const val DEFAULT_CHAT_API = "api/auth/chatAuto.php"
 
-    fun absolute(relative: String): String =
-        if (relative.startsWith("http")) relative else BASE_URL + relative.removePrefix("/")
+    fun absolute(relative: String): String {
+        val input = relative.trim()
+        require(input.isNotEmpty() && !input.startsWith("//") && '\\' !in input) {
+            "无效的 MolaGPT 服务地址"
+        }
+        val url = (if (input.startsWith("http", ignoreCase = true)) input
+                   else BASE_URL + input.removePrefix("/")).toHttpUrlOrNull()
+        require(url != null && url.isHttps && url.host == "chatgpt.wljay.cn" &&
+            url.port == 443 && url.username.isEmpty() && url.password.isEmpty()) {
+            "MolaGPT 账户请求只能访问官方 HTTPS 地址"
+        }
+        return url.toString()
+    }
 }

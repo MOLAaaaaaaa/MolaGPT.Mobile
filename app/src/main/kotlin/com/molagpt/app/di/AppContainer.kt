@@ -83,6 +83,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
@@ -115,11 +116,13 @@ class AppContainer(
     val userAgent: String = UserAgentProvider.build(versionName, sdkInt)
 
     val credentialStore = CredentialStore(context)
-    private val http = MolaHttp(
+    private val http: MolaHttp = MolaHttp(
         userAgent = userAgent,
         enableLogging = isDebug,
         loadDeviceCookie = { credentialStore.loadSecret("molagpt.device_cookie") },
         saveDeviceCookie = { credentialStore.saveSecret("molagpt.device_cookie", it) },
+        resolveAccountToken = { accountSessions.resolveToken(it) },
+        onAccountTokenRejected = { accountSessions.rejectToken(it) },
     )
     val settingsStore = SettingsStore(context)
     val skillRepository = SkillRepository(java.io.File(appContext.filesDir, "skills"))
@@ -175,6 +178,14 @@ class AppContainer(
     /** 角色卡头像的托管目录。与聊天附件分开回收，见 PersonaAvatarStore。 */
     val personaAvatars = PersonaAvatarStore(appContext)
 
+    private val accountSessions: com.molagpt.app.core.network.AccountSessionManager =
+        com.molagpt.app.core.network.AccountSessionManager(
+            http = http,
+            current = credentialStore::sessionTokens,
+            replace = credentialStore::replaceSessionIfCurrent,
+            invalidate = { authService.logoutIfCurrent(it.accessToken) },
+        )
+
     val authApi = AuthApi(http)
 
     private val altchaSolver = AltchaSolver(http.json)
@@ -185,12 +196,17 @@ class AppContainer(
         altchaSolver = altchaSolver,
         dispatchers = dispatchers,
         longTokenProvider = { credentialStore.jwt },
-        onRenewedLongToken = { credentialStore.jwt = it },
+        onRenewedLongToken = { expected, renewed -> credentialStore.replaceJwtIfCurrent(expected, renewed) },
         // 走完整登出：只清凭据的话账号页还显示已登录，模型列表也还是注册用户的可用性。
-        onLoginInvalidated = { authService.logout() },
+        onLoginInvalidated = { expected -> authService.logoutIfCurrent(expected) },
     )
 
-    val modelApi = ModelApi(http, modelRegistry, shortTokenManager, authApi)
+    val modelApi = ModelApi(
+        http = http,
+        registry = modelRegistry,
+        authApi = authApi,
+        accountTokenProvider = { credentialStore.sessionTokens()?.accessToken },
+    )
     val serverToolApi = com.molagpt.app.core.network.ServerToolApi(http, shortTokenManager)
     private val molaModelLoadMutex = Mutex()
     val byokModelApi = ByokModelApi(http)
@@ -206,10 +222,17 @@ class AppContainer(
         scope = applicationScope,
         dispatchers = dispatchers,
         loader = {
-            val jwt = shortTokenManager.freshToken()
-            authApi.status(jwt)?.toAccountStatus { mid -> modelRegistry.find(mid)?.displayName }?.also { st ->
-                if (st.loggedIn) runCatching { settingsStore.setIsDonorCached(st.isDonor) }
+            // status.php 校验的是账号 access token；短 token 含 user_type/purpose，服务端会按游客处理。
+            // 未登录时不带 Authorization，让服务端返回游客额度。
+            val accountToken = credentialStore.sessionTokens()?.accessToken
+            val loaded = authApi.status(accountToken)?.toAccountStatus { mid -> modelRegistry.find(mid)?.displayName }
+            if (accountToken != null && loaded?.loggedIn != true) {
+                // status.php may deliberately return HTTP 200 with a guest payload when
+                // an account token is rejected. Do not replace the logged-in screen with
+                // fabricated guest quota/support state.
+                throw IllegalStateException("账号状态未返回当前账户")
             }
+            loaded
         },
     )
 
@@ -240,6 +263,15 @@ class AppContainer(
             }
         },
     )
+
+    fun handleOAuthCallback(uri: android.net.Uri) {
+        applicationScope.launch {
+            val error = authService.completeOAuthCallback(uri)
+            if (error != null) withContext(kotlinx.coroutines.Dispatchers.Main) {
+                android.widget.Toast.makeText(appContext, error, android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     private val molaGptChatService: ChatService = MolaGptChatService(
         http = http,
@@ -290,7 +322,7 @@ class AppContainer(
             )
         },
         onMolaLoginInvalidated = { failedJwt ->
-            if (credentialStore.jwt == failedJwt) authService.logout()
+            authService.logoutIfCurrent(failedJwt)
         },
         imageProviderResolver = {
             byokProviderRepository.list().firstOrNull { it.enabled && it.purpose == ByokPurpose.IMAGE }
@@ -748,6 +780,11 @@ class AppContainer(
 
         applicationScope.launch {
             authService.account.collect { desktopRemoteService.reconnectNow() }
+        }
+        applicationScope.launch {
+            accountStatusCache.status.filterNotNull().collectLatest { status ->
+                settingsStore.setIsDonorCached(status.loggedIn && status.isDonor)
+            }
         }
         applicationScope.launch {
             combine(authService.account, settingsFlow.filterNotNull()) { account, settings ->

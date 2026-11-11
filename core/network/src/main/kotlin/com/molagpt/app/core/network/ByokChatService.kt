@@ -627,13 +627,28 @@ class ByokChatService(
                     return@flow
                 }
                 var finished = false
+                val rawText = StringBuilder()
+                val rawThinking = StringBuilder()
+                suspend fun emitParsed(event: StreamEvent) {
+                    if (event is StreamEvent.Finish && !finished && rawThinking.isNotEmpty()) {
+                        emit(StreamEvent.WireHistory(OpenAiWireHistory.encode(
+                            OpenAiWireHistory.CHAT_COMPLETIONS, provider.id, request.modelId,
+                            listOf(assistantToolCallMessage(openAiReplayContent(rawText.toString(), rawThinking.toString()), emptyList())),
+                        )))
+                    }
+                    emit(event)
+                    if (event is StreamEvent.Finish) finished = true
+                }
                 sseFlow { source.readUtf8Line() }.collect { payload ->
                     currentCoroutineContext().ensureActive()
                     if (payload.isDone) {
-                        parser.finishTail("stop").forEach { emit(it) }
+                        parser.finishTail("stop").forEach { emitParsed(it) }
                         finished = true
                         return@collect
                     }
+                    val root = runCatching { http.json.parseToJsonElement(payload.data) }.getOrNull() as? JsonObject
+                    val delta = ((root?.get("choices") as? JsonArray)?.firstOrNull() as? JsonObject)?.get("delta") as? JsonObject
+                    forEachOpenAiContentPart(delta?.get("content"), rawText::append, rawThinking::append)
                     parser.parse(payload).forEach { event ->
                         if (event is StreamEvent.Failed) {
                             emit(
@@ -645,11 +660,10 @@ class ByokChatService(
                                     ),
                                 ),
                             )
-                        } else emit(event)
-                        if (event is StreamEvent.Finish) finished = true
+                        } else emitParsed(event)
                     }
                 }
-                if (!finished) parser.finishTail(null).forEach { emit(it) }
+                if (!finished) parser.finishTail(null).forEach { emitParsed(it) }
             }
         } finally {
             runCatching { if (!call.isCanceled()) call.cancel() }
@@ -976,6 +990,7 @@ class ByokChatService(
         val parser = StreamParser(http.json)
         val pending = PendingToolCalls()
         val rawContent = StringBuilder()
+        val rawThinking = StringBuilder()
         var usage: Usage? = null
         var failed = false
         val networkCall = http.okHttp.newCall(req)
@@ -1016,7 +1031,7 @@ class ByokChatService(
                 }
                 sseFlow { source.readUtf8Line() }.collect { payload ->
                     currentCoroutineContext().ensureActive()
-                    if (!payload.isDone) accumulateToolCallDelta(payload.data, rawContent, pending)
+                    if (!payload.isDone) accumulateToolCallDelta(payload.data, rawContent, rawThinking, pending)
                     drain(parser.parse(payload), payload.data)
                 }
                 drain(parser.finishTail(null), "")
@@ -1028,7 +1043,7 @@ class ByokChatService(
         emitEvent(StreamEvent.UsageUpdate(usage ?: Usage(costComplete = false)))
 
         val calls = pending.build()
-        val messages = baseMessages + assistantToolCallMessage(rawContent.toString(), calls)
+        val messages = baseMessages + assistantToolCallMessage(openAiReplayContent(rawContent.toString(), rawThinking.toString()), calls)
         if (calls.isEmpty()) return ToolRoundResult(messages, completed = true)
         val withResults = messages.toMutableList()
         for (call in calls) {
@@ -1039,11 +1054,11 @@ class ByokChatService(
     }
 
     /** 回放历史要的是模型原文，不是 <think> 拆分和工具卡剥离之后的渲染文本，所以这里单独累积一份。 */
-    private fun accumulateToolCallDelta(data: String, content: StringBuilder, pending: PendingToolCalls) {
+    private fun accumulateToolCallDelta(data: String, content: StringBuilder, thinking: StringBuilder, pending: PendingToolCalls) {
         val root = runCatching { http.json.parseToJsonElement(data) }.getOrNull() as? JsonObject ?: return
         val choice = (root["choices"] as? JsonArray)?.firstOrNull() as? JsonObject ?: return
         val delta = choice["delta"] as? JsonObject ?: return
-        (delta["content"] as? JsonPrimitive)?.contentOrNull?.let(content::append)
+        forEachOpenAiContentPart(delta["content"], content::append, thinking::append)
         (delta["tool_calls"] as? JsonArray)?.forEach(pending::feed)
     }
 
@@ -2535,14 +2550,16 @@ class ByokChatService(
             put("max_results", options.maxResults.coerceIn(1, WebSearchProvider.MOLAGPT.maxResultsLimit))
             put("snippet_max_chars", MOLA_SEARCH_SNIPPET_CHARS)
         }
+        val operationId = java.util.UUID.randomUUID().toString()
         val req = Request.Builder()
             .url(MolaEndpoints.absolute(MolaEndpoints.ACCOUNT_SEARCH))
+            .header("Idempotency-Key", operationId)
             .header("Accept", "application/json")
             .header("Authorization", "Bearer $jwt")
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
         // 共用客户端的整体超时是 0（给 SSE 用）；搜索是一问一答，必须自己设上限。
-        val client = http.okHttp.newBuilder().callTimeout(30, java.util.concurrent.TimeUnit.SECONDS).build()
+        val client = http.accountOkHttp.newBuilder().callTimeout(30, java.util.concurrent.TimeUnit.SECONDS).build()
         return runCatching {
             client.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
@@ -2763,7 +2780,7 @@ class ByokChatService(
      * 流式拿不到服务端那个完整 message 对象，按累积结果重建：协议要求的就是 content 与 tool_calls，
      * reasoning_content 不回灌（DeepSeek 等会拒绝带着它的后续请求）。
      */
-    private fun assistantToolCallMessage(content: String, calls: List<ToolCall>): JsonObject = buildJsonObject {
+    private fun assistantToolCallMessage(content: JsonElement, calls: List<ToolCall>): JsonObject = buildJsonObject {
         put("role", "assistant")
         put("content", content)
         if (calls.isNotEmpty()) {

@@ -234,7 +234,7 @@ fun SettingsScreen(
                     SettingsEntryRow(
                         icon = Icons.Outlined.FavoriteBorder,
                         title = "支持 MolaGPT",
-                        subtitle = "爱发电赞助、捐赠者权益与感谢名单",
+                        subtitle = "支持方案与感谢名单",
                         onClick = onOpenSupport,
                         showDivider = true,
                     )
