@@ -34,7 +34,7 @@ android {
         minSdk = 23
         targetSdk = 36
         versionCode = 35
-        versionName = "0.6.1"
+        versionName = "0.6.0.1"
         // 开发专用构建时间戳：注入 BuildConfig.BUILD_TIME，设置页底部展示。
         // configuration-cache 已关（见 gradle.properties），每次构建都会重新求值 → 时间会变，
         // 据此可确认装到机器上的是不是刚编译的新包。
