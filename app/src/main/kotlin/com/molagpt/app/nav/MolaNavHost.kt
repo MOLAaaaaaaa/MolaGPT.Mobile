@@ -48,6 +48,8 @@ import com.molagpt.app.core.model.ByokPurpose
 import com.molagpt.app.core.model.DesktopInfo
 import com.molagpt.app.core.model.DesktopLinkState
 import com.molagpt.app.core.network.DesktopRemoteService
+import com.molagpt.app.core.network.MolaApiException
+import com.molagpt.app.core.network.MolaAuthExpiredException
 import com.molagpt.app.core.network.RemoteDesktopChannel
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ProviderKind
@@ -799,27 +801,42 @@ fun MolaNavHost(
                     supportState["membership_pending"] = false
                 }
             }
+            fun requestMembershipLogin(productKey: String?) {
+                supportState["membership_product"] = productKey
+                supportState["membership_pending"] = true
+                supportState["membership_confirmed"] = false
+                navController.navigate(Routes.LOGIN) { launchSingleTop = true }
+            }
             fun openMembership(productKey: String?) {
                 if (!account.loggedIn) {
-                    supportState["membership_product"] = productKey
-                    supportState["membership_pending"] = true
-                    supportState["membership_confirmed"] = false
-                    navController.navigate(Routes.LOGIN) { launchSingleTop = true }
+                    requestMembershipLogin(productKey)
                 } else if (!openingMembership) {
                     openingMembership = true
                     supportScope.launch {
+                        val session = container.credentialStore.sessionTokens()
                         try {
-                            val session = container.credentialStore.sessionTokens()
-                                ?: throw IllegalStateException("请先登录")
+                            if (session == null) throw MolaAuthExpiredException("请先登录")
                             val url = container.authApi.membershipPortal(session.accessToken, productKey)
                             if (container.credentialStore.sessionTokens()?.generation != session.generation)
-                                throw IllegalStateException("登录账户已变化，请重试")
+                                throw MolaApiException(null, "登录账户已变化，请重试")
                             if (navController.currentBackStackEntry != backStackEntry) return@launch
                             uriHandler.openUri(url)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
+                        } catch (expired: MolaAuthExpiredException) {
+                            if (navController.currentBackStackEntry != backStackEntry) return@launch
+                            val current = container.credentialStore.sessionTokens()
+                            if (current != null && current.generation != session?.generation) return@launch
+                            session?.let { container.authService.logoutIfCurrent(it.accessToken) }
+                            if (container.authService.isLoggedIn) {
+                                android.widget.Toast.makeText(appContext, "登录状态已更新，请重试", android.widget.Toast.LENGTH_LONG).show()
+                                return@launch
+                            }
+                            android.widget.Toast.makeText(appContext, expired.message, android.widget.Toast.LENGTH_LONG).show()
+                            requestMembershipLogin(productKey)
                         } catch (error: Exception) {
-                            android.widget.Toast.makeText(appContext, "无法打开支持页面，请稍后重试", android.widget.Toast.LENGTH_LONG).show()
+                            val message = (error as? MolaApiException)?.message ?: "无法打开支持页面，请稍后重试"
+                            android.widget.Toast.makeText(appContext, message, android.widget.Toast.LENGTH_LONG).show()
                         } finally {
                             openingMembership = false
                         }

@@ -107,11 +107,18 @@ class AuthApi(private val http: MolaHttp) {
             contentType(ContentType.Application.Json)
             setBody(buildJsonObject {})
         }
-        if (response.status.value == 401) throw MolaAuthExpiredException()
-        if (!response.status.isSuccess()) throw MolaApiException(response.status.value, "暂时无法打开支持页面，请稍后重试")
-        val body = http.json.parseToJsonElement(response.bodyAsText()).jsonObject
+        val text = response.bodyAsText()
+        if (response.status.value == 401) throw MolaAuthExpiredException(
+            molaServerErrorMessage(response.status.value, text) ?: "登录状态已失效，请重新登录",
+        )
+        if (!response.status.isSuccess()) throw MolaApiException(
+            response.status.value,
+            molaServerErrorMessage(response.status.value, text)
+                ?: "打开支持页面失败：HTTP ${response.status.value}",
+        )
+        val body = http.json.parseToJsonElement(text).jsonObject
         if (body["success"]?.jsonPrimitive?.booleanOrNull != true)
-            throw MolaApiException(null, "暂时无法打开支持页面")
+            throw MolaApiException(null, molaServerErrorMessage(response.status.value, text) ?: "暂时无法打开支持页面")
         val raw = body["url"]?.jsonPrimitive?.contentOrNull
             ?: throw MolaApiException(null, "支持入口响应无效")
         val url = MolaEndpoints.absolute(raw).toHttpUrl()
