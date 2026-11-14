@@ -39,11 +39,15 @@ import com.molagpt.app.core.render.MolaTopBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.molagpt.app.core.model.AccountStatus
@@ -51,6 +55,7 @@ import com.molagpt.app.core.model.CreditsInfo
 import com.molagpt.app.core.model.QuotaItem
 import com.molagpt.app.core.model.WebSearchUsage
 import com.molagpt.app.core.render.shimmer
+import kotlinx.coroutines.delay
 
 /**
  * MolaGPT 账户页（二级页）。
@@ -325,7 +330,7 @@ private fun QuotaSection(status: AccountStatus?, loading: Boolean, error: String
         }
     }
     if (credits != null) {
-        CreditsSummary(credits)
+        CreditsSummary(credits, onRefresh)
     }
     status?.quotas?.forEach { q -> QuotaRow(q, credits) }
     credits?.webSearch?.let { WebSearchRow(it, credits) }
@@ -344,8 +349,22 @@ private fun QuotaSection(status: AccountStatus?, loading: Boolean, error: String
  * 与 Web 面板一致。逐模型的进度条在这里没有意义：只有一份共享额度，能变的只是花得快慢。
  */
 @Composable
-private fun CreditsSummary(credits: CreditsInfo) {
+private fun CreditsSummary(credits: CreditsInfo, onRefresh: () -> Unit) {
     val tone = if (credits.exhausted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    var nowMillis by remember(credits.nextRefreshAt) { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(credits.nextRefreshAt) {
+        val at = credits.nextRefreshAt ?: return@LaunchedEffect
+        while (true) {
+            val remaining = at * 1000 - System.currentTimeMillis()
+            if (remaining <= 0) {
+                onRefresh()
+                break
+            }
+            delay(minOf(remaining, 60_000L))
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+    val refreshLabel = credits.refreshLabel(nowMillis)
     Column(modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("额度剩余", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
@@ -371,6 +390,15 @@ private fun CreditsSummary(credits: CreditsInfo) {
                 text = credits.windowLabel,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (refreshLabel != null) {
+            Text(
+                text = refreshLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.End,
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
             )
         }
         if (credits.exhausted) {

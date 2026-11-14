@@ -278,6 +278,7 @@ class AppContainer(
         registry = modelRegistry,
         shortTokenManager = shortTokenManager,
         dispatchers = dispatchers,
+        accountTokenProvider = { credentialStore.sessionTokens()?.accessToken },
     )
 
     /**

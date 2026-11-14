@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * 统一短 token 管理。
  *
- * **任何对话/上传/停止/标题请求前都先取一个 60 秒有效的短 JWT**，再用它调 chat proxy。
+ * 对话、停止和标题请求前先取一个 60 秒有效的短 JWT，再用它调 chat proxy。
  * 游客与登录用户走同一条路径，唯一区别是换 token 时带不带本地长 token：
  *   GET challenge.php → 解 ALTCHA → GET auth.php(头 X-Altcha-Payload；登录态再带 Authorization 长token)。
  *

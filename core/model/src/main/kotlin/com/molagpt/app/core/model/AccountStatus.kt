@@ -40,7 +40,8 @@ data class AccountStatus(
  * @param allowance 已按 [windowDays] 乘开，是整个窗口的预算而非一天的。
  * @param windowDays 滚动结算窗口。1 = 旧的 0 点清零；大于 1 时额度是「近 N 天累计」，
  *   任何时刻都不会整份归零，**所有「明日 0 点重置」的说法都不成立**。
- * @param recoversAt `yyyy-MM-dd`，窗口里最早那笔消耗滚出窗口的日子；没有任何消耗时为 null。
+ * @param recoversAt `yyyy-MM-dd`，额度耗尽后重新可用的日期。
+ * @param nextRefreshAt 下一次可用额度变化的 Unix 时间戳。
  * @param byModelTokens 窗口内逐模型 token 累计。「约 N 次」按窗口余额算，逐模型用量
  *   必须取这里——`user.tokens_usage` 只有当天，混用就是两个口径。
  */
@@ -57,8 +58,23 @@ data class CreditsInfo(
     val byModelTokens: Map<String, Int>? = null,
     /** MolaGPT Web Search：和模型共用额度但不是模型，不在逐模型列表里，单独一行展示。 */
     val webSearch: WebSearchUsage? = null,
+    val nextRefreshAt: Long? = null,
 ) {
     val exhausted: Boolean get() = remaining <= 0.0
+
+    fun refreshLabel(nowMillis: Long): String? {
+        val seconds = (nextRefreshAt ?: return null) - nowMillis / 1000
+        if (seconds <= 0) return null
+        val minutes = (seconds + 59) / 60
+        val days = minutes / 1440
+        val hours = minutes % 1440 / 60
+        val rest = minutes % 60
+        return when {
+            days > 0 -> "${days} 天${if (hours > 0) " $hours 小时" else ""}后刷新"
+            hours > 0 -> "${hours} 小时${if (rest > 0) " $rest 分钟" else ""}后刷新"
+            else -> "$rest 分钟后刷新"
+        }
+    }
 
     /** 结算跨度超过一天。为真时不能再出现任何「明日 0 点」文案。 */
     val isRolling: Boolean get() = windowDays > 1

@@ -132,6 +132,7 @@ private fun JsonObject.toCreditsInfo(): CreditsInfo? {
         // 那些版本真实的「每日 0 点清零」行为。
         windowDays = this["window_days"]?.prim()?.intOrNull?.coerceAtLeast(1) ?: 1,
         recoversAt = this["recovers_at"]?.prim()?.contentOrNull,
+        nextRefreshAt = this["next_refresh_at"]?.prim()?.longOrNull,
         byModelTokens = (this["by_model_tokens"] as? JsonObject)?.mapNotNull { (mid, v) ->
             v.prim()?.intOrNull?.let { mid to it }
         }?.toMap(),

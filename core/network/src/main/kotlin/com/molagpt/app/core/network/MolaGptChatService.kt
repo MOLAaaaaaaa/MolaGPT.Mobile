@@ -51,7 +51,7 @@ import kotlin.math.min
 
 /**
  * 真实 MolaGPT 服务实现（阶段 4）。
- * - 鉴权统一：每次请求前经 [ShortTokenManager.freshToken] 取 60 秒短 token（游客/登录同路径，含 ALTCHA）。
+ * - 对话使用 [ShortTokenManager.freshToken] 获取短 token；图片上传使用账号令牌。
  * - SSE 流式：用共享 OkHttpClient 直接读 BufferedSource 逐行（最稳定）；解析止于本层只产 [StreamEvent]。
  * - stop / title：Ktor JSON。
  */
@@ -60,6 +60,7 @@ class MolaGptChatService(
     private val registry: ModelRegistry,
     private val shortTokenManager: ShortTokenManager,
     private val dispatchers: DispatcherProvider,
+    private val accountTokenProvider: () -> String?,
 ) : ChatService {
 
     override fun sendMessage(request: ChatRequest): Flow<StreamEvent> = flow {
@@ -170,7 +171,7 @@ class MolaGptChatService(
         mimeType: String,
         conversationId: String,
     ): FileInfo = withContext(dispatchers.io) {
-        val jwt = shortTokenManager.freshToken()
+        val jwt = accountTokenProvider()?.takeIf { it.isNotBlank() } ?: throw MolaAuthExpiredException()
         val multipart = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("conversation_id", conversationId)
