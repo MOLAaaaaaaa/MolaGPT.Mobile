@@ -116,8 +116,8 @@ fun MessageBubble(message: ChatMessage, modifier: Modifier = Modifier) {
 }
 
 /**
- * 助手消息头部行。常态显示模型名；`pending` 元数据非空时改显示它——目前只有两类会写：
- * 断流重试进度（「正在恢复连接 · 第 N 次重试」）和工具执行中的命令标签。
+ * 助手消息头部行。常态显示模型名；尚无内容时可显示待处理状态。
+ * 恢复状态显示在输入框上方。
  * 等首 token 不写 pending，那段由 [AssistantStreamingPlaceholder] 的骨架表达。
  */
 @Composable

@@ -28,6 +28,7 @@ object MolaEndpoints {
     const val FETCH_COMPLETED_STREAM = "api/auth/fetch_completed_stream.php"
     const val GENERATE_TITLE = "api/auth/generateTitle.php"
     const val BATCH_UPLOAD = "api/=imgtemp/batchUpload.php"
+    const val SANDBOX_UPLOAD = "api/auth/sandboxUploader.php"
 
     /** 对话历史云同步（full_sync / fetch_conversation / delete / 分块）。 */
     const val SYNC = "api/auth/sync.php"

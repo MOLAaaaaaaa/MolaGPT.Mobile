@@ -15,11 +15,11 @@ import java.io.IOException
 import java.io.OutputStream
 import java.util.concurrent.TimeUnit
 
-class ServerToolApi(private val http: MolaHttp, private val tokens: ShortTokenManager) {
+class ServerToolApi(private val http: MolaHttp, private val accountTokenProvider: () -> String?) {
     private val client = http.accountOkHttp.newBuilder().readTimeout(2, TimeUnit.MINUTES).callTimeout(2, TimeUnit.MINUTES).build()
 
     private suspend fun request(ticket: String, action: String): Request {
-        val token = tokens.freshToken()
+        val token = accountTokenProvider()?.takeIf { it.isNotBlank() } ?: throw MolaAuthExpiredException()
         val body = buildJsonObject { put("ticket", ticket); put("action", action) }
         return Request.Builder().url(MolaEndpoints.absolute("api/auth/tool_retry.php"))
             .header("Authorization", "Bearer $token")

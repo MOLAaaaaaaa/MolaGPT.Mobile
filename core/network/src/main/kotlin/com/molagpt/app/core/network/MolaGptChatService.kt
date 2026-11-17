@@ -2,6 +2,7 @@ package com.molagpt.app.core.network
 
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.common.Logger
+import com.molagpt.app.core.model.AttachmentMime
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.FileInfo
 import com.molagpt.app.core.model.Ids
@@ -47,11 +48,12 @@ import okhttp3.MultipartBody
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import kotlin.math.min
 
 /**
  * 真实 MolaGPT 服务实现（阶段 4）。
- * - 对话使用 [ShortTokenManager.freshToken] 获取短 token；图片上传使用账号令牌。
+ * - 对话使用 [ShortTokenManager.freshToken] 获取短 token；附件上传使用账号令牌。
  * - SSE 流式：用共享 OkHttpClient 直接读 BufferedSource 逐行（最稳定）；解析止于本层只产 [StreamEvent]。
  * - stop / title：Ktor JSON。
  */
@@ -62,6 +64,9 @@ class MolaGptChatService(
     private val dispatchers: DispatcherProvider,
     private val accountTokenProvider: () -> String?,
 ) : ChatService {
+    private val streamClient = http.accountOkHttp.newBuilder()
+        .readTimeout(90, TimeUnit.SECONDS)
+        .build()
 
     override fun sendMessage(request: ChatRequest): Flow<StreamEvent> = flow {
         val jwt = shortTokenManager.freshToken()
@@ -108,7 +113,7 @@ class MolaGptChatService(
         } catch (e: IOException) {
             if (currentCoroutineContext().isActive) {
                 val restored = resumeUntilFinished(apiUrl, body.sessionId, offset, parser, e)
-                if (!restored) emit(StreamEvent.Failed("网络中断，续传失败"))
+                if (!restored) emit(StreamEvent.Failed("网络中断，恢复失败"))
             }
         } catch (e: Exception) {
             // 用户停止会导致连接被取消并抛 IOException——此时协程已不活跃，安静收尾。
@@ -156,13 +161,20 @@ class MolaGptChatService(
     override fun resumeStream(apiUrl: String, streamSessionId: String, offset: Int): Flow<StreamEvent> = flow {
         val parser = StreamParser(http.json, serverTurn = true)
         val counter = ResumeOffset(offset)
-        val finished = collectSseRequest(
-            request = buildResumeRequest(apiUrl, streamSessionId, offset),
-            operationName = "流恢复",
-            parser = parser,
-            offset = counter,
-        )
-        if (!finished) parser.finishTail(null).forEach { emit(it) }
+        try {
+            val finished = collectSseRequest(
+                request = buildResumeRequest(apiUrl, streamSessionId, offset),
+                operationName = "流恢复",
+                parser = parser,
+                offset = counter,
+            )
+            if (!finished) throw IOException("流式连接提前结束")
+        } catch (e: MolaAuthExpiredException) {
+            throw e
+        } catch (e: IOException) {
+            val restored = resumeUntilFinished(apiUrl, streamSessionId, counter, parser, e)
+            if (!restored) emit(StreamEvent.Failed("网络中断，恢复失败"))
+        }
     }.flowOn(dispatchers.io)
 
     override suspend fun uploadFile(
@@ -172,13 +184,15 @@ class MolaGptChatService(
         conversationId: String,
     ): FileInfo = withContext(dispatchers.io) {
         val jwt = accountTokenProvider()?.takeIf { it.isNotBlank() } ?: throw MolaAuthExpiredException()
+        val imageUpload = AttachmentMime.resolve(mimeType, fileName) in
+            setOf("image/jpeg", "image/png", "image/webp", "image/gif")
         val multipart = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("conversation_id", conversationId)
-            .addFormDataPart("files[]", fileName, bytes.toRequestBody(mimeType.toMediaType()))
+            .addFormDataPart(if (imageUpload) "files[]" else "sandbox_file", fileName, bytes.toRequestBody(mimeType.toMediaType()))
             .build()
         val req = Request.Builder()
-            .url(MolaEndpoints.absolute(MolaEndpoints.BATCH_UPLOAD))
+            .url(MolaEndpoints.absolute(if (imageUpload) MolaEndpoints.BATCH_UPLOAD else MolaEndpoints.SANDBOX_UPLOAD))
             .header("Authorization", "Bearer $jwt")
             .post(multipart)
             .build()
@@ -186,7 +200,8 @@ class MolaGptChatService(
             if (resp.code == 401) throw MolaAuthExpiredException()
             val text = resp.body?.string().orEmpty()
             val fileObj = runCatching {
-                http.json.parseToJsonElement(text).jsonObject["files"]?.jsonArray?.firstOrNull()?.jsonObject
+                val result = http.json.parseToJsonElement(text).jsonObject
+                if (imageUpload) result["files"]?.jsonArray?.firstOrNull()?.jsonObject else result
             }.getOrNull()
             FileInfo(
                 id = fileObj?.get("id")?.jsonPrimitive?.contentOrNull ?: Ids.newFragmentId(),
@@ -388,7 +403,7 @@ class MolaGptChatService(
         repeat(MAX_RESUME_ATTEMPTS) { index ->
             currentCoroutineContext().ensureActive()
             val attempt = index + 1
-            emit(StreamEvent.Pending("正在恢复连接", "第 $attempt 次重试"))
+            emit(StreamEvent.Pending("正在恢复回答", recovery = true))
             delay(delayMs)
             try {
                 val finished = collectSseRequest(
@@ -399,6 +414,8 @@ class MolaGptChatService(
                 )
                 if (finished) return true
                 Logger.w("MolaChat", "resume stream ended before finish, offset=${offset.value}")
+            } catch (e: MolaAuthExpiredException) {
+                throw e
             } catch (e: IOException) {
                 Logger.w("MolaChat", "resume attempt $attempt failed", e)
             }
@@ -413,7 +430,7 @@ class MolaGptChatService(
         parser: StreamParser,
         offset: ResumeOffset,
     ): Boolean {
-        val call = http.accountOkHttp.newCall(request)
+        val call = streamClient.newCall(request)
         try {
             call.execute().use { resp ->
                 if (resp.code == 401) throw MolaAuthExpiredException()

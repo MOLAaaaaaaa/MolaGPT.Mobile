@@ -19,7 +19,7 @@ class ChatStreamController {
         }
         is StreamEvent.Subagents -> listOf(DeltaCommand.UpdateSubagents(event.frame))
         is StreamEvent.Sources -> listOf(DeltaCommand.SetSources(event.refs, event.query))
-        is StreamEvent.Pending -> listOf(DeltaCommand.SetPending(event.label, event.detail))
+        is StreamEvent.Pending -> listOf(DeltaCommand.SetPending(event.label, event.detail, event.recovery))
         is StreamEvent.Image -> listOf(DeltaCommand.AddImage(event.url, event.prompt))
         is StreamEvent.WireHistory -> listOf(
             DeltaCommand.SetMetadata(event.metadataKey, event.json),

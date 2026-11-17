@@ -133,7 +133,7 @@ object AttachmentMime {
      * BYOK 文档选择器（SAF）的 MIME 过滤白名单。收不了的格式在选择器里就置灰，
      * 不要等用户翻半天选完再弹「不支持」。
      *
-     * **只给 BYOK 用**：MolaGPT 账户的附件走服务端 batch_upload 进沙箱，什么格式都收，
+     * **只给 BYOK 用**：MolaGPT 账户的附件上传到服务端沙箱，什么格式都收，
      * 那条路必须继续放行 `&#42;/&#42;`，否则会砍掉代码执行的文件输入。
      *
      * 含 `application/octet-stream` 是有意的：DocumentsUI 按扩展名查 MimeTypeMap 定类型，

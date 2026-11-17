@@ -89,8 +89,8 @@ class ChatRepository(
     suspend fun allMessages(sessionId: String): List<ChatMessage> =
         withContext(dispatchers.io) { messageDao.getAllBySession(sessionId).map { it.toDomain() } }
 
-    /** 图片上传转发（基础版）：直接转 [ChatService.uploadFile]，结果用于待发送附件条与消息附件。 */
-    suspend fun uploadImage(
+    /** 上传附件，结果用于待发送附件条与消息附件。 */
+    suspend fun uploadFile(
         bytes: ByteArray,
         fileName: String,
         mimeType: String,
@@ -304,7 +304,7 @@ class ChatRepository(
                 status = if (msg.status == MessageStatus.STREAMING) MessageStatus.STOPPED else msg.status,
                 rawText = visibleText(msg),
                 updatedAt = System.currentTimeMillis(),
-                metadata = msg.metadata - "pending",
+                metadata = msg.metadata - setOf("pending", "pendingRecovery"),
             )
             if (!processed) finalMsg = finalMsg.withRequestStats(request.providerKind, usage.get(), start, firstTokenAt, pricing, checkpointId, slimTurns)
             // 用户停止时上面的 success 分支未跑到，这里兜底补版本，避免丢失旧版本。
@@ -358,7 +358,8 @@ class ChatRepository(
             updatedAt = start,
             model = model,
             metadata = mapOf(
-                "pending" to "正在恢复…",
+                "pending" to "正在恢复回答",
+                "pendingRecovery" to "true",
                 "modelDisplayName" to (modelDisplayName ?: model ?: ""),
             ),
         )
@@ -379,7 +380,7 @@ class ChatRepository(
                 status = if (msg.status == MessageStatus.STREAMING) MessageStatus.STOPPED else msg.status,
                 rawText = visibleText(msg),
                 updatedAt = System.currentTimeMillis(),
-                metadata = msg.metadata - "pending",
+                metadata = msg.metadata - setOf("pending", "pendingRecovery"),
             )
             withContext(NonCancellable + dispatchers.io) {
                 messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
@@ -454,7 +455,7 @@ class ChatRepository(
                 }
                 // 正文一旦开始，收起此前展开的思考块（思考结束的信号）。
                 collapseThinking(frags)
-                if (meta.containsKey("pending")) meta = meta - "pending"
+                if (meta.containsKey("pending")) meta = meta - setOf("pending", "pendingRecovery")
             }
             is DeltaCommand.AppendThinking -> {
                 // 仅续写**末尾**的 Thinking；否则新建到末尾（不再 add(0) 强插顶部）。
@@ -467,7 +468,7 @@ class ChatRepository(
                     frags.add(MessageFragment.Thinking(Ids.newFragmentId(), cmd.chunk, collapsed = false))
                 }
                 // 已收到真实推理内容，连接/工具结果处理占位已结束。
-                if (meta.containsKey("pending")) meta = meta - "pending"
+                if (meta.containsKey("pending")) meta = meta - setOf("pending", "pendingRecovery")
             }
             is DeltaCommand.UpsertTool -> {
                 // 工具作为独立顶层 fragment。已存在则原地更新（流式状态变更），否则追加到末尾，
@@ -476,11 +477,11 @@ class ChatRepository(
                 val tool = ServerSubagents.tool(cmd.tool, ServerSubagents.read(meta))
                 if (i >= 0) frags[i] = tool else frags.add(tool)
                 // 工具生命周期本身就是当前活动指示，不再同时显示旧 pending。
-                if (meta.containsKey("pending")) meta = meta - "pending"
+                if (meta.containsKey("pending")) meta = meta - setOf("pending", "pendingRecovery")
             }
             is DeltaCommand.UpdateSubagents -> {
                 val batches = ServerSubagents.merge(ServerSubagents.read(meta), cmd.frame)
-                meta = meta + (ServerSubagents.KEY to batches.toString()) - "pending"
+                meta = meta + (ServerSubagents.KEY to batches.toString()) - setOf("pending", "pendingRecovery")
                 frags.replaceAll { if (it is MessageFragment.ToolCall) ServerSubagents.tool(it, batches) else it }
             }
             is DeltaCommand.SetSources -> {
@@ -500,6 +501,7 @@ class ChatRepository(
                     meta = meta + ("modelDisplayName" to selectedModelName)
                 }
                 meta = meta + ("pending" to (cmd.detail?.let { "${cmd.label} · $it" } ?: cmd.label))
+                meta = if (cmd.recovery) meta + ("pendingRecovery" to "true") else meta - "pendingRecovery"
             }
             is DeltaCommand.AddImage -> {
                 frags.add(MessageFragment.Image(Ids.newFragmentId(), cmd.url, cmd.prompt))
@@ -516,7 +518,7 @@ class ChatRepository(
                     frags.replaceAll { if (it is MessageFragment.ToolCall) ServerSubagents.tool(it, batches) else it }
                 }
                 collapseThinking(frags)
-                meta = meta - "pending"
+                meta = meta - setOf("pending", "pendingRecovery")
                 cmd.usage?.totalTokens?.let { meta = meta + (ChatMessageMetadataKeys.TOTAL_TOKENS to it.toString()) }
                 // 记录服务端上报的推理 token 数，供运行时自校正判定「隐藏思考但确实推理了」。
                 cmd.usage?.reasoningTokens?.let {
@@ -527,7 +529,7 @@ class ChatRepository(
                 status = MessageStatus.ERROR
                 collapseThinking(frags)
                 frags.add(MessageFragment.Error(Ids.newFragmentId(), cmd.message))
-                meta = meta - "pending"
+                meta = meta - setOf("pending", "pendingRecovery")
             }
         }
         return msg.copy(fragments = frags, status = status, metadata = meta)

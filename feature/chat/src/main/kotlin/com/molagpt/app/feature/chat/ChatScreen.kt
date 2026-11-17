@@ -573,6 +573,16 @@ fun ChatScreen(
                     .fillMaxWidth()
                     .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
             ) {
+                state.recoveryStatus?.let { status ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp)
+                        Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
                 state.error?.let { err ->
                     Text(
                         text = err,

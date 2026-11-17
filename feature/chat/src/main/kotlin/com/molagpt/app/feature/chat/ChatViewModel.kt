@@ -555,6 +555,9 @@ class ChatViewModel(
             isMolaModelConfigLoaded = meta.isMolaModelConfigLoaded,
             isModelRefreshing = meta.isModelRefreshing,
             isStreaming = streamState.isStreaming,
+            recoveryStatus = inFlight?.metadata?.takeIf {
+                streamState.isStreaming && it["pendingRecovery"] == "true"
+            }?.get("pending"),
             inputEnabled = !streamState.isStreaming,
             enabledTools = controls.enabledTools,
             useThinking = controls.useThinking,
@@ -814,7 +817,7 @@ class ChatViewModel(
                 _error.value = "无法读取所选附件"
                 return@launch
             }
-            runCatching { chatRepository.uploadImage(bytes, name, mime, conversationId) }
+            runCatching { chatRepository.uploadFile(bytes, name, mime, conversationId) }
                 .onSuccess { info ->
                     _pendingAttachments.update { list ->
                         list.map {

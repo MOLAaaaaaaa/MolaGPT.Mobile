@@ -1064,7 +1064,7 @@ private fun ChatMessage.assistantHeaderLabel(modelDisplayNameOf: (String) -> Str
     // 把原始 id 转成选择器 displayName（已是友好名则原样返回）。
     val raw = metadata["modelDisplayName"]?.takeIf { it.isNotBlank() } ?: model?.takeIf { it.isNotBlank() }
     val modelLabel = raw?.let(modelDisplayNameOf)
-    return if (hasContent) {
+    return if (hasContent || metadata["pendingRecovery"] == "true") {
         modelLabel
     } else {
         metadata["pending"]?.takeIf { it.isNotBlank() } ?: modelLabel

@@ -40,6 +40,7 @@ data class ChatUiState(
     val isMolaModelConfigLoaded: Boolean = false,
     val isModelRefreshing: Boolean = false,
     val isStreaming: Boolean = false,
+    val recoveryStatus: String? = null,
     val inputEnabled: Boolean = true,
     val enabledTools: EnabledTools = EnabledTools(),
     val useThinking: Boolean = false,

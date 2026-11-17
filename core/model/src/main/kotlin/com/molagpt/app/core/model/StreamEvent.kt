@@ -10,7 +10,7 @@ sealed interface StreamEvent {
     data class Delta(val text: String? = null, val thinking: String? = null) : StreamEvent
 
     /** 联网搜索状态/搜索词。 */
-    data class Pending(val label: String, val detail: String? = null, val routes: Boolean = false) : StreamEvent
+    data class Pending(val label: String, val detail: String? = null, val routes: Boolean = false, val recovery: Boolean = false) : StreamEvent
 
     /**
      * 引用来源。[query] 是这批来源搜的词，只有 BYOK 端给得出——自家后端的 `molagpt_sources`

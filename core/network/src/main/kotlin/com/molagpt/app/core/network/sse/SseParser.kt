@@ -20,7 +20,9 @@ fun sseFlow(readLine: suspend () -> String?): Flow<SsePayload> = flow {
         val line = readLine() ?: break
         if (line.isEmpty()) {
             if (data.isNotEmpty() || event != null) {
-                emit(SsePayload(event, data.toString()))
+                val payload = SsePayload(event, data.toString())
+                emit(payload)
+                if (payload.isDone) return@flow
                 data.setLength(0)
                 event = null
             }

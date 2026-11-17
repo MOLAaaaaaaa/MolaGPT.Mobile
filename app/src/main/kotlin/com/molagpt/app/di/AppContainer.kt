@@ -207,7 +207,7 @@ class AppContainer(
         authApi = authApi,
         accountTokenProvider = { credentialStore.sessionTokens()?.accessToken },
     )
-    val serverToolApi = com.molagpt.app.core.network.ServerToolApi(http, shortTokenManager)
+    val serverToolApi = com.molagpt.app.core.network.ServerToolApi(http) { credentialStore.sessionTokens()?.accessToken }
     private val molaModelLoadMutex = Mutex()
     val byokModelApi = ByokModelApi(http)
     val modelsDevCatalog = com.molagpt.app.core.network.ModelsDevCatalog(http, java.io.File(context.cacheDir, "models-dev.json"))

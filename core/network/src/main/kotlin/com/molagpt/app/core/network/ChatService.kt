@@ -25,7 +25,7 @@ interface ChatService {
     /** 查询某个 stream_cache 会话的状态（check_stream_status.php），用于启动时对账。null=不存在/已过期。 */
     suspend fun checkStreamStatus(streamSessionId: String): StreamStatus?
 
-    /** 上传文件（真实：multipart 到 batchUpload.php）。 */
+    /** 上传文件到 MolaGPT 服务。 */
     suspend fun uploadFile(
         bytes: ByteArray,
         fileName: String,
