@@ -81,16 +81,31 @@ internal fun ChartView(spec: ChartSpec, modifier: Modifier = Modifier) {
 
 @Composable
 private fun ChartFullscreen(spec: ChartSpec, state: ChartState, close: () -> Unit) {
-    val palette = rememberVisualPalette()
-    Column(modifier = Modifier.fillMaxSize().background(palette.surface)) {
-        FullscreenBar(
-            title = spec.title?.takeIf { it.isNotBlank() } ?: "图表",
-            hint = spec.unit?.takeIf { it.isNotBlank() }?.let { "单位：$it" },
-            onClose = close,
-        )
-        ChartSurface(spec, state, Modifier.weight(1f).fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 8.dp))
-        ChartLegend(spec, state)
-        Spacer(Modifier.height(8.dp))
+    val canvas = MaterialTheme.colorScheme.background
+    VisualFullscreenScaffold(
+        title = spec.title?.takeIf { it.isNotBlank() } ?: "图表",
+        hint = spec.unit?.takeIf { it.isNotBlank() }?.let { "单位：$it" },
+        onClose = close,
+        canvasColor = canvas,
+        topBarOverlap = { 0f },
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(
+                    top = innerPadding.calculateTopPadding(),
+                    bottom = innerPadding.calculateBottomPadding(),
+                ),
+        ) {
+            ChartSurface(
+                spec = spec,
+                state = state,
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(start = 8.dp, end = 16.dp, top = 8.dp),
+                surfaceColor = canvas,
+            )
+            ChartLegend(spec, state)
+            Spacer(Modifier.height(8.dp))
+        }
     }
 }
 
@@ -100,7 +115,12 @@ private class ChartState(spec: ChartSpec) {
 }
 
 @Composable
-private fun ChartSurface(spec: ChartSpec, state: ChartState, modifier: Modifier) {
+private fun ChartSurface(
+    spec: ChartSpec,
+    state: ChartState,
+    modifier: Modifier,
+    surfaceColor: androidx.compose.ui.graphics.Color? = null,
+) {
     val palette = rememberVisualPalette()
     val measurer = rememberTextMeasurer(cacheSize = 96)
     var touch by remember(spec) { mutableStateOf<Offset?>(null) }
@@ -121,7 +141,7 @@ private fun ChartSurface(spec: ChartSpec, state: ChartState, modifier: Modifier)
         when (spec.type) {
             ChartType.PIE -> drawPie(spec, palette, measurer, touch)
             ChartType.SCATTER -> drawScatter(spec, hidden, palette, measurer, touch)
-            else -> drawCategorical(spec, hidden, palette, measurer, touch)
+            else -> drawCategorical(spec, hidden, palette, measurer, touch, surfaceColor ?: palette.surface)
         }
     }
 }
@@ -175,6 +195,7 @@ private fun DrawScope.drawCategorical(
     palette: VisualPalette,
     measurer: TextMeasurer,
     touch: Offset?,
+    surfaceColor: androidx.compose.ui.graphics.Color,
 ) {
     val n = spec.categories.size
     if (n == 0) return
@@ -294,7 +315,7 @@ private fun DrawScope.drawCategorical(
             drawPath(line, palette.series(s), style = stroke)
             if (n <= 24) {
                 for (p in solid) {
-                    drawCircle(palette.surface, 3.dp.toPx(), p)
+                    drawCircle(surfaceColor, 3.dp.toPx(), p)
                     drawCircle(palette.series(s), 3.dp.toPx(), p, style = Stroke(2.dp.toPx()))
                 }
             }

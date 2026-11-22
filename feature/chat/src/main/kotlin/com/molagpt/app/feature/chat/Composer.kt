@@ -46,6 +46,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -144,28 +145,29 @@ fun Composer(
     showReasoningWireDetail: Boolean = true,
     /** 发送失败后放回输入框的原文；输入框已有新内容时不覆盖。 */
     restoreDraft: ComposerDraft? = null,
+    /** 本机聊天的普通草稿，由 ViewModel 在消息落库后清理。 */
+    draftText: kotlinx.coroutines.flow.StateFlow<String>? = null,
+    onDraftChange: ((String) -> Unit)? = null,
     sendEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
-    var text by rememberSaveable { mutableStateOf("") }
+    var localText by rememberSaveable { mutableStateOf("") }
+    var editedText by rememberSaveable(editingMessage?.revision) {
+        mutableStateOf(editingMessage?.text.orEmpty())
+    }
     var showReasoningSheet by remember { mutableStateOf(false) }
     var attachMenuOpen by remember { mutableStateOf(false) }
     val isEditing = editingMessage != null
-    LaunchedEffect(editingMessage?.revision) {
-        val edit = editingMessage ?: return@LaunchedEffect
-        text = edit.text
-    }
+    val normalText = draftText?.collectAsState()?.value ?: localText
+    val text = if (isEditing) editedText else normalText
     LaunchedEffect(restoreDraft?.revision) {
         val draft = restoreDraft ?: return@LaunchedEffect
-        if (text.isBlank()) text = draft.text
+        if (text.isBlank()) {
+            localText = draft.text
+        }
     }
-    val hasReadyAttachment = pendingAttachments.any {
-        it.uploadStatus == UploadStatus.UPLOADED &&
-            (!it.url.isNullOrBlank() || !it.sandboxPath.isNullOrBlank() || !it.localPath.isNullOrBlank())
-    }
-    val attachmentsUnsettled = holdSendForAttachments && pendingAttachments.any {
-        it.uploadStatus != UploadStatus.UPLOADED
-    }
+    val hasReadyAttachment = pendingAttachments.any { it.isReadyToSend }
+    val attachmentsUnsettled = holdSendForAttachments && pendingAttachments.any { !it.isReadyToSend }
     val canSend = enabled && sendEnabled && !attachmentsUnsettled && (text.isNotBlank() || hasReadyAttachment)
     val colorScheme = MaterialTheme.colorScheme
     val toolsEnabled = enabled && !isStreaming
@@ -193,10 +195,9 @@ fun Composer(
     val networkEnabled = if (isByok) byokToolEnabled else toolsEnabled
 
     fun submit() {
-        val content = text.trim()
-        if ((content.isNotEmpty() || hasReadyAttachment) && enabled && !attachmentsUnsettled) {
-            onSend(content)
-            text = ""
+        if (canSend) {
+            onSend(text.trim())
+            if (draftText == null) localText = ""
         }
     }
 
@@ -222,10 +223,7 @@ fun Composer(
                     color = colorScheme.onSurfaceVariant,
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .clickable {
-                            onCancelEdit()
-                            text = ""
-                        }
+                        .clickable(enabled = enabled, onClick = onCancelEdit)
                         .padding(horizontal = 10.dp, vertical = 4.dp),
                 )
             }
@@ -304,7 +302,13 @@ fun Composer(
 
         BasicTextField(
             value = text,
-            onValueChange = { text = it },
+            onValueChange = {
+                when {
+                    isEditing -> editedText = it
+                    onDraftChange != null -> onDraftChange(it)
+                    else -> localText = it
+                }
+            },
             enabled = enabled,
             modifier = Modifier
                 .fillMaxWidth()

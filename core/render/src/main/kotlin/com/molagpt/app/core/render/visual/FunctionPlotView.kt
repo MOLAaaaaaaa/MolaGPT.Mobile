@@ -98,22 +98,33 @@ internal fun FunctionPlotView(spec: FunctionPlotSpec, modifier: Modifier = Modif
 
 @Composable
 private fun FunctionPlotFullscreen(spec: FunctionPlotSpec, params: PlotParams, close: () -> Unit) {
-    val palette = rememberVisualPalette()
-    Column(modifier = Modifier.fillMaxSize().background(palette.surface)) {
-        FullscreenBar(
-            title = spec.title?.takeIf { it.isNotBlank() } ?: "函数图像",
-            hint = "双指缩放 · 拖动平移 · 双击复位",
-            onClose = close,
-        )
-        PlotSurface(
-            spec = spec,
-            params = params,
-            fullscreen = true,
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp),
-        )
-        ParamSliders(spec, params)
-        PlotLegend(spec, params)
-        Spacer(Modifier.height(8.dp))
+    val canvas = MaterialTheme.colorScheme.background
+    VisualFullscreenScaffold(
+        title = spec.title?.takeIf { it.isNotBlank() } ?: "函数图像",
+        hint = "双指缩放 · 拖动平移 · 双击复位",
+        onClose = close,
+        canvasColor = canvas,
+        topBarOverlap = { 0f },
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(
+                    top = innerPadding.calculateTopPadding(),
+                    bottom = innerPadding.calculateBottomPadding(),
+                ),
+        ) {
+            PlotSurface(
+                spec = spec,
+                params = params,
+                fullscreen = true,
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 8.dp),
+                surfaceColor = canvas,
+            )
+            ParamSliders(spec, params)
+            PlotLegend(spec, params)
+            Spacer(Modifier.height(8.dp))
+        }
     }
 }
 
@@ -141,8 +152,15 @@ private class PlotViewState {
 }
 
 @Composable
-private fun PlotSurface(spec: FunctionPlotSpec, params: PlotParams, fullscreen: Boolean, modifier: Modifier) {
+private fun PlotSurface(
+    spec: FunctionPlotSpec,
+    params: PlotParams,
+    fullscreen: Boolean,
+    modifier: Modifier,
+    surfaceColor: androidx.compose.ui.graphics.Color? = null,
+) {
     val palette = rememberVisualPalette()
+    val effectiveSurface = surfaceColor ?: palette.surface
     val measurer = rememberTextMeasurer(cacheSize = 64)
     val density = LocalDensity.current
     val view = remember(spec) { PlotViewState() }
@@ -271,7 +289,7 @@ private fun PlotSurface(spec: FunctionPlotSpec, params: PlotParams, fullscreen: 
         }
 
         // 刻度字最后画，垫一层底色：曲线穿过数字时不会把它划掉。
-        val backing = palette.surface.copy(alpha = 0.82f)
+        val backing = effectiveSurface.copy(alpha = 0.82f)
         for ((text, at) in labels) {
             drawRoundRect(backing, Offset(at.x - 2, at.y), Size(text.size.width + 4f, text.size.height.toFloat()), CornerRadius(3f))
             drawText(text, topLeft = at)
@@ -290,7 +308,7 @@ private fun PlotSurface(spec: FunctionPlotSpec, params: PlotParams, fullscreen: 
                 if (!value.isFinite()) return@forEachIndexed
                 val point = PlotEngine.toScreen(vp, wx, value, w, h)
                 if (point.y in 0f..h) {
-                    drawCircle(palette.surface, 5.5.dp.toPx(), point)
+                    drawCircle(effectiveSurface, 5.5.dp.toPx(), point)
                     drawCircle(palette.series(i), 4.dp.toPx(), point)
                 }
                 val name = curve.label?.takeIf { it.isNotBlank() } ?: "y"

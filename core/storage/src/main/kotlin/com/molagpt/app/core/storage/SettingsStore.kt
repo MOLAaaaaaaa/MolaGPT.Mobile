@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -42,7 +41,6 @@ data class AppSettings(
     val desktopHintDismissed: Boolean = false,
     /** 是否在聊天页顶栏显示图像工作台快捷按钮。 */
     val showImageWorkbenchShortcut: Boolean = true,
-    val temperature: Double = 0.7,
     val useThinking: Boolean = false,
     val reasoningEffort: String = "medium",
     val toolNetwork: Boolean = true,
@@ -136,14 +134,17 @@ data class AppSettings(
 )
 
 /** DataStore 设置存储。 */
-class SettingsStore(private val context: Context) {
+class SettingsStore(
+    context: Context,
+    private val dataStore: DataStore<Preferences> = context.settingsDataStore,
+) {
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
         explicitNulls = false
     }
 
-    val settings: Flow<AppSettings> = context.settingsDataStore.data.map { p ->
+    val settings: Flow<AppSettings> = dataStore.data.map { p ->
         AppSettings(
             themeMode = p[Keys.THEME] ?: "auto",
             defaultModel = p[Keys.DEFAULT_MODEL] ?: DEFAULT_MODEL_ID,
@@ -156,7 +157,6 @@ class SettingsStore(private val context: Context) {
             showAgentControlShortcut = p[Keys.SHOW_AGENT_CONTROL_SHORTCUT] ?: true,
             desktopHintDismissed = p[Keys.DESKTOP_HINT_DISMISSED] ?: false,
             showImageWorkbenchShortcut = p[Keys.SHOW_IMAGE_WORKBENCH_SHORTCUT] ?: true,
-            temperature = p[Keys.TEMPERATURE] ?: 0.7,
             useThinking = p[Keys.USE_THINKING] ?: false,
             reasoningEffort = p[Keys.REASONING_EFFORT] ?: "medium",
             toolNetwork = p[Keys.TOOL_NETWORK] ?: true,
@@ -227,7 +227,6 @@ class SettingsStore(private val context: Context) {
     suspend fun setShowAgentControlShortcut(v: Boolean) = edit { it[Keys.SHOW_AGENT_CONTROL_SHORTCUT] = v }
     suspend fun setShowImageWorkbenchShortcut(v: Boolean) = edit { it[Keys.SHOW_IMAGE_WORKBENCH_SHORTCUT] = v }
     suspend fun setDesktopHintDismissed(v: Boolean) = edit { it[Keys.DESKTOP_HINT_DISMISSED] = v }
-    suspend fun setTemperature(v: Double) = edit { it[Keys.TEMPERATURE] = v }
     suspend fun setUseThinking(v: Boolean) = edit { it[Keys.USE_THINKING] = v }
     suspend fun setReasoningEffort(v: String) = edit { it[Keys.REASONING_EFFORT] = v }
     suspend fun setWebAccessTools(enabled: Boolean) = edit {
@@ -300,8 +299,8 @@ class SettingsStore(private val context: Context) {
     suspend fun setByokMemoryLastConsolidatedAt(v: Long) = edit { it[Keys.BYOK_MEMORY_LAST_CONSOLIDATED_AT] = v }
 
     suspend fun setCloudSyncEnabled(v: Boolean) = edit { it[Keys.CLOUD_SYNC] = v }
+    suspend fun cloudSyncEnabled() = dataStore.data.first()[Keys.CLOUD_SYNC] == true
     suspend fun setTracksEnabled(v: Boolean) = edit { it[Keys.TRACKS] = v }
-    suspend fun setLastSyncAt(v: Long) = edit { it[Keys.LAST_SYNC_AT] = v }
     suspend fun setCompletionNotify(v: Boolean) = edit { it[Keys.COMPLETION_NOTIFY] = v }
 
     suspend fun setResponsePostProcessingEnabled(v: Boolean) = edit { it[Keys.RESPONSE_POST_PROCESSING] = v }
@@ -318,16 +317,21 @@ class SettingsStore(private val context: Context) {
 
     /** 云同步游标（服务端 ISO last_sync_timestamp）；与展示用的 [lastSyncAt] 分开存。 */
     suspend fun syncCursorIso(): String =
-        context.settingsDataStore.data.map { it[Keys.SYNC_CURSOR] ?: SyncMapper.EPOCH_ISO }.first()
+        dataStore.data.map { it[Keys.SYNC_CURSOR] ?: SyncMapper.EPOCH_ISO }.first()
 
-    suspend fun setSyncCursorIso(v: String) = edit { it[Keys.SYNC_CURSOR] = v }
+    suspend fun recordSync(cursor: String?, stillCurrent: () -> Boolean) = edit {
+        if (stillCurrent()) {
+            cursor?.takeIf(String::isNotBlank)?.let { value -> it[Keys.SYNC_CURSOR] = value }
+            it[Keys.LAST_SYNC_AT] = System.currentTimeMillis()
+        }
+    }
 
     /** 登出/删除云端数据后重置游标，下次按首次全量同步处理。 */
-    suspend fun resetSyncCursor() = edit { it.remove(Keys.SYNC_CURSOR) }
+    suspend fun resetSyncCursor() = edit { it.remove(Keys.SYNC_CURSOR); it.remove(Keys.LAST_SYNC_AT) }
 
     /** 已弹过的运营消息 id（每个 id 只弹一次）；不进 [AppSettings] 流，避免无关订阅方重组。 */
     suspend fun seenOpsMessageIds(): Set<String> =
-        context.settingsDataStore.data.map { it[Keys.SEEN_OPS_MESSAGE_IDS] ?: emptySet() }.first()
+        dataStore.data.map { it[Keys.SEEN_OPS_MESSAGE_IDS] ?: emptySet() }.first()
 
     suspend fun addSeenOpsMessageId(id: String) = edit {
         it[Keys.SEEN_OPS_MESSAGE_IDS] = (it[Keys.SEEN_OPS_MESSAGE_IDS] ?: emptySet()) + id
@@ -340,7 +344,7 @@ class SettingsStore(private val context: Context) {
 
     /** 已展示过的本地 Promo 卡 id（每个 id 只弹一次）；内置卡数量极少，加 50 上限防膨胀。 */
     suspend fun seenPromoIds(): Set<String> =
-        context.settingsDataStore.data.map { it[Keys.SEEN_PROMO_IDS] ?: emptySet() }.first()
+        dataStore.data.map { it[Keys.SEEN_PROMO_IDS] ?: emptySet() }.first()
 
     suspend fun addSeenPromoId(id: String) = edit {
         it[Keys.SEEN_PROMO_IDS] = ((it[Keys.SEEN_PROMO_IDS] ?: emptySet()) + id).toList().takeLast(50).toSet()
@@ -348,7 +352,7 @@ class SettingsStore(private val context: Context) {
 
     /** 累计完成的对话轮数（用于里程碑式 Star / 赞助提示，不进 [AppSettings] 以免无关页面重组）。 */
     val completedTurnCountFlow: Flow<Int> =
-        context.settingsDataStore.data
+        dataStore.data
             .map { (it[Keys.COMPLETED_TURN_COUNT] ?: 0L).toInt() }
             .distinctUntilChanged()
 
@@ -363,13 +367,13 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun isDonorCached(): Boolean =
-        context.settingsDataStore.data.map { it[Keys.IS_DONOR_CACHED] ?: false }.first()
+        dataStore.data.map { it[Keys.IS_DONOR_CACHED] ?: false }.first()
 
     suspend fun setIsDonorCached(v: Boolean) = edit { it[Keys.IS_DONOR_CACHED] = v }
 
     /** 已点过"知道了"的命令失败 key（每个只弹一次）；不进 [AppSettings] 流，避免无关订阅方重组。 */
     suspend fun seenAgentCommandFailureKeys(): Set<String> =
-        context.settingsDataStore.data.map { it[Keys.SEEN_AGENT_COMMAND_FAILURES] ?: emptySet() }.first()
+        dataStore.data.map { it[Keys.SEEN_AGENT_COMMAND_FAILURES] ?: emptySet() }.first()
 
     suspend fun addSeenAgentCommandFailureKey(key: String) = edit {
         it[Keys.SEEN_AGENT_COMMAND_FAILURES] =
@@ -386,7 +390,7 @@ class SettingsStore(private val context: Context) {
     }
 
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
-        context.settingsDataStore.edit(block)
+        dataStore.edit(block)
     }
 
     private fun decodeMcpServers(raw: String?): List<ByokMcpServer> =
@@ -421,7 +425,6 @@ class SettingsStore(private val context: Context) {
         val SHOW_AGENT_CONTROL_SHORTCUT = booleanPreferencesKey("show_agent_control_shortcut")
         val SHOW_IMAGE_WORKBENCH_SHORTCUT = booleanPreferencesKey("show_image_workbench_shortcut")
         val DESKTOP_HINT_DISMISSED = booleanPreferencesKey("desktop_hint_dismissed")
-        val TEMPERATURE = doublePreferencesKey("temperature")
         val USE_THINKING = booleanPreferencesKey("use_thinking")
         val REASONING_EFFORT = stringPreferencesKey("reasoning_effort")
         val TOOL_NETWORK = booleanPreferencesKey("tool_network")

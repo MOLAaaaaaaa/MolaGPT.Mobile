@@ -124,32 +124,34 @@ fun ToolCallView(
 
 @Composable
 private fun ToolIcon(name: String, icon: String?, status: ToolStatus) {
-    val glyph = when (icon ?: name) {
-        "book", "read_document" -> Icons.AutoMirrored.Filled.MenuBook
-        "search", "code-search", "search_document", "search_web", "web_search", "visual_search", "molagpt_fast_codebase_search" -> Icons.Filled.Search
-        "code", "python", "execute_python_code" -> Icons.Filled.Code
-        "eye", "analyze_image", "view_image", "vision_proxy", "image-analyze" -> Icons.Filled.Visibility
-        "crop", "image_file_process", "image-action" -> Icons.Filled.Crop
-        "image", "image-gen", "generate_image", "image_generation_and_editing" -> Icons.Filled.Image
-        "skill", "activate_skill" -> Icons.Filled.AutoAwesome
-        "memory", "recall_memory" -> Icons.Filled.Psychology
-        "erase", "forget_memories_by_description" -> Icons.Filled.DeleteOutline
-        "import", "molagpt_import_sandbox_to_project" -> Icons.AutoMirrored.Filled.DriveFileMove
-        "camera" -> Icons.Filled.PhotoCamera
-        "download" -> Icons.Filled.FileDownload
-        "click" -> Icons.Filled.TouchApp
-        "list" -> Icons.AutoMirrored.Filled.FormatListBulleted
-        "pdf" -> Icons.Filled.PictureAsPdf
-        "web", "steel_browser", "browser", "fetch_url", "web_fetch" -> Icons.Filled.Language
-        "mcp", "mcp_call", "mcp_list_tools" -> Icons.Filled.Extension
-        "spawn_agent", "wait_agents", "server_subagents" -> Icons.Filled.Groups
-        else -> Icons.Filled.Build
-    }
+    val glyph = toolIconVector(name, icon)
     Icon(glyph, contentDescription = null, modifier = Modifier.size(18.dp),
         tint = if (status == ToolStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
-private fun readableToolName(name: String): String = when (name) {
+fun toolIconVector(name: String, icon: String? = null) = when (icon ?: name) {
+    "book", "read_document" -> Icons.AutoMirrored.Filled.MenuBook
+    "search", "code-search", "search_document", "search_web", "web_search", "visual_search", "molagpt_fast_codebase_search" -> Icons.Filled.Search
+    "code", "python", "execute_python_code" -> Icons.Filled.Code
+    "eye", "analyze_image", "view_image", "vision_proxy", "image-analyze" -> Icons.Filled.Visibility
+    "crop", "image_file_process", "image-action" -> Icons.Filled.Crop
+    "image", "image-gen", "generate_image", "image_generation_and_editing" -> Icons.Filled.Image
+    "skill", "activate_skill" -> Icons.Filled.AutoAwesome
+    "memory", "recall_memory" -> Icons.Filled.Psychology
+    "erase", "forget_memories_by_description" -> Icons.Filled.DeleteOutline
+    "import", "molagpt_import_sandbox_to_project" -> Icons.AutoMirrored.Filled.DriveFileMove
+    "camera" -> Icons.Filled.PhotoCamera
+    "download" -> Icons.Filled.FileDownload
+    "click" -> Icons.Filled.TouchApp
+    "list" -> Icons.AutoMirrored.Filled.FormatListBulleted
+    "pdf" -> Icons.Filled.PictureAsPdf
+    "web", "steel_browser", "browser", "fetch_url", "web_fetch" -> Icons.Filled.Language
+    "mcp", "mcp_call", "mcp_list_tools" -> Icons.Filled.Extension
+    "spawn_agent", "wait_agents", "server_subagents" -> Icons.Filled.Groups
+    else -> Icons.Filled.Build
+}
+
+fun readableToolName(name: String): String = when (name) {
     "spawn_agent" -> "派发子 Agent"
     "followup_agent" -> "继续派活"
     "send_agent_message" -> "发送消息"

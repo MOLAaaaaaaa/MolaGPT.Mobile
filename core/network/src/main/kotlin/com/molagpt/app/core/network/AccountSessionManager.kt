@@ -37,7 +37,9 @@ class AccountSessionManager(
             ?: throw IOException("登录凭据缺少会话信息，请重新登录")
         return refreshGate.withLock {
             val snapshot = current() ?: throw MolaAuthExpiredException()
-            if (claims(snapshot.accessToken)?.get("sid")?.jsonPrimitive?.contentOrNull != requestSid)
+            val currentClaims = claims(snapshot.accessToken)
+            if (currentClaims?.get("sid")?.jsonPrimitive?.contentOrNull != requestSid ||
+                AccountPrincipal.fromClaims(currentClaims) != AccountPrincipal.fromClaims(requestClaims))
                 throw IOException("登录账户已变化，请重试")
             val now = System.currentTimeMillis() / 1000
             if ((snapshot.expiresAt ?: 0L) > now + 60)
@@ -66,7 +68,8 @@ class AccountSessionManager(
                 val expires = session.expiresAt
                 if (!session.success || access == null || nextRefresh == null ||
                     expires == null || expires <= now ||
-                    claims(access)?.get("sid")?.jsonPrimitive?.contentOrNull != requestSid
+                    claims(access)?.get("sid")?.jsonPrimitive?.contentOrNull != requestSid ||
+                    AccountPrincipal.fromToken(access) != AccountPrincipal.fromClaims(requestClaims)
                 ) throw IOException("会话续期响应无效，请重新登录")
                 if (!replace(snapshot, access, nextRefresh, expires))
                     throw IOException("登录账户已变化，请重试")

@@ -52,6 +52,7 @@ class SettingsViewModel(
 
     private val _syncing = MutableStateFlow(false)
     val syncing: StateFlow<Boolean> = _syncing.asStateFlow()
+    val historyIdentity = credentialStore.historyIdentity
 
     val settings: StateFlow<AppSettings> =
         store.settings.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
@@ -88,7 +89,6 @@ class SettingsViewModel(
         viewModelScope.launch { store.setShowImageWorkbenchShortcut(v) }
     fun setVisualAnswersEnabled(v: Boolean) = viewModelScope.launch { store.setVisualAnswersEnabled(v) }
     fun setHtmlAsCard(v: Boolean) = viewModelScope.launch { store.setHtmlAsCard(v) }
-    fun setTemperature(v: Double) = viewModelScope.launch { store.setTemperature(v) }
     fun setUseThinking(v: Boolean) = viewModelScope.launch { store.setUseThinking(v) }
     fun setReasoningEffort(v: String) = viewModelScope.launch { store.setReasoningEffort(v) }
     fun setWebAccessTools(enabled: Boolean) =
@@ -450,11 +450,13 @@ class SettingsViewModel(
     }
 
     fun setCloudSync(v: Boolean) = viewModelScope.launch {
+        val expected = credentialStore.historyIdentity.value
+        if (!expected.canSync) return@launch
         store.setCloudSyncEnabled(v)
-        // 开启时立即做一次全量同步（force 跳过开关判定，把云端历史拉下来 / 本地推上去）。
+        // The preference is committed before sync, without relying on a cached UI snapshot.
         if (v && !_syncing.value) {
             _syncing.value = true
-            runCatching { syncEngine.syncNow(force = true) }
+            runCatching { syncEngine.syncNow(expected = expected) }
             _syncing.value = false
         }
     }
@@ -514,7 +516,7 @@ class SettingsViewModel(
     fun syncNow() = viewModelScope.launch {
         if (_syncing.value) return@launch
         _syncing.value = true
-        runCatching { syncEngine.syncNow(force = true) }
+        runCatching { syncEngine.syncNow() }
         _syncing.value = false
     }
 }

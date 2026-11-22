@@ -40,6 +40,7 @@ class ShortTokenManager(
 ) {
     @Volatile private var cachedToken: String? = null
     @Volatile private var cachedExpiresAtMs: Long = 0L
+    private var cachedForLogin: String? = null
     private val mutex = Mutex()
     private val cacheGate = Any()
     private val generation = AtomicLong()
@@ -47,8 +48,8 @@ class ShortTokenManager(
     /** 取一个有效短 token；命中缓存则直接返回，否则换取。失败抛 [MolaApiException]。 */
     suspend fun freshToken(): String {
         val expectedGeneration = generation.get()
-        cached()?.let { return it }
-        return mutex.withLock {
+        HistoryRequest.checkCurrent()
+        return (cached() ?: mutex.withLock {
             while (true) {
                 if (generation.get() != expectedGeneration) throw MolaApiException(null, "登录账户已变化，请重试")
                 cached()?.let { return@withLock it }
@@ -62,7 +63,7 @@ class ShortTokenManager(
             }
             @Suppress("UNREACHABLE_CODE")
             error("unreachable")
-        }
+        }).also { HistoryRequest.checkCurrent() }
     }
 
     /** 登录/登出后调用：丢弃缓存，强制下次以新身份重新换取。 */
@@ -70,13 +71,14 @@ class ShortTokenManager(
         synchronized(cacheGate) {
             generation.incrementAndGet()
             cachedToken = null
+            cachedForLogin = null
             cachedExpiresAtMs = 0L
         }
     }
 
     private fun cached(): String? = synchronized(cacheGate) {
         val t = cachedToken ?: return null
-        if (System.currentTimeMillis() < cachedExpiresAtMs - REFRESH_THRESHOLD_MS) t else null
+        if (cachedForLogin == longTokenProvider() && System.currentTimeMillis() < cachedExpiresAtMs - REFRESH_THRESHOLD_MS) t else null
     }
 
     private suspend fun refresh(expectedGeneration: Long): String = withContext(dispatchers.io) {
@@ -124,6 +126,7 @@ class ShortTokenManager(
             if (generation.get() != expectedGeneration || longTokenProvider() != (renewed ?: longToken))
                 throw SessionChanged()
             cachedToken = token
+            cachedForLogin = renewed ?: longToken
             cachedExpiresAtMs = System.currentTimeMillis() + TOKEN_TTL_MS
         }
         token

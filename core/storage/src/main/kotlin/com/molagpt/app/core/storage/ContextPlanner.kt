@@ -152,6 +152,15 @@ internal object ContextPlanner {
         return ((turns - SLIM_KEEP_TURNS) / SLIM_STEP_TURNS * SLIM_STEP_TURNS).coerceAtLeast(0)
     }
 
+    fun lastSlimTurns(request: ChatRequest, timeline: List<ChatMessage>, checkpointId: String?): Int {
+        val last = timeline.lastOrNull { message ->
+            message.role == Role.ASSISTANT && message.status == MessageStatus.COMPLETE &&
+                message.metadata[ChatMessageMetadataKeys.CONTEXT_CHECKPOINT] == checkpointId &&
+                replayedWire(message, request.providerId, request.modelId) != null
+        }
+        return last?.metadata?.get(ChatMessageMetadataKeys.CONTEXT_SLIM)?.toIntOrNull() ?: 0
+    }
+
     /**
      * 精简前 [turns] 个用户轮：过长的工具结果只留开头，图片改发文字占位。
      * 只改请求副本，消息本身不动。

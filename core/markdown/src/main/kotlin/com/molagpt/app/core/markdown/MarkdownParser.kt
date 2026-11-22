@@ -175,7 +175,7 @@ object MarkdownParser {
             val language = info.substringBefore(' ').removeSurrounding("{", "}")
             val closed = node.closingFenceLength != null
             when {
-                language == "mermaid" -> MdBlock.Mermaid(node.literal.trimEnd())
+                language == "mermaid" -> MdBlock.Mermaid(node.literal.trimEnd(), closed)
                 language == MolaUiParser.FENCE_LANGUAGE -> {
                     val source = node.literal.trimEnd()
                     MdBlock.MolaUi(source, closed, MolaUiParser.parseCached(source, closed))

@@ -14,6 +14,9 @@ interface StreamTaskDao {
     @Query("DELETE FROM stream_tasks WHERE sessionId = :sessionId")
     suspend fun delete(sessionId: String)
 
-    @Query("SELECT * FROM stream_tasks ORDER BY createdAt ASC")
-    suspend fun getAll(): List<StreamTaskEntity>
+    @Query("DELETE FROM stream_tasks WHERE providerKind = 'MOLAGPT'")
+    suspend fun clearOfficial()
+
+    @Query("SELECT * FROM stream_tasks WHERE sessionId IN (SELECT sessionId FROM conversations WHERE deletedAt IS NULL AND " + VISIBLE_HISTORY + ") ORDER BY createdAt ASC")
+    suspend fun getAll(includeOfficial: Boolean): List<StreamTaskEntity>
 }

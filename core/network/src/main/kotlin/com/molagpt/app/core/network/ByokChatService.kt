@@ -178,12 +178,11 @@ class ByokChatService(
         modelId: String,
         prompt: String,
         maxTokens: Int = ANTHROPIC_TITLE_MAX_TOKENS,
-        temperature: Double = TITLE_TEMPERATURE,
     ): String? {
         val provider = providerResolver(providerId)?.takeIf { it.enabled } ?: return null
         val target = modelId.trim().ifBlank { return null }
         return runCatching {
-            withContext(dispatchers.io) { requestText(provider, target, prompt, maxTokens, temperature) }
+            withContext(dispatchers.io) { requestText(provider, target, prompt, maxTokens) }
         }.getOrNull()
     }
 
@@ -261,7 +260,6 @@ class ByokChatService(
             ByokProviderType.OPENAI_COMPAT -> buildJsonObject {
                 put("model", modelId)
                 put("stream", false)
-                if (!usesGeminiDefaultSampling(provider, modelId)) put("temperature", TITLE_TEMPERATURE)
                 putJsonArray("messages") {
                     addJsonObject {
                         put("role", "system")
@@ -279,8 +277,14 @@ class ByokChatService(
             ByokProviderType.OPENAI_RESPONSE -> buildJsonObject {
                 put("model", modelId)
                 put("stream", false)
-                put("instructions", system)
+                if (!provider.isOfficialOpenAiResponses) put("instructions", system)
                 putJsonArray("input") {
+                    if (provider.isOfficialOpenAiResponses && system.isNotBlank()) {
+                        addJsonObject {
+                            put("role", "developer")
+                            put("content", system)
+                        }
+                    }
                     addJsonObject {
                         put("role", "user")
                         putJsonArray("content") {
@@ -297,7 +301,6 @@ class ByokChatService(
             ByokProviderType.ANTHROPIC -> buildJsonObject {
                 put("model", modelId)
                 put("max_tokens", maxOutputTokens)
-                put("temperature", TITLE_TEMPERATURE)
                 put("stream", false)
                 put("system", system)
                 putJsonArray("messages") {
@@ -326,16 +329,15 @@ class ByokChatService(
         }
 
     private fun requestTitle(provider: ByokProvider, modelId: String, prompt: String): String? =
-        requestText(provider, modelId, prompt, ANTHROPIC_TITLE_MAX_TOKENS, TITLE_TEMPERATURE)
+        requestText(provider, modelId, prompt, ANTHROPIC_TITLE_MAX_TOKENS)
 
     private fun requestText(
         provider: ByokProvider,
         modelId: String,
         prompt: String,
         maxTokens: Int,
-        temperature: Double,
     ): String? {
-        val body = buildTextBody(provider, modelId, prompt, maxTokens, temperature)
+        val body = buildTextBody(provider, modelId, prompt, maxTokens)
         val url = if (provider.type == ByokProviderType.GEMINI) {
             geminiEndpoint(provider, modelId, stream = false)
         } else {
@@ -370,13 +372,11 @@ class ByokChatService(
         modelId: String,
         prompt: String,
         maxTokens: Int,
-        temperature: Double,
     ): JsonObject =
         when (provider.type) {
             ByokProviderType.OPENAI_COMPAT -> buildJsonObject {
                 put("model", modelId)
                 put("stream", false)
-                if (!usesGeminiDefaultSampling(provider, modelId)) put("temperature", temperature)
                 putJsonArray("messages") {
                     addJsonObject {
                         put("role", "user")
@@ -409,7 +409,6 @@ class ByokChatService(
             ByokProviderType.ANTHROPIC -> buildJsonObject {
                 put("model", modelId)
                 put("max_tokens", maxTokens)
-                put("temperature", temperature)
                 put("stream", false)
                 putJsonArray("messages") {
                     addJsonObject {
@@ -489,6 +488,7 @@ class ByokChatService(
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
         val call = http.okHttp.newCall(req)
+        val modelStartedAt = System.nanoTime()
         try {
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
@@ -502,6 +502,7 @@ class ByokChatService(
                     return@flow
                 }
                 var streamUsage: Usage? = null
+                var failed = false
                 sseFlow { source.readUtf8Line() }.collect { payload ->
                     currentCoroutineContext().ensureActive()
                     if (payload.isDone) {
@@ -525,6 +526,7 @@ class ByokChatService(
                     }
                     parseAnthropicEvent(payload.data)?.let { event ->
                         if (event is StreamEvent.Failed) {
+                            failed = true
                             emit(
                                 StreamEvent.Failed(
                                     serverResponseError(
@@ -537,6 +539,7 @@ class ByokChatService(
                         } else emit(event)
                     }
                 }
+                if (!failed) streamUsage.withModelRequestTime(modelStartedAt)?.let { emit(StreamEvent.UsageUpdate(it)) }
             }
         } finally {
             runCatching { if (!call.isCanceled()) call.cancel() }
@@ -556,6 +559,7 @@ class ByokChatService(
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
         val call = http.okHttp.newCall(req)
+        val modelStartedAt = System.nanoTime()
         try {
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
@@ -569,6 +573,8 @@ class ByokChatService(
                     return@flow
                 }
                 var emittedFinish = false
+                var usage: Usage? = null
+                var failed = false
                 val emittedImages = mutableSetOf<GeminiInlineImageKey>()
                 sseFlow { source.readUtf8Line() }.collect { payload ->
                     currentCoroutineContext().ensureActive()
@@ -579,6 +585,7 @@ class ByokChatService(
                     }
                     parseGeminiEvent(payload.data, emittedImages).forEach { event ->
                         if (event is StreamEvent.Failed) {
+                            failed = true
                             emit(
                                 StreamEvent.Failed(
                                     serverResponseError(
@@ -590,8 +597,10 @@ class ByokChatService(
                             )
                         } else emit(event)
                         if (event is StreamEvent.Finish) emittedFinish = true
+                        if (event is StreamEvent.UsageUpdate) usage = event.usage
                     }
                 }
+                if (!failed) usage.withModelRequestTime(modelStartedAt)?.let { emit(StreamEvent.UsageUpdate(it)) }
                 if (!emittedFinish) emit(StreamEvent.Finish("stop"))
             }
         } finally {
@@ -614,6 +623,7 @@ class ByokChatService(
             .build()
         val parser = StreamParser(http.json)
         val call = http.okHttp.newCall(req)
+        val modelStartedAt = System.nanoTime()
         try {
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
@@ -627,6 +637,8 @@ class ByokChatService(
                     return@flow
                 }
                 var finished = false
+                var usage: Usage? = null
+                var failed = false
                 val rawText = StringBuilder()
                 val rawThinking = StringBuilder()
                 suspend fun emitParsed(event: StreamEvent) {
@@ -647,10 +659,12 @@ class ByokChatService(
                         return@collect
                     }
                     val root = runCatching { http.json.parseToJsonElement(payload.data) }.getOrNull() as? JsonObject
+                    root?.let(::parseOpenAiUsage)?.let { usage = it }
                     val delta = ((root?.get("choices") as? JsonArray)?.firstOrNull() as? JsonObject)?.get("delta") as? JsonObject
                     forEachOpenAiContentPart(delta?.get("content"), rawText::append, rawThinking::append)
                     parser.parse(payload).forEach { event ->
                         if (event is StreamEvent.Failed) {
+                            failed = true
                             emit(
                                 StreamEvent.Failed(
                                     serverResponseError(
@@ -663,7 +677,12 @@ class ByokChatService(
                         } else emitParsed(event)
                     }
                 }
-                if (!finished) parser.finishTail(null).forEach { emitParsed(it) }
+                val measuredUsage = if (failed) null else usage.withModelRequestTime(modelStartedAt)
+                if (!finished) {
+                    parser.finishTail(null, measuredUsage).forEach { emitParsed(it) }
+                } else {
+                    measuredUsage?.let { emit(StreamEvent.UsageUpdate(it)) }
+                }
             }
         } finally {
             runCatching { if (!call.isCanceled()) call.cancel() }
@@ -672,7 +691,7 @@ class ByokChatService(
 
     /**
      * OpenAI Responses API (/v1/responses)。请求体用 `input` 而非 `messages`，
-     * system 消息抽到 `instructions`；SSE 事件（response.output_text.delta 等）
+     * 前置指令对官方接口使用 developer，兼容接口使用顶层 instructions；SSE 事件（response.output_text.delta 等）
      * 复用 [StreamParser]（已内置 response.* 解析）。
      */
     private fun streamOpenAiResponse(provider: ByokProvider, request: ChatRequest): Flow<StreamEvent> = flow {
@@ -681,9 +700,10 @@ class ByokChatService(
             var input = baseMessages
             var usage: Usage? = null
             val citations = WebSearchCitations()
+            val tools = JsonArray(toolSpecs(provider, request).map(::buildResponseTool))
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val toolRound = runResponseToolRound(provider, request, input, citations) { event ->
+                val toolRound = runResponseToolRound(provider, request, input, tools, citations) { event ->
                     if (event is StreamEvent.UsageUpdate) {
                         usage = usage.accumulate(event.usage)
                         emit(StreamEvent.UsageUpdate(usage!!))
@@ -718,7 +738,7 @@ class ByokChatService(
         messages: List<JsonObject>,
         precedingTurnItems: List<JsonObject>,
     ): Flow<StreamEvent> = flow {
-        val body = buildOpenAiResponseBody(provider, request, messages, stream = true, includeTools = false)
+        val body = buildOpenAiResponseBody(provider, request, messages)
         val req = Request.Builder()
             .url(provider.endpoint(provider.chatPath))
             .header("Accept", "text/event-stream")
@@ -727,6 +747,7 @@ class ByokChatService(
             .build()
         val parser = StreamParser(http.json, responseFinalAnswerOnly = true)
         val call = http.okHttp.newCall(req)
+        val modelStartedAt = System.nanoTime()
         try {
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
@@ -785,6 +806,7 @@ class ByokChatService(
                 }
                 if (finish == null) handle(parser.finishTail(null))
                 if (failed) return@flow
+                val measuredUsage = (usage ?: finish?.usage).withModelRequestTime(modelStartedAt)
 
                 if (outputItems.none(::isResponsesMessageItem) && answer.isNotEmpty()) {
                     outputItems += syntheticResponsesMessage(answer.toString())
@@ -801,26 +823,24 @@ class ByokChatService(
                 )
                 // usage 只在 response.completed 的 response 对象里，StreamParser 读的是 chat/completions
                 // 形状的顶层 usage，这条路径原本一路是空的。
-                emit(StreamEvent.Finish(finish?.reason ?: "stop", usage ?: finish?.usage))
+                emit(StreamEvent.Finish(finish?.reason ?: "stop", measuredUsage))
             }
         } finally {
             runCatching { if (!call.isCanceled()) call.cancel() }
         }
     }.flowOn(dispatchers.io)
 
-    /** 构建 Responses API 请求体：input 数组 + instructions + reasoning + tools。 */
+    /** 官方端点的前置 developer 消息已由 buildMessages 保留。 */
     private fun buildOpenAiResponseBody(
         provider: ByokProvider,
         request: ChatRequest,
         messages: List<JsonObject>,
-        stream: Boolean,
-        includeTools: Boolean,
+        tools: JsonArray? = null,
     ): JsonObject {
-        // 只把**开头连续的** system 抽到 instructions——那是角色/系统提示该待的地方。
-        // 出现在对话中间的 system 是按位置生效的补充（世界书深度注入），它的价值就是位置，
-        // 抽走等于静默失效。Responses 的 input 本来就接受 system 身份
-        // （EasyInputMessage.role: user | assistant | system | developer），原样留在原位即可。
-        val leadingSystem = messages.takeWhile { it["role"]?.jsonPrimitive?.contentOrNull == "system" }
+        val official = provider.isOfficialOpenAiResponses
+        val leadingSystem = if (official) emptyList() else {
+            messages.takeWhile { it["role"]?.jsonPrimitive?.contentOrNull == "system" }
+        }
         val systemText = leadingSystem
             .mapNotNull { it["content"]?.jsonPrimitive?.contentOrNull }
             .joinToString("\n\n")
@@ -828,7 +848,7 @@ class ByokChatService(
         val inputItems = messages.drop(leadingSystem.size).map(::toOpenAiResponseInputItem)
         return buildJsonObject {
             put("model", request.modelId)
-            put("stream", stream)
+            put("stream", true)
             if (systemText != null) put("instructions", systemText)
             putJsonArray("input") { inputItems.forEach { add(it) } }
             // Responses API 推理：reasoning:{effort,summary}；关闭同样要显式发，与 chat/completions 一致。
@@ -843,12 +863,16 @@ class ByokChatService(
                     addReasoningOff(provider, request.modelId)
                 }
             }
-            if (includeTools && request.enabledTools.hasByokTools) {
-                putJsonArray("tools") {
-                    toolSpecs(provider, request).forEach { spec -> add(buildResponseTool(spec)) }
-                }
-            }
+            if (tools != null) put("tools", tools)
             applyModelCustomBody(provider, request.modelId)
+        }.let { body ->
+            if (!official) return@let body
+            val include = body["include"] as? JsonArray
+            val encryptedReasoning = JsonPrimitive("reasoning.encrypted_content")
+            JsonObject(body + mapOf(
+                "store" to JsonPrimitive(false),
+                "include" to JsonArray((include.orEmpty() + encryptedReasoning).distinct()),
+            ))
         }
     }
 
@@ -871,10 +895,11 @@ class ByokChatService(
         provider: ByokProvider,
         request: ChatRequest,
         messages: List<JsonObject>,
+        tools: JsonArray,
         citations: WebSearchCitations,
         emitEvent: suspend (StreamEvent) -> Unit,
     ): ToolRoundResult? {
-        val body = buildOpenAiResponseBody(provider, request, messages, stream = true, includeTools = true)
+        val body = buildOpenAiResponseBody(provider, request, messages, tools)
         val req = Request.Builder()
             .url(provider.endpoint(provider.chatPath))
             .header("Accept", "text/event-stream")
@@ -887,6 +912,7 @@ class ByokChatService(
         var usage: Usage? = null
         var failed = false
         val networkCall = http.okHttp.newCall(req)
+        val modelStartedAt = System.nanoTime()
         try {
             networkCall.execute().use { resp ->
                 if (!resp.isSuccessful) {
@@ -938,7 +964,7 @@ class ByokChatService(
             runCatching { if (!networkCall.isCanceled()) networkCall.cancel() }
         }
         if (failed) return null
-        emitEvent(StreamEvent.UsageUpdate(usage ?: Usage(costComplete = false)))
+        emitEvent(StreamEvent.UsageUpdate(usage.withModelRequestTime(modelStartedAt) ?: Usage(costComplete = false)))
 
         // 只发文本增量、不发 output_item 的端点，这一轮的回答在历史里会整段消失，补一条 message 顶上。
         if (outputItems.none(::isResponsesMessageItem) && answer.isNotEmpty()) {
@@ -994,6 +1020,7 @@ class ByokChatService(
         var usage: Usage? = null
         var failed = false
         val networkCall = http.okHttp.newCall(req)
+        val modelStartedAt = System.nanoTime()
         try {
             networkCall.execute().use { resp ->
                 if (!resp.isSuccessful) {
@@ -1040,7 +1067,7 @@ class ByokChatService(
             runCatching { if (!networkCall.isCanceled()) networkCall.cancel() }
         }
         if (failed) return null
-        emitEvent(StreamEvent.UsageUpdate(usage ?: Usage(costComplete = false)))
+        emitEvent(StreamEvent.UsageUpdate(usage.withModelRequestTime(modelStartedAt) ?: Usage(costComplete = false)))
 
         val calls = pending.build()
         val messages = baseMessages + assistantToolCallMessage(openAiReplayContent(rawContent.toString(), rawThinking.toString()), calls)
@@ -1156,6 +1183,7 @@ class ByokChatService(
         var usage: Usage? = null
         var failed = false
         val networkCall = http.okHttp.newCall(req)
+        val modelStartedAt = System.nanoTime()
         try {
             networkCall.execute().use { resp ->
                 if (!resp.isSuccessful) {
@@ -1214,7 +1242,7 @@ class ByokChatService(
             runCatching { if (!networkCall.isCanceled()) networkCall.cancel() }
         }
         if (failed) return null
-        return AnthropicRound(blocks.build(http.json), stopReason, usage)
+        return AnthropicRound(blocks.build(http.json), stopReason, usage.withModelRequestTime(modelStartedAt))
     }
 
     /**
@@ -1308,6 +1336,7 @@ class ByokChatService(
         var blockReason: String? = null
         var failed = false
         val networkCall = http.okHttp.newCall(req)
+        val modelStartedAt = System.nanoTime()
         try {
             networkCall.execute().use { resp ->
                 if (!resp.isSuccessful) {
@@ -1364,7 +1393,13 @@ class ByokChatService(
             emitEvent(StreamEvent.Failed(summary))
             return null
         }
-        return GeminiRound(content, finishReason, usage)
+        return GeminiRound(content, finishReason, usage.withModelRequestTime(modelStartedAt))
+    }
+
+    private fun Usage?.withModelRequestTime(startedAt: Long): Usage? {
+        if (this?.completionTokens == null) return this
+        val elapsed = (System.nanoTime() - startedAt) / 1_000_000
+        return copy(modelRequestMs = elapsed.takeIf { it > 0 })
     }
 
     private fun buildOpenAiBody(
@@ -1375,7 +1410,6 @@ class ByokChatService(
         includeTools: Boolean,
     ): JsonObject = buildJsonObject {
         put("model", request.modelId)
-        if (!usesGeminiDefaultSampling(provider, request.modelId)) put("temperature", request.temperature)
         put("stream", stream)
         // OpenAI 兼容端点流式默认不返回 usage，必须显式要；不要它就没有 token 统计可展示。
         // usage 会单独放在 finish_reason 之后的 choices:[] chunk 里（StreamParser 有对应处理）。
@@ -1637,7 +1671,9 @@ class ByokChatService(
             OpenAiWireHistory.CHAT_COMPLETIONS
         }
         return buildList {
+            var leadingOfficialInstructions = provider.isOfficialOpenAiResponses
             request.messages.forEach { message ->
+                if (message.role != Role.SYSTEM || message.isRoleInjection) leadingOfficialInstructions = false
                 if (message.role == Role.ASSISTANT) {
                     val preserved = OpenAiWireHistory.decode(
                         http.json,
@@ -1660,9 +1696,7 @@ class ByokChatService(
                 )
                 add(
                     buildJsonObject {
-                        // chat/completions 与 Responses 都接受任意位置的 system，身份原样发出。
-                        // 深度注入的位置由 buildOpenAiResponseBody 的「只抽开头的 system」保住。
-                        put("role", wire.role)
+                        put("role", if (leadingOfficialInstructions) "developer" else wire.role)
                         put("content", wire.content)
                         if (replayDeepSeekReasoning && message.role == Role.ASSISTANT) {
                             message.fragments
@@ -2912,7 +2946,6 @@ class ByokChatService(
     ): JsonObject = buildJsonObject {
         put("model", request.modelId)
         put("max_tokens", 4096)
-        put("temperature", request.temperature)
         put("stream", stream)
         putJsonArray("messages") {
             withAnthropicCacheBreakpoint(messages).forEach { add(it) }
@@ -2999,7 +3032,6 @@ class ByokChatService(
             })
         }
         put("generationConfig", buildJsonObject {
-            if (!usesGeminiDefaultSampling(provider, request.modelId)) put("temperature", request.temperature)
             val kind = effectiveThinkingKind(provider, request.modelId)
             val thinkingOn = request.useThinking || isAlwaysOnThinking(provider, request.modelId)
             if (thinkingOn && (kind == ThinkingParamKind.GEMINI || kind == ThinkingParamKind.GEMINI_LEVEL)) {
@@ -3164,7 +3196,6 @@ class ByokChatService(
         val GEMINI_CONFIG_KEYS = setOf(
             "generationConfig", "generation_config", "thinkingConfig", "thinking_config", "extra_body", "google",
         )
-        const val TITLE_TEMPERATURE = 0.3
         const val ANTHROPIC_TITLE_MAX_TOKENS = 2048
 
         /** 部分部署把思考内联在正文里；摘要里不该出现。 */

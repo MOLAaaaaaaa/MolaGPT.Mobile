@@ -45,6 +45,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
@@ -85,6 +86,7 @@ import com.molagpt.app.feature.file.RemoteFavicon
 import com.molagpt.app.feature.file.RemoteImage
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 
 @Composable
 internal fun MessageList(
@@ -257,10 +259,57 @@ internal fun MessageList(
 
     var lastSeenMessageId by remember { mutableStateOf<String?>(null) }
     val lastMessage = messages.lastOrNull()
+    // 切换版本 / 编辑分支时的视口锚定：记录切换栏当前屏幕纵坐标，新分支排版完成后把切换栏滚回原位，
+    // 避免两个版本长短相差很大时按钮跳出手指位置（参考 chat-demo MessageList）。
+    val switcherRowTops = remember { HashMap<String, Float>() }
+    var pendingAnchor by remember { mutableStateOf<SwitcherAnchor?>(null) }
     // 以排好版的行为准触发跟随：行在后台异步排版，按消息变化去滚，滚到的是还没长高的旧布局，
     // 总慢一拍；电脑对话逐字放出时 updatedAt 不变，按消息签名判断则完全不跟。
     LaunchedEffect(rows) {
-        if (lastMessage == null || rows.isEmpty()) return@LaunchedEffect
+        if (lastMessage == null || rows.isEmpty()) {
+            pendingAnchor = null
+            return@LaunchedEffect
+        }
+        val anchor = pendingAnchor
+        if (anchor != null && !lastMessage.isStreaming) {
+            val targetIdx = when (anchor.kind) {
+                SwitcherAnchor.Kind.RETRY -> rows.indexOfFirst {
+                    it is MessageListRow.Retry && it.key == anchor.rowKey && it.current != anchor.beforeCurrent
+                }
+                SwitcherAnchor.Kind.EDIT_BRANCH -> rows.indexOfFirst {
+                    it is MessageListRow.EditBranch && it.current != anchor.beforeCurrent
+                }
+            }
+            if (targetIdx >= 0) {
+                lastSeenMessageId = lastMessage.messageId
+                pendingAnchor = null
+                val targetKey = rows[targetIdx].key
+                val itemIndex = targetIdx + headerItems
+                // 等两帧让新行完成测量与 onGloballyPositioned 坐标回调。
+                withFrameNanos { }
+                withFrameNanos { }
+                if (listState.layoutInfo.visibleItemsInfo.none { it.key == targetKey }) {
+                    listState.scrollToItem(itemIndex)
+                    withFrameNanos { }
+                    withFrameNanos { }
+                }
+                // 最多校准 3 帧：长分支切回短分支时，上方刚滚入视口的项可能在此帧才完成真实高度测量，
+                // 单次 scrollBy 会按估算高度偏移，多校一帧即可严丝合缝回到原位。
+                repeat(3) {
+                    val currentTop = switcherRowTops[targetKey] ?: return@repeat
+                    val delta = currentTop - anchor.anchorTopPx
+                    if (abs(delta) <= 1f) return@repeat
+                    val consumed = listState.scrollBy(delta)
+                    if (abs(consumed) < 0.5f) return@repeat
+                    withFrameNanos { }
+                }
+            }
+            // 等待 Room 推送新分支期间不要误触发 scrollToBottom。
+            return@LaunchedEffect
+        }
+        if (lastMessage.isStreaming) {
+            pendingAnchor = null
+        }
         if (lastMessage.messageId != lastSeenMessageId) {
             lastSeenMessageId = lastMessage.messageId
             autoFollow = true
@@ -360,6 +409,18 @@ internal fun MessageList(
                     is MessageListRow.User -> MessageBubble(message = row.message, modifier = rowModifier)
                     is MessageListRow.Pending -> AssistantPendingText(row.text, rowModifier)
                     is MessageListRow.ToolGroup -> ToolCallGroupRenderer(row.fragments, rowModifier)
+                    is MessageListRow.ProcessTimeline -> CompositionLocalProvider(
+                        LocalCitationSources provides row.citationSources,
+                    ) {
+                        ProcessTimelineRenderer(
+                            timelineKey = row.key,
+                            steps = row.steps,
+                            streaming = row.streaming,
+                            hasFollowingBody = row.hasFollowingBody,
+                            messageStopped = row.messageStopped,
+                            modifier = rowModifier,
+                        )
+                    }
                     is MessageListRow.Fragment -> CompositionLocalProvider(
                         LocalCitationSources provides row.citationSources,
                     ) {
@@ -430,19 +491,53 @@ internal fun MessageList(
                     is MessageListRow.Retry -> RetryBar(
                         current = row.current,
                         total = row.total,
-                        onPrev = { onNavVersion(row.messageId, -1) },
-                        onNext = { onNavVersion(row.messageId, 1) },
-                        modifier = rowModifier,
+                        enabled = canEdit,
+                        onPrev = {
+                            switcherRowTops[row.key]?.let { top ->
+                                pendingAnchor = SwitcherAnchor(SwitcherAnchor.Kind.RETRY, row.key, row.current, top)
+                            }
+                            autoFollow = false
+                            pinnedTurn = -1
+                            onNavVersion(row.messageId, -1)
+                        },
+                        onNext = {
+                            switcherRowTops[row.key]?.let { top ->
+                                pendingAnchor = SwitcherAnchor(SwitcherAnchor.Kind.RETRY, row.key, row.current, top)
+                            }
+                            autoFollow = false
+                            pinnedTurn = -1
+                            onNavVersion(row.messageId, 1)
+                        },
+                        modifier = rowModifier.onGloballyPositioned {
+                            switcherRowTops[row.key] = it.positionInRoot().y
+                        },
                     )
                     is MessageListRow.EditBranch -> Box(
-                        modifier = rowModifier,
+                        modifier = rowModifier.onGloballyPositioned {
+                            switcherRowTops[row.key] = it.positionInRoot().y
+                        },
                         contentAlignment = Alignment.CenterEnd,
                     ) {
                         RetryBar(
                             current = row.current,
                             total = row.total,
-                            onPrev = { onNavEditSnapshot(row.messageId, -1) },
-                            onNext = { onNavEditSnapshot(row.messageId, 1) },
+                            enabled = canEdit,
+                            onPrev = {
+                                switcherRowTops[row.key]?.let { top ->
+                                    pendingAnchor = SwitcherAnchor(SwitcherAnchor.Kind.EDIT_BRANCH, row.key, row.current, top)
+                                }
+                                autoFollow = false
+                                pinnedTurn = -1
+                                onNavEditSnapshot(row.messageId, -1)
+                            },
+                            onNext = {
+                                switcherRowTops[row.key]?.let { top ->
+                                    pendingAnchor = SwitcherAnchor(SwitcherAnchor.Kind.EDIT_BRANCH, row.key, row.current, top)
+                                }
+                                autoFollow = false
+                                pinnedTurn = -1
+                                onNavEditSnapshot(row.messageId, 1)
+                            },
                         )
                     }
                     is MessageListRow.Compaction -> ContextCompactionLine(
@@ -551,6 +646,15 @@ private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToBotto
     }
 }
 
+private data class SwitcherAnchor(
+    val kind: Kind,
+    val rowKey: String,
+    val beforeCurrent: Int,
+    val anchorTopPx: Float,
+) {
+    enum class Kind { RETRY, EDIT_BRANCH }
+}
+
 private data class MessageRenderRequest(
     val messages: List<ChatMessage>,
     val models: List<ProviderModel>,
@@ -602,6 +706,21 @@ internal sealed interface MessageListRow {
     ) : MessageListRow {
         override val key = "$messageId:tool-group:${fragments.first().id}"
         override val contentType = "tool-group"
+    }
+
+    /** 思考与工具调用的统一时间线：底层 fragment 保持原样，展示层聚合成一条可折叠过程轨迹。 */
+    data class ProcessTimeline(
+        val messageId: String,
+        val firstFragmentId: String,
+        val steps: List<ProcessTimelineStep>,
+        val streaming: Boolean,
+        val hasFollowingBody: Boolean,
+        val messageStopped: Boolean,
+        val citationSources: List<SourceReference> = emptyList(),
+        override val topPaddingDp: Int,
+    ) : MessageListRow {
+        override val key = "$messageId:timeline:$firstFragmentId"
+        override val contentType = "process-timeline"
     }
 
     /** 助手正文：单个 Text fragment 解析出的全部 markdown block，合并渲染以支持跨段选择。 */
@@ -696,6 +815,7 @@ private val MessageListRow.ownerMessageId: String?
         is MessageListRow.Pending -> messageId
         is MessageListRow.Fragment -> messageId
         is MessageListRow.ToolGroup -> messageId
+        is MessageListRow.ProcessTimeline -> messageId
         is MessageListRow.AssistantText -> messageId
         is MessageListRow.StreamingPlaceholder -> messageId
         is MessageListRow.Stats -> messageId
@@ -829,18 +949,29 @@ internal fun List<ChatMessage>.toMessageRows(
         }
         var fragmentIndex = 0
         while (fragmentIndex < bodyFragments.size) {
-            val fragment = bodyFragments[fragmentIndex]
-            val searchTools = consecutiveWebSearchTools(bodyFragments, fragmentIndex)
-            if (searchTools.isNotEmpty()) {
-                val displayTools = searchTools.map { tool ->
-                    when {
-                        tool.id == heldToolId -> tool.copy(status = ToolStatus.RUNNING, label = tool.serverTool?.runningLabel ?: tool.label)
-                        !message.isStreaming && tool.serverTool != null && tool.status == ToolStatus.RUNNING -> tool.copy(status = ToolStatus.CANCELLED, label = "操作已停止")
-                        else -> tool
+            val timeline = collectProcessTimeline(bodyFragments, fragmentIndex, message, heldToolId)
+            if (timeline != null) {
+                if (timeline.steps.isNotEmpty()) {
+                    addMessageRow { top ->
+                        MessageListRow.ProcessTimeline(
+                            messageId = message.messageId,
+                            firstFragmentId = timeline.firstFragmentId,
+                            steps = timeline.steps,
+                            streaming = message.isStreaming,
+                            hasFollowingBody = timeline.hasFollowingBody,
+                            messageStopped = message.status == MessageStatus.STOPPED,
+                            citationSources = citationSources,
+                            topPaddingDp = top,
+                        )
                     }
                 }
-                addMessageRow { top -> MessageListRow.ToolGroup(message.messageId, displayTools, top) }
-                fragmentIndex += searchTools.size
+                fragmentIndex = timeline.nextIndex
+                continue
+            }
+            val fragment = bodyFragments[fragmentIndex]
+            // 官方链路在过程片段前后流出的空白 / 注释标记不占行，避免凭空多出一段间距。
+            if (fragment is MessageFragment.Text && fragment.isVisuallyEmpty()) {
+                fragmentIndex += 1
                 continue
             }
             val streamingTail = message.isStreamingTail(fragment)
@@ -1030,6 +1161,171 @@ internal fun consecutiveWebSearchTools(
 private fun MessageFragment.ToolCall.isWebSearchTool(): Boolean =
     name == "search_web" || name == "web_search"
 
+internal data class CollectedProcessTimeline(
+    val firstFragmentId: String,
+    val steps: List<ProcessTimelineStep>,
+    val hasFollowingBody: Boolean,
+    val nextIndex: Int,
+)
+
+/**
+ * 从 [startIndex] 起收集连续的思考和工具调用，
+ * 在展示层合并为单条 [MessageListRow.ProcessTimeline]。底层 fragment 顺序与数据保持不变。
+ *
+ * 官方链路会在思考与工具之间流出纯空白或只含 HTML 注释（如 `<!--PY_OUTPUT_END-->`）的正文片段，
+ * 它们渲染出来什么也没有；夹在两段过程之间时视为透明，不切断时间线。
+ */
+internal fun collectProcessTimeline(
+    fragments: List<MessageFragment>,
+    startIndex: Int,
+    message: ChatMessage,
+    heldToolId: String?,
+): CollectedProcessTimeline? {
+    if (startIndex !in fragments.indices) return null
+
+    fun isProcessCore(fragment: MessageFragment): Boolean =
+        fragment is MessageFragment.Thinking || fragment is MessageFragment.ToolCall
+
+    fun isBodyContent(fragment: MessageFragment): Boolean = when (fragment) {
+        is MessageFragment.Text -> !fragment.isVisuallyEmpty()
+        is MessageFragment.CodeBlock,
+        is MessageFragment.Latex,
+        is MessageFragment.Mermaid,
+        is MessageFragment.Image,
+        is MessageFragment.FileCard,
+        -> true
+        else -> false
+    }
+
+    val first = fragments[startIndex]
+    if (!isProcessCore(first)) return null
+    // 只有以「思考」开头的过程向后聚合工具与后续思考；
+    // 先前已出现的纯工具调用（例如口播正文后的执行动作）不被后续思考倒吸。
+    val startedWithThinking = first is MessageFragment.Thinking
+    fun canContinueRun(fragment: MessageFragment): Boolean = when (fragment) {
+        is MessageFragment.ToolCall -> true
+        is MessageFragment.Thinking -> startedWithThinking
+        else -> false
+    }
+
+    var endIndex = startIndex + 1
+    while (endIndex < fragments.size) {
+        val fragment = fragments[endIndex]
+        if (canContinueRun(fragment)) {
+            endIndex++
+            continue
+        }
+        if (fragment is MessageFragment.Text && fragment.isVisuallyEmpty()) {
+            var next = endIndex + 1
+            while (next < fragments.size && (fragments[next] as? MessageFragment.Text)?.isVisuallyEmpty() == true) next++
+            if (next < fragments.size && canContinueRun(fragments[next])) {
+                endIndex = next
+                continue
+            }
+        }
+        break
+    }
+
+    val interrupted = message.status == MessageStatus.STOPPED || message.status == MessageStatus.ERROR
+    val run = fragments.subList(startIndex, endIndex).filter(::isProcessCore)
+    val steps = ArrayList<ProcessTimelineStep>()
+    var i = 0
+    while (i < run.size) {
+        when (val fragment = run[i]) {
+            is MessageFragment.Thinking -> {
+                val firstId = fragment.id
+                val texts = ArrayList<String>()
+                var totalDuration: Long? = null
+                var active = false
+                while (i < run.size && run[i] is MessageFragment.Thinking) {
+                    val t = run[i] as MessageFragment.Thinking
+                    if (t.text.isNotBlank()) texts += t.text
+                    t.durationMs?.let { ms -> totalDuration = (totalDuration ?: 0L) + ms }
+                    if (message.isStreamingTail(t)) active = true
+                    i++
+                }
+                val combined = texts.joinToString("\n\n")
+                if (combined.isNotBlank() || active) {
+                    steps += ProcessTimelineStep.Thinking(
+                        key = "think:$firstId",
+                        text = combined,
+                        durationMs = totalDuration,
+                        active = active,
+                    )
+                }
+            }
+            is MessageFragment.ToolCall -> {
+                if (fragment.isWebSearchTool()) {
+                    val firstId = fragment.id
+                    val tools = ArrayList<MessageFragment.ToolCall>()
+                    while (i < run.size) {
+                        val candidate = run[i]
+                        if (candidate is MessageFragment.ToolCall && candidate.isWebSearchTool()) {
+                            tools += candidate.normalizedForDisplay(message.isStreaming, interrupted, heldToolId)
+                            i++
+                        } else {
+                            break
+                        }
+                    }
+                    val status = when {
+                        tools.any { it.status == ToolStatus.RUNNING } -> ToolStatus.RUNNING
+                        tools.all { it.status == ToolStatus.FAILED } -> ToolStatus.FAILED
+                        tools.all { it.status == ToolStatus.CANCELLED } -> ToolStatus.CANCELLED
+                        else -> ToolStatus.SUCCESS
+                    }
+                    val queries = tools.flatMap(::extractSearchQueries).distinct()
+                    steps += ProcessTimelineStep.Search(
+                        key = "search:$firstId",
+                        tools = tools,
+                        queries = queries,
+                        status = status,
+                    )
+                } else {
+                    val display = fragment.normalizedForDisplay(message.isStreaming, interrupted, heldToolId)
+                    steps += ProcessTimelineStep.Tool(key = "tool:${display.id}", fragment = display)
+                    i++
+                }
+            }
+            else -> i++
+        }
+    }
+
+    val hasFollowingBody = (endIndex until fragments.size).any { idx ->
+        val fragment = fragments[idx]
+        isBodyContent(fragment) || (!startedWithThinking && fragment is MessageFragment.Thinking)
+    }
+    return CollectedProcessTimeline(
+        firstFragmentId = first.id,
+        steps = steps,
+        hasFollowingBody = hasFollowingBody,
+        nextIndex = endIndex,
+    )
+}
+
+/**
+ * 回答已结束但工具仍停在 RUNNING 时按「已停止」展示：服务端工具一律如此；BYOK 本地工具在停止或出错时
+ * 也收不到终态。带状态说明的（电脑端后台任务）可能真的还在跑，保持原样。
+ * 服务端工具停止后标题回落到工具名，不再沿用「正在…」这类进行时文案。
+ */
+private fun MessageFragment.ToolCall.normalizedForDisplay(
+    streaming: Boolean,
+    interrupted: Boolean,
+    heldToolId: String?,
+): MessageFragment.ToolCall = when {
+    id == heldToolId -> copy(status = ToolStatus.RUNNING, label = serverTool?.runningLabel ?: label)
+    !streaming && status == ToolStatus.RUNNING && statusLabel == null && (serverTool != null || interrupted) ->
+        copy(status = ToolStatus.CANCELLED, label = if (serverTool != null) null else label)
+    else -> this
+}
+
+private val htmlCommentPattern = Regex("""<!--[\s\S]*?-->""")
+
+/** 渲染后没有任何可见内容的正文片段：空白、零宽字符、HTML 注释标记。 */
+internal fun MessageFragment.Text.isVisuallyEmpty(): Boolean =
+    markdown.replace(htmlCommentPattern, "").all { it.isInvisibleChar() }
+
+private fun Char.isInvisibleChar(): Boolean = isWhitespace() || this == '\u200B' || this == '\uFEFF'
+
 /**
  * 返回流式消息当前需要在展示层继续保持「进行中」的工具。
  *
@@ -1047,12 +1343,11 @@ internal fun ChatMessage.heldToolProgressId(): String? {
         .asSequence()
         .drop(toolIndex + 1)
         .any {
-            val text = when (it) {
-                is MessageFragment.Text -> it.markdown
-                is MessageFragment.Thinking -> it.text
-                else -> ""
+            when (it) {
+                is MessageFragment.Text -> !it.isVisuallyEmpty()
+                is MessageFragment.Thinking -> !it.text.all { c -> c.isInvisibleChar() }
+                else -> false
             }
-            text.any { c -> !c.isWhitespace() && c != '\u200B' && c != '\uFEFF' }
         }
     return tool.id.takeUnless { modelContinued }
 }

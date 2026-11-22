@@ -267,19 +267,20 @@ fun RetryBar(
     onPrev: () -> Unit,
     onNext: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        RetryArrow("‹", enabled = current > 0, onClick = onPrev)
+        RetryArrow("‹", enabled = enabled && current > 0, onClick = onPrev)
         Text(
             text = "${current + 1}/$total",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        RetryArrow("›", enabled = current < total - 1, onClick = onNext)
+        RetryArrow("›", enabled = enabled && current < total - 1, onClick = onNext)
     }
 }
 

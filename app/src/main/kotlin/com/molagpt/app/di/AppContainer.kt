@@ -67,11 +67,13 @@ import com.molagpt.app.core.storage.TracksToggle
 import com.molagpt.app.core.storage.allModels
 import com.molagpt.app.feature.auth.MolaGptAuthService
 import com.molagpt.app.feature.chat.BackgroundStreamManager
+import com.molagpt.app.feature.chat.SessionDraftStore
 import com.molagpt.app.feature.file.AttachmentStore
 import com.molagpt.app.feature.imagegen.ImageTaskManager
 import com.molagpt.app.core.markdown.ResponsePostProcessor
 import com.molagpt.app.core.model.ResponseTextProcessor
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -89,6 +91,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -241,6 +244,10 @@ class AppContainer(
         credentials = credentialStore,
         userAgent = userAgent,
         dispatchers = dispatchers,
+        beforeLogout = { expected ->
+            backgroundStreamManager.cancelOfficialTasks(expected).joinAll()
+            syncEngine.syncNow(expected)
+        },
         onAuthChanged = {
             shortTokenManager.invalidate()
             accountStatusCache.invalidate()
@@ -250,14 +257,9 @@ class AppContainer(
                     runCatching { refreshMolaModels() }
                 }
             }
-            // 登录后做一次全量云同步；登出后重置游标（下次按首次全量处理）。
-            applicationScope.launch {
-                if (credentialStore.isLoggedIn) {
-                    runCatching { syncEngine.syncNow() }
-                } else {
-                    // 登出/切号：清理旧账户的占位会话并重置同步游标。
-                    runCatching { syncEngine.prunePlaceholders() }
-                    runCatching { settingsStore.resetSyncCursor() }
+            if (!credentialStore.isLoggedIn) {
+                backgroundStreamManager.cancelOfficialTasks()
+                applicationScope.launch {
                     runCatching { settingsStore.setIsDonorCached(false) }
                 }
             }
@@ -402,6 +404,9 @@ class AppContainer(
         },
         autoEnabled = { currentSettings.contextCompactionEnabled },
         slimEnabled = { currentSettings.contextSlimmingEnabled },
+        preserveSlimBoundary = { request ->
+            byokProviderRepository.get(request.providerId)?.isOfficialOpenAiResponses == true
+        },
         summaryModel = {
             currentSettings.compactionModelKey
                 ?.takeIf { it.contains("::") }
@@ -435,10 +440,10 @@ class AppContainer(
     )
 
     val sessionRepository = SessionRepository(
-        conversationDao = database.conversationDao(),
-        messageDao = database.messageDao(),
+        database = database,
+        identity = credentialStore.historyIdentity,
         dispatchers = dispatchers,
-        cloudSyncEnabled = { currentSettings.cloudSyncEnabled },
+        cloudSyncEnabled = settingsStore::cloudSyncEnabled,
         contextCheckpointDao = database.contextCheckpointDao(),
         wireHistoryStore = wireHistoryStore,
     )
@@ -467,9 +472,8 @@ class AppContainer(
     /** ChatRepository 唯一实例（始终对接真实服务）。 */
     val chatRepository: ChatRepository = ChatRepository(
         chatService = chatService,
-        messageDao = database.messageDao(),
-        conversationDao = database.conversationDao(),
-        streamTaskDao = database.streamTaskDao(),
+        database = database,
+        identity = credentialStore.historyIdentity,
         dispatchers = dispatchers,
         postProcessor = responseTextProcessor,
         pricingResolver = { providerId, modelId -> byokProviderRepository.get(providerId)?.models?.firstOrNull { it.id == modelId }?.pricing },
@@ -578,12 +582,11 @@ class AppContainer(
 
     /** 云同步引擎（个人中心“立即同步”、登录、每轮完成均触发）。 */
     val syncEngine = SyncEngine(
-        conversationDao = database.conversationDao(),
-        messageDao = database.messageDao(),
+        database = database,
         syncApi = syncApi,
         settingsStore = settingsStore,
-        jwtProvider = { credentialStore.jwt },
-        cloudSyncEnabled = { currentSettings.cloudSyncEnabled },
+        sessionProvider = credentialStore::syncSession,
+        identity = credentialStore.historyIdentity,
         dispatchers = dispatchers,
         scope = applicationScope,
     )
@@ -638,9 +641,12 @@ class AppContainer(
         chatRepository = chatRepository,
         scope = applicationScope,
         apiUrlResolver = { providerId, modelId -> modelRegistry.apiUrlFor(providerId, modelId) },
-        titleGenerator = { sessionId -> conversationTitler.generate(sessionId) },
+        titleGenerator = { id, expected -> conversationTitler.generate(id, expected) },
         memoryConsolidator = { sessionId -> byokMemoryConsolidator.onTurnFinished(sessionId) },
     )
+
+    /** 会话级未发送草稿箱（内存隔离，跨会话切换与二级页往返保留）。 */
+    val sessionDraftStore = SessionDraftStore()
 
     /** 画图任务：记录在会话表 + image_* 表，图片在 filesDir/image_workbench。 */
     val imageTaskRepository = ImageTaskRepository(
@@ -831,8 +837,28 @@ class AppContainer(
             reconcileStreamTasks()
             runCatching { personaRepository.ensureSeeded() }
             sweepOrphanAttachments()
-            if (authService.isLoggedIn && currentSettings.cloudSyncEnabled) {
-                runCatching { syncEngine.syncNow() }
+        }
+        applicationScope.launch {
+            credentialStore.historyIdentity.collectLatest { expected ->
+                if (expected.resetPending) {
+                    backgroundStreamManager.cancelOfficialTasks()
+                    while (credentialStore.historyIdentity.value == expected) {
+                        try {
+                            sessionRepository.clearOfficialCache(expected) { ids ->
+                                backgroundStreamManager.forgetHistory(ids)
+                                sessionDraftStore.clearOfficial(ids)
+                                notificationController.clearOfficial(ids)
+                            }
+                            settingsStore.resetSyncCursor()
+                            credentialStore.finishHistoryReset(expected)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Logger.w("AppContainer", "Official history cleanup failed, retrying", e)
+                            delay(2_000)
+                        }
+                    }
+                } else if (expected.canSync) syncEngine.syncNow(expected)
             }
         }
 
@@ -855,6 +881,7 @@ class AppContainer(
         // 每轮对话正常完成 → 增量推送该会话到云端。
         applicationScope.launch {
             backgroundStreamManager.completions.collect {
+                if (it.officialSession != null && it.officialSession != credentialStore.historyIdentity.value) return@collect
                 syncEngine.schedulePush(it.sessionId)
                 runCatching { settingsStore.incrementCompletedTurnCount() }
             }
@@ -908,16 +935,20 @@ class AppContainer(
      * completed/streaming 则 resume(offset=0) 续接补收，其余（停止/过期/不存在）清理任务。
      */
     private suspend fun reconcileStreamTasks() {
+        val expected = credentialStore.historyIdentity.value
         val tasks = runCatching { chatRepository.loadStreamTasks() }.getOrDefault(emptyList())
         for (record in tasks) {
             if (record.providerKind == ProviderKind.BYOK) {
-                runCatching { chatRepository.removeStreamTask(record.sessionId) }
+                runCatching { chatRepository.removeStreamTask(record.sessionId, expected) }
                 continue
             }
-            val status = runCatching { chatService.checkStreamStatus(record.streamSessionId) }.getOrNull()
+            if (!expected.canReadOfficial || expected != credentialStore.historyIdentity.value) continue
+            val status = withContext(com.molagpt.app.core.network.HistoryRequest { expected == credentialStore.historyIdentity.value }) {
+                runCatching { chatService.checkStreamStatus(record.streamSessionId) }.getOrNull()
+            }
             when (status?.status) {
-                "completed", "streaming" -> backgroundStreamManager.resume(record)
-                else -> runCatching { chatRepository.removeStreamTask(record.sessionId) }
+                "completed", "streaming" -> backgroundStreamManager.resume(record, expected)
+                else -> runCatching { chatRepository.removeStreamTask(record.sessionId, expected) }
             }
         }
     }

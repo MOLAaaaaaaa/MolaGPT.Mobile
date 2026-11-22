@@ -184,6 +184,7 @@ class MolaGptChatService(
         conversationId: String,
     ): FileInfo = withContext(dispatchers.io) {
         val jwt = accountTokenProvider()?.takeIf { it.isNotBlank() } ?: throw MolaAuthExpiredException()
+        HistoryRequest.checkCurrent()
         val imageUpload = AttachmentMime.resolve(mimeType, fileName) in
             setOf("image/jpeg", "image/png", "image/webp", "image/gif")
         val multipart = MultipartBody.Builder()
@@ -245,7 +246,6 @@ class MolaGptChatService(
                                 )
                             }
                         }
-                        put("temperature", 0.2)
                         put("max_tokens", 30)
                     },
                 )
@@ -269,7 +269,6 @@ class MolaGptChatService(
         sessionId = req.streamSessionId,
         conversationId = req.conversationId,
         model = req.modelId,
-        temperature = req.temperature,
         messages = req.messages.map { OpenAiMessageContentBuilder.build(it, includeSubagents = true) },
         stream = req.stream,
         useThinking = req.useThinking,

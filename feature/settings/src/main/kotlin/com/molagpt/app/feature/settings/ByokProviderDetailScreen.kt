@@ -371,6 +371,7 @@ fun ByokProviderDetailScreen(
             draft = draft,
             isImageProvider = isImageProvider,
             providerBaseUrl = base.baseUrl,
+            providerType = base.type,
             imageFormatProvider = base.takeIf { isImageProvider && it.type == ByokProviderType.OPENAI_COMPAT },
             onFetchPrices = viewModel::fetchModelPriceCandidates,
             onDismiss = { editingModel = null },
@@ -978,6 +979,7 @@ private fun ModelEditSheet(
     onDelete: (() -> Unit)?,
     isImageProvider: Boolean = false,
     providerBaseUrl: String = "",
+    providerType: ByokProviderType,
     /** 图像服务的模型可以单独选接口。 */
     imageFormatProvider: ByokProvider? = null,
     onFetchPrices: suspend (Collection<String>) -> Map<String, List<ModelsDevPrice>>,
@@ -1016,6 +1018,18 @@ private fun ModelEditSheet(
     var customEffortInput by remember { mutableStateOf("") }
     var tools by remember { mutableStateOf(draft.tools) }
     var customBody by remember { mutableStateOf(draft.customBody) }
+    var showBodyPresets by remember { mutableStateOf(false) }
+    val bodyPresets = remember(providerType, isImageProvider) {
+        if (isImageProvider) emptyList() else when (providerType) {
+            ByokProviderType.OPENAI_COMPAT -> listOf(
+                "temperature" to "0.7", "top_p" to "0.9", "frequency_penalty" to "0",
+                "presence_penalty" to "0", "seed" to "42",
+            )
+            ByokProviderType.ANTHROPIC -> listOf("temperature" to "0.7", "top_p" to "0.9", "top_k" to "40")
+            ByokProviderType.OPENAI_RESPONSE -> listOf("max_output_tokens" to "4096")
+            ByokProviderType.GEMINI -> emptyList()
+        }
+    }
     var contextWindowText by remember { mutableStateOf(draft.contextWindow?.toString().orEmpty()) }
     var pricing by remember { mutableStateOf(draft.pricing) }
     var priceCandidates by remember { mutableStateOf<List<ModelsDevPrice>?>(null) }
@@ -1439,7 +1453,28 @@ private fun ModelEditSheet(
                     }
                 }
             }
-            TextButton(onClick = { customBody = customBody + CustomBodyParam() }) { Text("+ 添加参数") }
+            Box {
+                TextButton(onClick = {
+                    if (bodyPresets.isEmpty()) customBody = customBody + CustomBodyParam()
+                    else showBodyPresets = true
+                }) { Text("+ 添加参数") }
+                DropdownMenu(expanded = showBodyPresets, onDismissRequest = { showBodyPresets = false }) {
+                    DropdownMenuItem(text = { Text("手动填写") }, onClick = {
+                        showBodyPresets = false
+                        customBody = customBody + CustomBodyParam()
+                    })
+                    bodyPresets.forEach { (key, value) ->
+                        DropdownMenuItem(
+                            text = { Text(key) },
+                            enabled = customBody.none { it.key.trim() == key },
+                            onClick = {
+                                showBodyPresets = false
+                                customBody = customBody + CustomBodyParam(key, "number", value)
+                            },
+                        )
+                    }
+                }
+            }
             Button(
                 onClick = {
                     if (modelId.isNotBlank()) {

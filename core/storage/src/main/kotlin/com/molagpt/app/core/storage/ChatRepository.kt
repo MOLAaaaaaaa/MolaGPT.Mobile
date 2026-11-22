@@ -1,5 +1,6 @@
 package com.molagpt.app.core.storage
 
+import androidx.room.withTransaction
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ServerSubagents
@@ -19,17 +20,18 @@ import com.molagpt.app.core.model.TitleRequest
 import com.molagpt.app.core.model.Usage
 import com.molagpt.app.core.network.ChatService
 import com.molagpt.app.core.network.ChatStreamController
+import com.molagpt.app.core.network.HistoryRequest
 import com.molagpt.app.core.network.webTypingPaced
-import com.molagpt.app.core.storage.dao.ConversationDao
-import com.molagpt.app.core.storage.dao.MessageDao
-import com.molagpt.app.core.storage.dao.StreamTaskDao
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.withContext
 
@@ -42,9 +44,8 @@ import kotlinx.coroutines.withContext
  */
 class ChatRepository(
     private val chatService: ChatService,
-    private val messageDao: MessageDao,
-    private val conversationDao: ConversationDao,
-    private val streamTaskDao: StreamTaskDao,
+    private val database: MolaDatabase,
+    val identity: StateFlow<HistoryIdentity>,
     private val dispatchers: DispatcherProvider,
     private val pricingResolver: suspend (String, String) -> com.molagpt.app.core.model.ModelPricing? = { _, _ -> null },
     /** 回答后处理（设置 → 后处理）。默认原样返回，测试与预览可以不接。 */
@@ -54,40 +55,66 @@ class ChatRepository(
     private val wireHistoryStore: WireHistoryStore? = null,
 ) {
     private val controller = ChatStreamController()
+    /** 本地流的思考计时（片段 id → 开始时间）。只在本进程内有效，恢复回答时接不上的那段不显示耗时。 */
+    private val thinkingStartedAt = ConcurrentHashMap<String, Long>()
+    private val messageDao = database.messageDao()
+    private val conversationDao = database.conversationDao()
+    private val streamTaskDao = database.streamTaskDao()
+    private val includeOfficial get() = identity.value.canReadOfficial
 
+    private suspend fun <T> withSession(sessionId: String, expected: HistoryIdentity? = null, block: suspend () -> T): T? =
+        database.withTransaction {
+            val scope = identity.value
+            val row = conversationDao.getById(sessionId, scope.canReadOfficial) ?: return@withTransaction null
+            if (row.providerKind == ProviderKind.MOLAGPT.name && expected != null && expected != scope) null else block()
+        }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun observeMessages(sessionId: String): Flow<List<ChatMessage>> =
-        messageDao.observeBySession(sessionId).map { rows -> rows.map { it.toDomain() } }
+        identity.flatMapLatest { messageDao.observeBySession(sessionId, it.canReadOfficial) }.map { rows -> rows.map { it.toDomain() } }
 
-    suspend fun persistUserMessage(message: ChatMessage) = withContext(dispatchers.io) {
-        messageDao.upsert(message.toEntity(wireHistoryStore))
+    suspend fun persistUserMessage(message: ChatMessage, replacingFrom: Long? = null, expected: HistoryIdentity = identity.value) = withSession(message.sessionId, expected) {
+        val entity = message.toEntity(wireHistoryStore)
+        if (replacingFrom == null) {
+            messageDao.upsert(entity)
+        } else {
+            messageDao.replaceFrom(replacingFrom, entity)
+        }
         conversationDao.touch(message.sessionId, System.currentTimeMillis(), message.rawText?.take(60))
     }
 
-    suspend fun stop(streamSessionId: String) = chatService.stopGeneration(streamSessionId)
+    suspend fun stop(sessionId: String, streamSessionId: String, scope: HistoryIdentity) {
+        if (scope != identity.value || conversationDao.getById(sessionId, scope.canReadOfficial)?.providerKind != ProviderKind.MOLAGPT.name) return
+        withContext(HistoryRequest { scope == identity.value }) { chatService.stopGeneration(streamSessionId) }
+    }
 
     suspend fun messageCount(sessionId: String): Int =
-        withContext(dispatchers.io) { messageDao.count(sessionId) }
+        withContext(dispatchers.io) { messageDao.count(sessionId, includeOfficial) }
 
     /** 用户说过几句。角色会话开场就有一条助手开场白，「是不是第一轮」不能再看总条数。 */
     suspend fun userMessageCount(sessionId: String): Int =
-        withContext(dispatchers.io) { messageDao.countUserMessages(sessionId) }
+        withContext(dispatchers.io) { messageDao.countUserMessages(sessionId, includeOfficial) }
 
     /**
      * 写入角色开场白。会话里已经有任何消息就不写——开场白只在空白会话上出现一次，
      * 重复调用（切角色、重新进入页面）必须是幂等的。
      */
-    suspend fun persistGreeting(message: ChatMessage): Boolean = withContext(dispatchers.io) {
-        if (messageDao.count(message.sessionId) > 0) return@withContext false
+    suspend fun persistGreeting(message: ChatMessage): Boolean = withSession(message.sessionId) {
+        if (messageDao.count(message.sessionId, includeOfficial) > 0) return@withSession false
         messageDao.upsert(message.toEntity(wireHistoryStore))
         conversationDao.refreshListVisibility(message.sessionId)
         true
-    }
+    } ?: false
 
-    suspend fun generateTitle(request: TitleRequest): String = chatService.generateTitle(request)
+    suspend fun generateTitle(request: TitleRequest, scope: HistoryIdentity): String {
+        if (conversationDao.getById(request.sessionId, scope.canReadOfficial)?.providerKind != request.providerKind.name) return ""
+        return if (request.providerKind == ProviderKind.BYOK) chatService.generateTitle(request)
+        else withContext(HistoryRequest { scope == identity.value }) { chatService.generateTitle(request) }
+    }
 
     /** 一次性取整会话消息（标题生成取尾窗口用）。 */
     suspend fun allMessages(sessionId: String): List<ChatMessage> =
-        withContext(dispatchers.io) { messageDao.getAllBySession(sessionId).map { it.toDomain() } }
+        withContext(dispatchers.io) { messageDao.getAllBySession(sessionId, includeOfficial).map { it.toDomain() } }
 
     /** 上传附件，结果用于待发送附件条与消息附件。 */
     suspend fun uploadFile(
@@ -95,7 +122,10 @@ class ChatRepository(
         fileName: String,
         mimeType: String,
         conversationId: String,
-    ): FileInfo = chatService.uploadFile(bytes, fileName, mimeType, conversationId)
+        scope: HistoryIdentity,
+    ): FileInfo = withContext(HistoryRequest { scope == identity.value }) {
+        chatService.uploadFile(bytes, fileName, mimeType, conversationId)
+    }
 
     /**
      * 当前仍被消息引用的本地附件相对路径。供启动时回收孤儿文件——
@@ -116,8 +146,8 @@ class ChatRepository(
     }
 
     /** regenerate / edit 的本地裁剪：删掉指定时间点及之后的消息，随后由 ViewModel 重新发起。 */
-    suspend fun deleteMessagesFrom(sessionId: String, fromCreatedAt: Long) =
-        withContext(dispatchers.io) {
+    suspend fun deleteMessagesFrom(sessionId: String, fromCreatedAt: Long, expected: HistoryIdentity) =
+        withSession(sessionId, expected) {
             messageDao.deleteFrom(sessionId, fromCreatedAt)
             conversationDao.refreshListVisibility(sessionId)
         }
@@ -126,12 +156,12 @@ class ChatRepository(
      * 编辑重发前：把当前整条时间线打包成一个历史分支。
      *
      * 返回应挂到**新**用户消息上的 editSnapshots 串——被编辑的那条随后会被
-     * [deleteMessagesFrom] 一并删掉，所以分支元数据不能写在它身上。
+     * [persistUserMessage] 一并替换，所以分支元数据不能写在它身上。
      * 返回 null 表示该消息后面没有内容，无需建分支（对齐 Web 的 hasFollowingMessages 判定）。
      */
     suspend fun snapshotBeforeEdit(sessionId: String, messageId: String): String? =
         withContext(dispatchers.io) {
-            val all = messageDao.getAllBySession(sessionId)
+            val all = messageDao.getAllBySession(sessionId, includeOfficial)
             val target = all.firstOrNull { it.messageId == messageId } ?: return@withContext null
             if (all.none { it.createdAt > target.createdAt }) return@withContext null
             val prior = MessageJson.decodeMeta(target.metadataJson)[EditSnapshots.KEY]
@@ -148,24 +178,25 @@ class ChatRepository(
         messageId: String,
         delta: Int,
         persistBack: Boolean = false,
+        expected: HistoryIdentity = identity.value,
     ): Boolean =
-        withContext(dispatchers.io) {
-            val all = messageDao.getAllBySession(sessionId)
+        withSession(sessionId, expected) {
+            val all = messageDao.getAllBySession(sessionId, includeOfficial)
             val timelineNow = all.filterNot { it.role.equals(Role.SYSTEM.name, ignoreCase = true) }
             // 锚点按「非 system 时间线中的下标」定位：各版本共享前缀，故该下标跨版本稳定；
             // createdAt 则会随每次编辑重发而变，不能用来匹配。
             val anchorAt = timelineNow.indexOfFirst { it.messageId == messageId }
-            if (anchorAt < 0) return@withContext false
+            if (anchorAt < 0) return@withSession false
             val target = timelineNow[anchorAt]
             val nav = EditSnapshots.navigate(
                 raw = MessageJson.decodeMeta(target.metadataJson)[EditSnapshots.KEY],
                 delta = delta,
                 liveTimeline = EditSnapshots.timelineOf(all, includeLocalStats = persistBack),
                 persistBack = persistBack,
-            ) ?: return@withContext false
+            ) ?: return@withSession false
 
             val restored = EditSnapshots.messagesOf(sessionId, nav.timeline)
-            if (restored.isEmpty() || anchorAt > restored.lastIndex) return@withContext false
+            if (restored.isEmpty() || anchorAt > restored.lastIndex) return@withSession false
             // 快照内部不带分支元数据（避免嵌套膨胀），切换后要挂回锚点那条用户消息。
             val rebound = restored.mapIndexed { i, m ->
                 if (i != anchorAt) {
@@ -179,7 +210,7 @@ class ChatRepository(
             messageDao.replaceAll(sessionId, rebound)
             conversationDao.refreshListVisibility(sessionId)
             true
-        }
+        } ?: false
 
     /**
      * 发起助手回复流。逐步 emit 已应用 [DeltaCommand] 的助手消息；调用方负责节流后刷新 UI。
@@ -189,7 +220,10 @@ class ChatRepository(
         request: ChatRequest,
         assistantMessageId: String,
         priorAttempts: List<RetryAttempt> = emptyList(),
+        scope: HistoryIdentity = identity.value,
     ): Flow<ChatMessage> = flow {
+        if (request.providerKind == ProviderKind.MOLAGPT && scope != identity.value) return@flow
+        if (conversationDao.getById(request.sessionId, scope.canReadOfficial)?.providerKind != request.providerKind.name) return@flow
         val start = System.currentTimeMillis()
         var msg = ChatMessage(
             messageId = assistantMessageId,
@@ -235,7 +269,8 @@ class ChatRepository(
             var overflowRetried = false
             while (true) {
                 var overflow: String? = null
-                chatService.sendMessage(outgoing).onEach { event ->
+                val events = chatService.sendMessage(outgoing)
+                (if (request.providerKind == ProviderKind.BYOK) events else events.flowOn(HistoryRequest { scope == identity.value })).onEach { event ->
                     // 在打字动画排队之前保存用量，停止显示时仍保留上游已完成请求的费用。
                     when (event) {
                         is com.molagpt.app.core.model.StreamEvent.UsageUpdate -> usage.set(event.usage)
@@ -302,6 +337,7 @@ class ChatRepository(
             if (!processed) msg = withContext(NonCancellable) { applyPostProcessing(msg) }
             var finalMsg = msg.copy(
                 status = if (msg.status == MessageStatus.STREAMING) MessageStatus.STOPPED else msg.status,
+                fragments = msg.fragments.withThinkingFinished(),
                 rawText = visibleText(msg),
                 updatedAt = System.currentTimeMillis(),
                 metadata = msg.metadata - setOf("pending", "pendingRecovery"),
@@ -312,28 +348,30 @@ class ChatRepository(
                 finalMsg = finalMsg.withAttempts(priorAttempts)
             }
             withContext(NonCancellable + dispatchers.io) {
-                messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
-                conversationDao.touch(request.sessionId, System.currentTimeMillis(), finalMsg.rawText?.take(60))
+                withSession(request.sessionId, scope) {
+                    messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
+                    conversationDao.touch(request.sessionId, System.currentTimeMillis(), finalMsg.rawText?.take(60))
+                }
             }
         }
     }.flowOn(dispatchers.io)
 
     /** 持久化单条消息（版本切换后落库）。 */
-    suspend fun updateMessage(message: ChatMessage) = withContext(dispatchers.io) {
+    suspend fun updateMessage(message: ChatMessage, expected: HistoryIdentity = identity.value) = withSession(message.sessionId, expected) {
         messageDao.upsert(message.toEntity(wireHistoryStore))
         conversationDao.refreshListVisibility(message.sessionId)
     }
 
     // —— 进程死亡恢复：在途任务持久化 + 续接 ——
 
-    suspend fun persistStreamTask(record: StreamTaskRecord) =
-        withContext(dispatchers.io) { streamTaskDao.upsert(record.toEntity()) }
+    suspend fun persistStreamTask(record: StreamTaskRecord, expected: HistoryIdentity) =
+        withSession(record.sessionId, expected) { streamTaskDao.upsert(record.toEntity()) }
 
-    suspend fun removeStreamTask(sessionId: String) =
-        withContext(dispatchers.io) { streamTaskDao.delete(sessionId) }
+    suspend fun removeStreamTask(sessionId: String, expected: HistoryIdentity) =
+        withSession(sessionId, expected) { streamTaskDao.delete(sessionId) }
 
     suspend fun loadStreamTasks(): List<StreamTaskRecord> =
-        withContext(dispatchers.io) { streamTaskDao.getAll().map { it.toRecord() } }
+        withContext(dispatchers.io) { streamTaskDao.getAll(includeOfficial).map { it.toRecord() } }
 
     /**
      * 续接一个被中断的助手回复：用 [ChatService.resumeStream] 从 offset=0 回放服务端缓存。
@@ -347,7 +385,9 @@ class ChatRepository(
         streamSessionId: String,
         model: String?,
         modelDisplayName: String?,
+        scope: HistoryIdentity,
     ): Flow<ChatMessage> = flow {
+        if (scope != identity.value || conversationDao.getById(sessionId, scope.canReadOfficial)?.providerKind != ProviderKind.MOLAGPT.name) return@flow
         val start = System.currentTimeMillis()
         var msg = ChatMessage(
             messageId = assistantMessageId,
@@ -366,7 +406,7 @@ class ChatRepository(
         emit(msg)
         var processed = false
         try {
-            chatService.resumeStream(apiUrl, streamSessionId, 0).webTypingPaced().collect { event ->
+            chatService.resumeStream(apiUrl, streamSessionId, 0).flowOn(HistoryRequest { scope == identity.value }).webTypingPaced().collect { event ->
                 controller.toCommands(event).forEach { cmd -> msg = applyCommand(msg, cmd) }
                 emit(msg.copy(updatedAt = System.currentTimeMillis()))
             }
@@ -378,13 +418,16 @@ class ChatRepository(
             if (!processed) msg = withContext(NonCancellable) { applyPostProcessing(msg) }
             val finalMsg = msg.copy(
                 status = if (msg.status == MessageStatus.STREAMING) MessageStatus.STOPPED else msg.status,
+                fragments = msg.fragments.withThinkingFinished(),
                 rawText = visibleText(msg),
                 updatedAt = System.currentTimeMillis(),
                 metadata = msg.metadata - setOf("pending", "pendingRecovery"),
             )
             withContext(NonCancellable + dispatchers.io) {
-                messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
-                conversationDao.touch(sessionId, System.currentTimeMillis(), finalMsg.rawText?.take(60))
+                withSession(sessionId, scope) {
+                    messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
+                    conversationDao.touch(sessionId, System.currentTimeMillis(), finalMsg.rawText?.take(60))
+                }
             }
         }
     }.flowOn(dispatchers.io)
@@ -431,6 +474,7 @@ class ChatRepository(
             usage?.cachedTokens?.let { put(ChatMessageMetadataKeys.CACHED_TOKENS, it.toString()) }
             put(ChatMessageMetadataKeys.DURATION_MS, (System.currentTimeMillis() - startedAt).toString())
             firstTokenAt?.let { put(ChatMessageMetadataKeys.TTFT_MS, (it - startedAt).toString()) }
+            usage?.modelRequestMs?.let { put(ChatMessageMetadataKeys.MODEL_REQUEST_MS, it.toString()) }
             usage?.contextSize?.let { put(ChatMessageMetadataKeys.CONTEXT_TOKENS, it.toString()) }
             checkpointId?.let { put(ChatMessageMetadataKeys.CONTEXT_CHECKPOINT, it) }
             if (slimTurns > 0) put(ChatMessageMetadataKeys.CONTEXT_SLIM, slimTurns.toString())
@@ -465,7 +509,9 @@ class ChatRepository(
                 if (tail is MessageFragment.Thinking) {
                     frags[frags.lastIndex] = tail.copy(text = tail.text + cmd.chunk, collapsed = false)
                 } else {
-                    frags.add(MessageFragment.Thinking(Ids.newFragmentId(), cmd.chunk, collapsed = false))
+                    val id = Ids.newFragmentId()
+                    thinkingStartedAt[id] = System.currentTimeMillis()
+                    frags.add(MessageFragment.Thinking(id, cmd.chunk, collapsed = false))
                 }
                 // 已收到真实推理内容，连接/工具结果处理占位已结束。
                 if (meta.containsKey("pending")) meta = meta - setOf("pending", "pendingRecovery")
@@ -532,8 +578,24 @@ class ChatRepository(
                 meta = meta - setOf("pending", "pendingRecovery")
             }
         }
+        finishThinking(frags, all = status != MessageStatus.STREAMING)
         return msg.copy(fragments = frags, status = status, metadata = meta)
     }
+
+    /** 已不在末尾的思考段（被正文、工具打断）写入耗时；[all] 为 true 时连末尾一起结算（回答结束）。 */
+    private fun finishThinking(frags: MutableList<MessageFragment>, all: Boolean) {
+        if (thinkingStartedAt.isEmpty()) return
+        val tailId = if (all) null else frags.lastOrNull { it !is MessageFragment.SearchResult }?.id
+        val now = System.currentTimeMillis()
+        frags.forEachIndexed { index, fragment ->
+            if (fragment is MessageFragment.Thinking && fragment.id != tailId && fragment.durationMs == null) {
+                thinkingStartedAt.remove(fragment.id)?.let { start -> frags[index] = fragment.copy(durationMs = now - start) }
+            }
+        }
+    }
+
+    private fun List<MessageFragment>.withThinkingFinished(): List<MessageFragment> =
+        toMutableList().also { finishThinking(it, all = true) }
 
     private fun collapseThinking(frags: MutableList<MessageFragment>) {
         frags.forEachIndexed { index, fragment ->

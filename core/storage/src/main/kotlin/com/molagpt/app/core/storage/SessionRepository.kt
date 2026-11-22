@@ -4,6 +4,7 @@ import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.map
+import androidx.room.withTransaction
 import com.molagpt.app.core.common.DispatcherProvider
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.Conversation
@@ -11,23 +12,28 @@ import com.molagpt.app.core.model.ConversationFilter
 import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ProviderIds
 import com.molagpt.app.core.model.ProviderKind
-import com.molagpt.app.core.storage.dao.ConversationDao
-import com.molagpt.app.core.storage.dao.MessageDao
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
 /** 会话本地仓库，提供创建、删除、重命名、置顶与历史分页等能力。 */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionRepository(
-    private val conversationDao: ConversationDao,
-    private val messageDao: MessageDao,
+    private val database: MolaDatabase,
+    val identity: StateFlow<HistoryIdentity>,
     private val dispatchers: DispatcherProvider,
     /** 云同步开启时删除走墓碑（待 push delete），否则直接硬删（游客无需保留墓碑）。 */
-    private val cloudSyncEnabled: () -> Boolean = { false },
+    private val cloudSyncEnabled: suspend () -> Boolean,
     private val contextCheckpointDao: com.molagpt.app.core.storage.dao.ContextCheckpointDao? = null,
     private val wireHistoryStore: WireHistoryStore? = null,
 ) {
+    private val conversationDao = database.conversationDao()
+    private val messageDao = database.messageDao()
+    private val includeOfficial get() = identity.value.canReadOfficial
+
     fun pagedSessions(
         searchQuery: String = "",
         filter: ConversationFilter = ConversationFilter.ALL,
@@ -39,14 +45,14 @@ class SessionRepository(
         )
         // 两个 DAO 方法的元素类型不同（实体 vs 搜索投影），共用一个 pagingSourceFactory
         // 推不出公共类型，所以按分支各建各的 Pager。
-        return if (query == null) {
-            Pager(config) { conversationDao.pagingSource(filter.wire) }.flow
-                .map { pagingData -> pagingData.map { SessionHit(it.toDomain()) } }
-        } else {
-            Pager(config) { conversationDao.searchPagingSource(query, filter.wire) }.flow
-                .map { pagingData ->
-                    pagingData.map { SessionHit(it.conversation.toDomain(), it.matchedSnippet) }
-                }
+        return identity.flatMapLatest { scope ->
+            if (query == null) {
+                Pager(config) { conversationDao.pagingSource(filter.wire, scope.canReadOfficial) }.flow
+                    .map { pagingData -> pagingData.map { SessionHit(it.toDomain()) } }
+            } else {
+                Pager(config) { conversationDao.searchPagingSource(query, filter.wire, scope.canReadOfficial) }.flow
+                    .map { pagingData -> pagingData.map { SessionHit(it.conversation.toDomain(), it.matchedSnippet) } }
+            }
         }
     }
 
@@ -56,8 +62,11 @@ class SessionRepository(
         providerId: String? = ProviderIds.MOLAGPT,
         providerKind: ProviderKind = ProviderKind.MOLAGPT,
         personaId: String? = null,
+        scope: HistoryIdentity = identity.value,
     ): Conversation =
-        withContext(dispatchers.io) {
+        database.withTransaction {
+            if (providerKind == ProviderKind.MOLAGPT && (!scope.canReadOfficial || scope != identity.value))
+                throw kotlinx.coroutines.CancellationException("History session changed")
             val now = System.currentTimeMillis()
             val c = Conversation(
                 sessionId = Ids.newSessionId(),
@@ -69,7 +78,7 @@ class SessionRepository(
                 updatedAt = now,
                 personaId = personaId,
             )
-            conversationDao.upsert(c.toEntity())
+            check(conversationDao.insert(c.toEntity()) != -1L)
             c
         }
 
@@ -81,11 +90,13 @@ class SessionRepository(
         providerId: String? = ProviderIds.MOLAGPT,
         providerKind: ProviderKind = ProviderKind.MOLAGPT,
         personaId: String? = null,
-    ) = withContext(dispatchers.io) {
-        val existing = conversationDao.getById(sessionId)
+        scope: HistoryIdentity = identity.value,
+    ): Boolean = database.withTransaction {
+        if (providerKind == ProviderKind.MOLAGPT && (!scope.canReadOfficial || scope != identity.value)) return@withTransaction false
+        val existing = conversationDao.getById(sessionId, scope.canReadOfficial)
         if (existing == null) {
             val now = System.currentTimeMillis()
-            conversationDao.upsert(
+            conversationDao.insert(
                 Conversation(
                     sessionId = sessionId,
                     title = title,
@@ -96,36 +107,42 @@ class SessionRepository(
                     updatedAt = now,
                     personaId = personaId,
                 ).toEntity(),
-            )
+            ) != -1L
         } else {
+            if (existing.providerKind != providerKind.name) return@withTransaction false
             if (existing.title == DEFAULT_TITLE && title != DEFAULT_TITLE) {
                 // 会话已被预创建为占位标题（如跨阵营切换进入 BYOK），首条消息发送时把占位标题换成消息内容，
                 // 使顶栏在流式回复期间即显示临时标题，与 MolaGPT 默认入口的懒创建行为一致。
-                conversationDao.rename(sessionId, title, System.currentTimeMillis())
+                conversationDao.rename(sessionId, title, System.currentTimeMillis(), scope.canReadOfficial)
             }
             if (providerKind == ProviderKind.BYOK && personaId != null && existing.personaId != personaId) {
                 conversationDao.updatePersona(sessionId, personaId, System.currentTimeMillis())
             }
+            true
         }
     }
 
     suspend fun get(sessionId: String): Conversation? =
-        withContext(dispatchers.io) { conversationDao.getById(sessionId)?.toDomain() }
+        withContext(dispatchers.io) { conversationDao.getById(sessionId, includeOfficial)?.toDomain() }
 
     /** 观察单个会话（顶栏标题随重命名实时刷新）。 */
     fun observe(sessionId: String): Flow<Conversation?> =
-        conversationDao.observeById(sessionId).map { it?.toDomain() }
+        identity.flatMapLatest { conversationDao.observeById(sessionId, it.canReadOfficial) }.map { it?.toDomain() }
 
-    suspend fun rename(sessionId: String, title: String) =
-        withContext(dispatchers.io) { conversationDao.rename(sessionId, title, System.currentTimeMillis()) }
+    suspend fun rename(sessionId: String, title: String, expected: HistoryIdentity = identity.value) =
+        database.withTransaction {
+            conversationDao.rename(sessionId, title, System.currentTimeMillis(), expected == identity.value && expected.canReadOfficial)
+        }
 
     suspend fun updateModel(
         sessionId: String,
         model: String?,
         providerId: String? = ProviderIds.MOLAGPT,
         providerKind: ProviderKind = ProviderKind.MOLAGPT,
-    ) = withContext(dispatchers.io) {
-        conversationDao.updateModel(sessionId, model, providerId, providerKind.name, System.currentTimeMillis())
+        expected: HistoryIdentity = identity.value,
+    ) = database.withTransaction {
+        conversationDao.updateModel(sessionId, model, providerId, providerKind.name, System.currentTimeMillis(),
+            expected == identity.value && expected.canReadOfficial)
     }
 
     /** 绑定 / 切换会话角色（仅 BYOK 会话调用）。 */
@@ -150,46 +167,47 @@ class SessionRepository(
     suspend fun sessionsPendingMemory(limit: Int, allowedPersonaIds: Set<String>): List<String> =
         withContext(dispatchers.io) { conversationDao.sessionsPendingMemory(limit, allowedPersonaIds.toList()) }
 
-    suspend fun setPinned(sessionId: String, pinned: Boolean) =
-        withContext(dispatchers.io) { conversationDao.setPinned(sessionId, pinned) }
+    suspend fun setPinned(sessionId: String, pinned: Boolean, expected: HistoryIdentity = identity.value) =
+        database.withTransaction { conversationDao.setPinned(sessionId, pinned, expected == identity.value && expected.canReadOfficial) }
 
     suspend fun setFavorite(sessionId: String, favorite: Boolean) =
-        withContext(dispatchers.io) { conversationDao.setFavorite(sessionId, favorite) }
+        withContext(dispatchers.io) { conversationDao.setFavorite(sessionId, favorite, includeOfficial) }
 
-    suspend fun delete(sessionId: String) = withContext(dispatchers.io) {
-        deleteOne(conversationDao.getById(sessionId), sessionId)
-    }
+    suspend fun delete(sessionId: String) { deleteAll(listOf(sessionId)) }
 
     /**
      * 批量删除。逐条走与 [delete] 完全相同的墓碑 / 硬删判定（共用 [deleteOne]，避免两处判定漂移），
      * 返回实际处理的 sessionId，供上层对 MolaGPT 会话逐个 schedulePush。
      */
-    suspend fun deleteAll(sessionIds: Collection<String>): List<String> = withContext(dispatchers.io) {
+    suspend fun deleteAll(sessionIds: Collection<String>, scope: HistoryIdentity = identity.value): List<String> = withContext(dispatchers.io) {
         val ids = sessionIds.distinct()
         if (ids.isEmpty()) return@withContext emptyList<String>()
-        ids.chunked(SQLITE_VARIABLE_CHUNK).flatMap { chunk ->
-            val existing = conversationDao.getByIds(chunk).associateBy { it.sessionId }
-            chunk.map { sessionId ->
-                deleteOne(existing[sessionId], sessionId)
-                sessionId
+        val tombstones = scope.canSync && cloudSyncEnabled()
+        database.withTransaction {
+            ids.chunked(SQLITE_VARIABLE_CHUNK).flatMap { chunk ->
+                conversationDao.getByIds(chunk, scope == identity.value && scope.canReadOfficial).map { row ->
+                    deleteOne(row, tombstones)
+                    row.sessionId
+                }
             }
         }
     }
 
     /** 「全选」取数：数据库中全部可见会话，不限于 Paging 已加载的部分。 */
     suspend fun allVisibleSessionIds(filter: ConversationFilter = ConversationFilter.ALL): List<String> =
-        withContext(dispatchers.io) { conversationDao.allVisibleSessionIds(filter.wire) }
+        withContext(dispatchers.io) { conversationDao.allVisibleSessionIds(filter.wire, includeOfficial) }
 
     /**
      * 单条删除的落库判定，调用方需已在 IO 线程。
      * 先清本地消息；只有 MolaGPT 云同步会话需要墓碑，BYOK 始终本地硬删，避免进入账户同步通道。
      */
-    private suspend fun deleteOne(conversation: ConversationEntity?, sessionId: String) {
+    private suspend fun deleteOne(conversation: ConversationEntity, tombstones: Boolean) {
+        val sessionId = conversation.sessionId
         messageDao.deleteBySession(sessionId)
         wireHistoryStore?.deleteSession(sessionId)
         contextCheckpointDao?.deleteBySession(sessionId)
         contextCheckpointDao?.deleteUsageBySession(sessionId)
-        if (cloudSyncEnabled() && conversation?.providerKind == ProviderKind.MOLAGPT.name) {
+        if (tombstones && conversation.providerKind == ProviderKind.MOLAGPT.name) {
             conversationDao.tombstone(sessionId, System.currentTimeMillis())
         } else {
             conversationDao.deleteById(sessionId)
@@ -198,8 +216,25 @@ class SessionRepository(
 
     suspend fun fetchHistoryMessages(sessionId: String, page: Int, size: Int): List<ChatMessage> =
         withContext(dispatchers.io) {
-            messageDao.getPaged(sessionId, size, page * size).map { it.toDomain() }
+            messageDao.getPaged(sessionId, size, page * size, includeOfficial).map { it.toDomain() }
         }
+
+    /** Cache eviction is local only: never create or replay cloud deletion requests here. */
+    suspend fun clearOfficialCache(expected: HistoryIdentity, forgetLocalState: (List<String>) -> Unit) {
+        require(expected.resetPending)
+        val ids = database.withTransaction {
+            if (identity.value != expected) return@withTransaction null
+            val officialIds = conversationDao.officialIds()
+            database.streamTaskDao().clearOfficial()
+            database.contextCheckpointDao().clearOfficialCheckpoints()
+            database.contextCheckpointDao().clearOfficialUsage()
+            messageDao.clearOfficial()
+            conversationDao.clearOfficial()
+            officialIds
+        } ?: return
+        forgetLocalState(ids)
+        ids.forEach { wireHistoryStore?.deleteSession(it) }
+    }
 
     companion object {
         // Data-layer page size only. Initial load and prefetch distance use Paging defaults,

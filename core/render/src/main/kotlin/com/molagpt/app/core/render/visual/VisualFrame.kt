@@ -7,10 +7,18 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -20,9 +28,12 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.contentColorFor
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,16 +43,25 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.molagpt.app.core.render.LocalMolaCanvas
+import com.molagpt.app.core.render.LocalMolaHaze
+import com.molagpt.app.core.render.MolaBottomEdge
+import com.molagpt.app.core.render.MolaGlassHost
+import com.molagpt.app.core.render.MolaTopBar
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -232,40 +252,168 @@ private fun FrameHeader(title: String?, meta: String?, palette: VisualPalette, e
     }
 }
 
-/** 全屏组件的顶栏：关闭、标题和一行操作提示。系统栏的边距由宿主统一留。 */
+/**
+ * 内嵌可视化组件的全屏查看骨架：复用 [MolaGlassHost] + [MolaTopBar] + [MolaBottomEdge]，
+ * 与自由选择页（AssistantReaderOverlay）保持同一套全屏沉浸视觉。
+ *
+ * 内容层铺满整屏（覆盖状态栏与底部全面屏手势白条区），由 [content] 收到顶栏（含状态栏）与
+ * 底部手势栏的内边距 [PaddingValues]，在可滚动或可缩放内容内部留白，使内容自然穿过上下半透明软边缘。
+ *
+ * [glassBlur] 为 false 时（如承载可缩放 WebView 的 Mermaid 图表态），不将内容包进 `hazeSource`
+ * 离屏层，避免 Chromium 硬件 `DrawFunctor` 在双指缩放分块重绘时被多遍采样引发闪烁，改用同几何、
+ * 同渐隐曲线的半透明渐变边缘覆盖顶栏与手势条区域。
+ */
 @Composable
-internal fun FullscreenBar(
+internal fun VisualFullscreenScaffold(
     title: String,
     hint: String?,
     onClose: () -> Unit,
-    actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+    modifier: Modifier = Modifier,
+    canvasColor: Color = MaterialTheme.colorScheme.background,
+    topBarOverlap: () -> Float = { 1f },
+    showBottomEdge: Boolean = true,
+    glassBlur: Boolean = true,
+    actions: @Composable RowScope.() -> Unit = {},
+    content: @Composable (PaddingValues) -> Unit,
 ) {
-    val palette = rememberVisualPalette()
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = onClose) {
-            Icon(Icons.Filled.Close, contentDescription = "关闭", tint = palette.text)
-        }
-        Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = palette.text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+    val cs = MaterialTheme.colorScheme
+    val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val innerPadding = PaddingValues(
+        top = statusTop + FullscreenBarHeight,
+        bottom = navBottom,
+    )
+    val topBar: @Composable () -> Unit = {
+        MolaTopBar(
+            title = {
+                Column {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!hint.isNullOrBlank()) {
+                        Text(
+                            text = hint,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = cs.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            },
+            navigationIcon = {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Filled.Close, contentDescription = "关闭")
+                }
+            },
+            actions = actions,
+            overlap = topBarOverlap,
+        )
+    }
+
+    CompositionLocalProvider(LocalContentColor provides contentColorFor(canvasColor)) {
+        if (glassBlur) {
+            MolaGlassHost(
+                backgroundColor = canvasColor,
+                modifier = modifier.fillMaxSize(),
+                content = { content(innerPadding) },
+                overlay = {
+                    topBar()
+                    if (showBottomEdge) {
+                        MolaBottomEdge(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .height(navBottom + FullscreenBottomEdgeExtra),
+                        )
+                    }
+                },
             )
-            if (!hint.isNullOrBlank()) {
-                Text(
-                    text = hint,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = palette.muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+        } else {
+            CompositionLocalProvider(
+                LocalMolaHaze provides null,
+                LocalMolaCanvas provides canvasColor,
+            ) {
+                Box(modifier.fillMaxSize().background(canvasColor)) {
+                    Box(Modifier.fillMaxSize()) { content(innerPadding) }
+                    Box(Modifier.fillMaxWidth()) {
+                        ScrimTopEdge(
+                            color = canvasColor,
+                            fraction = topBarOverlap,
+                            modifier = Modifier.matchParentSize(),
+                        )
+                        topBar()
+                    }
+                    if (showBottomEdge) {
+                        ScrimBottomEdge(
+                            color = canvasColor,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .height(navBottom + FullscreenBottomEdgeExtra),
+                        )
+                    }
+                }
             }
         }
-        actions()
     }
 }
+
+@Composable
+private fun ScrimTopEdge(
+    color: Color,
+    fraction: () -> Float,
+    modifier: Modifier = Modifier,
+) {
+    val density = LocalDensity.current
+    val solidPx = with(density) { WindowInsets.statusBars.getTop(this) + FullscreenBarHeight.toPx() }
+    val fadePx = with(density) { FullscreenTopEdgeFade.toPx() }
+    val brush = remember(color, solidPx, fadePx) {
+        val total = (solidPx + fadePx).coerceAtLeast(1f)
+        val solid = (solidPx / total).coerceIn(0f, 1f)
+        Brush.verticalGradient(
+            0f to color.copy(alpha = 0.86f),
+            solid * 0.78f to color.copy(alpha = 0.76f),
+            solid to color.copy(alpha = 0.48f),
+            1f to Color.Transparent,
+        )
+    }
+    Box(
+        modifier
+            .extendBottomEdge(FullscreenTopEdgeFade)
+            .graphicsLayer { alpha = fraction().coerceIn(0f, 1f) }
+            .background(brush),
+    )
+}
+
+@Composable
+private fun ScrimBottomEdge(
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val brush = remember(color) {
+        Brush.verticalGradient(
+            0f to Color.Transparent,
+            0.45f to color.copy(alpha = 0.48f),
+            0.8f to color.copy(alpha = 0.78f),
+            1f to color.copy(alpha = 0.86f),
+        )
+    }
+    Box(modifier.background(brush))
+}
+
+private fun Modifier.extendBottomEdge(extra: Dp): Modifier = layout { measurable, constraints ->
+    val extraPx = extra.roundToPx()
+    val height = constraints.maxHeight
+    val placeable = measurable.measure(
+        constraints.copy(minHeight = height + extraPx, maxHeight = height + extraPx),
+    )
+    layout(placeable.width, height) { placeable.place(0, 0) }
+}
+
+private val FullscreenBarHeight = 64.dp
+private val FullscreenTopEdgeFade = 32.dp
+private val FullscreenBottomEdgeExtra = 40.dp

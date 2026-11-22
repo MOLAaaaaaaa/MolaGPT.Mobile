@@ -2,26 +2,24 @@ package com.molagpt.app.core.storage.dao
 
 import androidx.room.Dao
 import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import com.molagpt.app.core.storage.entity.MessageEntity
 import kotlinx.coroutines.flow.Flow
 
+private const val VISIBLE_MESSAGES = "sessionId IN (SELECT sessionId FROM conversations WHERE deletedAt IS NULL AND " + VISIBLE_HISTORY + ")"
+
 @Dao
 interface MessageDao {
-    @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY createdAt ASC")
-    fun observeBySession(sessionId: String): Flow<List<MessageEntity>>
+    @Query("SELECT * FROM messages WHERE sessionId = :sessionId AND " + VISIBLE_MESSAGES + " ORDER BY createdAt ASC")
+    fun observeBySession(sessionId: String, includeOfficial: Boolean): Flow<List<MessageEntity>>
 
     /** 一次性取整会话消息（云同步打包用）。 */
-    @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY createdAt ASC")
-    suspend fun getAllBySession(sessionId: String): List<MessageEntity>
+    @Query("SELECT * FROM messages WHERE sessionId = :sessionId AND " + VISIBLE_MESSAGES + " ORDER BY createdAt ASC")
+    suspend fun getAllBySession(sessionId: String, includeOfficial: Boolean): List<MessageEntity>
 
-    @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY createdAt ASC LIMIT :limit OFFSET :offset")
-    suspend fun getPaged(sessionId: String, limit: Int, offset: Int): List<MessageEntity>
-
-    @Query("SELECT * FROM messages WHERE messageId = :messageId")
-    suspend fun getById(messageId: String): MessageEntity?
+    @Query("SELECT * FROM messages WHERE sessionId = :sessionId AND " + VISIBLE_MESSAGES + " ORDER BY createdAt ASC LIMIT :limit OFFSET :offset")
+    suspend fun getPaged(sessionId: String, limit: Int, offset: Int, includeOfficial: Boolean): List<MessageEntity>
 
     /**
      * 本轮最后一条用户消息。`save_memory` 用它校验 source_quote 是否真出自用户之口。
@@ -34,48 +32,67 @@ interface MessageDao {
         """
         SELECT * FROM messages
         WHERE sessionId = :sessionId AND role = 'USER' AND rawText IS NOT NULL AND rawText != ''
+          AND sessionId IN (SELECT sessionId FROM conversations WHERE providerKind = 'BYOK')
         ORDER BY createdAt DESC
         LIMIT 1
         """,
     )
     suspend fun latestUserMessage(sessionId: String): MessageEntity?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(entity: MessageEntity)
+    @Insert
+    suspend fun insert(entity: MessageEntity)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertAll(entities: List<MessageEntity>)
+    @Insert
+    suspend fun insertAll(entities: List<MessageEntity>)
+
+    @Transaction
+    suspend fun upsert(entity: MessageEntity) {
+        // Never let a duplicate global message id replace a row belonging to another session.
+        deleteById(entity.sessionId, entity.messageId)
+        insert(entity)
+    }
 
     /** 编辑分支切换：整体换成另一条时间线，中间态不外泄给 observeMessages。 */
     @Transaction
     suspend fun replaceAll(sessionId: String, entities: List<MessageEntity>) {
         deleteBySession(sessionId)
-        upsertAll(entities)
+        require(entities.all { it.sessionId == sessionId })
+        insertAll(entities)
     }
 
-    @Query("DELETE FROM messages WHERE messageId = :messageId")
-    suspend fun deleteById(messageId: String)
+    /** 编辑重发：删掉旧分支尾部并写入新提问。 */
+    @Transaction
+    suspend fun replaceFrom(fromCreatedAt: Long, entity: MessageEntity) {
+        deleteFrom(entity.sessionId, fromCreatedAt)
+        upsert(entity)
+    }
+
+    @Query("DELETE FROM messages WHERE sessionId = :sessionId AND messageId = :messageId")
+    suspend fun deleteById(sessionId: String, messageId: String)
 
     @Query("DELETE FROM messages WHERE sessionId = :sessionId")
     suspend fun deleteBySession(sessionId: String)
+
+    @Query("DELETE FROM messages WHERE sessionId IN (SELECT sessionId FROM conversations WHERE providerKind = 'MOLAGPT')")
+    suspend fun clearOfficial()
 
     /** regenerate/edit 时裁剪：删掉某时间点之后的消息。 */
     @Query("DELETE FROM messages WHERE sessionId = :sessionId AND createdAt >= :fromCreatedAt")
     suspend fun deleteFrom(sessionId: String, fromCreatedAt: Long)
 
-    @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
-    suspend fun count(sessionId: String): Int
+    @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId AND " + VISIBLE_MESSAGES)
+    suspend fun count(sessionId: String, includeOfficial: Boolean): Int
 
     /** 会话里已落库的消息 id。请求里其余消息（角色提示、示例对话）是临时拼的，不参与上下文压缩。 */
-    @Query("SELECT messageId FROM messages WHERE sessionId = :sessionId")
+    @Query("SELECT messageId FROM messages WHERE sessionId = :sessionId AND sessionId IN (SELECT sessionId FROM conversations WHERE providerKind = 'BYOK')")
     suspend fun idsBySession(sessionId: String): List<String>
 
     /**
      * 用户说过几句。角色扮演会话一开场就有一条助手开场白，
      * 「这是不是第一轮」不能再用总条数判断，否则自动标题会被开场白顶掉。
      */
-    @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId AND role = 'USER'")
-    suspend fun countUserMessages(sessionId: String): Int
+    @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId AND role = 'USER' AND " + VISIBLE_MESSAGES)
+    suspend fun countUserMessages(sessionId: String, includeOfficial: Boolean): Int
 
     /** 附件孤儿回收用：附件信息编码在 metadataJson 里，取全量交给上层解析。 */
     @Query("SELECT metadataJson FROM messages WHERE metadataJson LIKE '%localPath%'")

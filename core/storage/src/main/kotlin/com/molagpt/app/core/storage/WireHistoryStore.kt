@@ -32,6 +32,8 @@ class WireHistoryStore(private val filesDir: File) {
 
     fun deleteSession(sessionId: String) {
         val dir = File(root, sessionId)
+        if (dir.name != sessionId || dir.canonicalFile != File(root.canonicalFile, sessionId) ||
+            dir.canonicalFile.parentFile != root.canonicalFile) return
         check(!dir.exists() || dir.deleteRecursively()) { "无法删除原始响应目录" }
     }
 

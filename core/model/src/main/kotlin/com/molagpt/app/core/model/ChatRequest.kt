@@ -4,7 +4,7 @@ import kotlinx.serialization.Serializable
 
 /**
  * 一个 provider 无关的对话请求。网络层据此构造 MolaGPT 代理线格式：
- * `{session_id, conversation_id, model, temperature, messages, stream,
+ * `{session_id, conversation_id, model, messages, stream,
  *   use_thinking, reasoning_effort, enabled_tools, privacy_mode}` + Bearer JWT。
  */
 data class ChatRequest(
@@ -18,7 +18,6 @@ data class ChatRequest(
     /** 单次生成的服务端流 id：用于 stream_cache / stop / resume，每轮生成必须唯一。 */
     val streamSessionId: String = Ids.newSessionId(),
     val conversationId: String,
-    val temperature: Double = 0.7,
     val stream: Boolean = true,
     val useThinking: Boolean = false,
     /** low | medium | high。 */

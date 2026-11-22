@@ -9,8 +9,13 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.molagpt.app.core.render.visual.HtmlRunRequest
+import com.molagpt.app.core.render.visual.MermaidRenderState
 import com.molagpt.app.core.render.visual.VisualHost
 import com.molagpt.app.feature.webview.HtmlRunnerWarmup
+import com.molagpt.app.feature.webview.MermaidDiagramView
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import java.security.MessageDigest
 
 /** 对话页上方盖着的全屏层：运行中的网页，或放大查看的组件。 */
@@ -31,6 +36,8 @@ internal class ChatVisualHost(
     private val htmlAsCardSetting: State<Boolean>,
 ) : VisualHost {
     private val forms = mutableStateMapOf<String, Boolean>()
+    private val mermaidForms = mutableStateMapOf<String, Boolean>()
+    private val mermaidHeights = HashMap<String, Int>()
 
     var overlay by mutableStateOf<VisualOverlay?>(null)
         private set
@@ -45,6 +52,41 @@ internal class ChatVisualHost(
     override fun setHtmlForm(key: String, card: Boolean) {
         // 切回与设置一致的形态就忘掉：之后这一处继续跟随设置。
         if (card == htmlAsCard) forms.remove(key) else forms[key] = card
+    }
+
+    override val supportsMermaid: Boolean = true
+
+    override fun mermaidShowDiagram(key: String): Boolean? = mermaidForms[key]
+
+    override fun setMermaidShowDiagram(key: String, showDiagram: Boolean) {
+        if (showDiagram) mermaidForms.remove(key) else mermaidForms[key] = false
+    }
+
+    override fun mermaidHeightDp(key: String): Int? = mermaidHeights[key]
+
+    override fun setMermaidHeightDp(key: String, heightDp: Int) {
+        if (heightDp > 0) mermaidHeights[key] = heightDp
+    }
+
+    @Composable
+    override fun MermaidCanvas(
+        source: String,
+        streaming: Boolean,
+        interactive: Boolean,
+        modifier: Modifier,
+        contentPadding: PaddingValues,
+        backgroundColor: Color,
+        onStateChange: (MermaidRenderState) -> Unit,
+    ) {
+        MermaidDiagramView(
+            source = source,
+            streaming = streaming,
+            interactive = interactive,
+            modifier = modifier,
+            contentPadding = contentPadding,
+            backgroundColor = backgroundColor,
+            onStateChange = onStateChange,
+        )
     }
 
     override fun runHtml(request: HtmlRunRequest) {

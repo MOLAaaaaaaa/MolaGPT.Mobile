@@ -34,6 +34,7 @@ class NotificationController(
     private val foregroundSessionId: () -> String?,
     private val foregroundImageTaskId: () -> String?,
 ) {
+    private val notificationGate = Any()
     init {
         ensureChannel()
         manager.completions
@@ -58,12 +59,27 @@ class NotificationController(
         if (!notifyEnabled()) return
         // 当前会话可见且 App 在前台 → 用户已在看，不打扰。
         if (appForeground() && foregroundSessionId() == c.sessionId) return
-        val title = runCatching { sessionRepository.get(c.sessionId)?.title }.getOrNull()
-        val body = if (title.isNullOrBlank()) "回复已完成" else "「$title」回复已完成"
-        post(c.sessionId, c.modelDisplayName?.takeIf { it.isNotBlank() } ?: "MolaGPT", body, EXTRA_OPEN_SESSION)
+        val conversation = runCatching { sessionRepository.get(c.sessionId) }.getOrNull() ?: return
+        val title = conversation.title.takeIf { it.isNotBlank() }
+        val body = if (title == null) "回复已完成" else "「$title」回复已完成"
+        synchronized(notificationGate) {
+            if (c.officialSession != null && c.officialSession != sessionRepository.identity.value) return
+            post(c.sessionId, c.modelDisplayName?.takeIf { it.isNotBlank() } ?: "MolaGPT", body, EXTRA_OPEN_SESSION,
+                OFFICIAL_TAG.takeIf { c.officialSession != null })
+        }
     }
 
-    private fun post(key: String, headline: String, body: String, extra: String) {
+    fun clearOfficial(sessionIds: List<String>) = synchronized(notificationGate) {
+        val nm = appContext.getSystemService(NotificationManager::class.java)
+        val legacyIds = sessionIds.mapTo(HashSet()) { it.hashCode() }
+        for (posted in nm.activeNotifications) {
+            if (posted.tag == OFFICIAL_TAG || (posted.tag == null && posted.id in legacyIds)) {
+                nm.cancel(posted.tag, posted.id)
+            }
+        }
+    }
+
+    private fun post(key: String, headline: String, body: String, extra: String, tag: String? = null) {
         val nm = NotificationManagerCompat.from(appContext)
         if (!nm.areNotificationsEnabled()) return
         val tapIntent = Intent(appContext, MainActivity::class.java).apply {
@@ -85,7 +101,7 @@ class NotificationController(
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
-        runCatching { nm.notify(key.hashCode(), notification) }
+        runCatching { nm.notify(tag, key.hashCode(), notification) }
     }
 
     private fun ensureChannel() {
@@ -99,6 +115,7 @@ class NotificationController(
 
     companion object {
         const val CHANNEL_ID = "mola_completion"
+        private const val OFFICIAL_TAG = "official-reply"
         const val EXTRA_OPEN_SESSION = "open_conversation_session_id"
         const val EXTRA_OPEN_IMAGE_TASK = "open_image_task_id"
     }

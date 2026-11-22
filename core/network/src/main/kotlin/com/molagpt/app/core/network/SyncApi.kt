@@ -8,6 +8,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
@@ -23,15 +24,21 @@ import kotlinx.serialization.json.putJsonArray
  * **鉴权用持久登录 JWT**（`credentialStore.jwt`），不是聊天用的 60s 短 token——
  * 同步可能耗时（分块/大列表），短 token 会中途过期。游客无 JWT 时调用方应直接跳过。
  */
-class SyncApi(private val http: MolaHttp) {
+interface ConversationSyncApi {
+    suspend fun fullSync(jwt: String, body: JsonObject): JsonObject?
+    suspend fun fetchConversation(jwt: String, conversationId: String): JsonObject?
+    suspend fun deleteConversations(jwt: String, conversationIds: List<String>): Boolean
+}
+
+class SyncApi(private val http: MolaHttp) : ConversationSyncApi {
 
     private val url: String get() = MolaEndpoints.absolute(MolaEndpoints.SYNC)
 
     /** full_sync：推 dirty_conversations + 取服务端 full_metadata_list。失败返回 null。 */
-    suspend fun fullSync(jwt: String, body: JsonObject): JsonObject? = post(jwt, body)
+    override suspend fun fullSync(jwt: String, body: JsonObject): JsonObject? = post(jwt, body)
 
     /** 取单个会话详情（messages）。 */
-    suspend fun fetchConversation(jwt: String, conversationId: String): JsonObject? = post(
+    override suspend fun fetchConversation(jwt: String, conversationId: String): JsonObject? = post(
         jwt,
         buildJsonObject {
             put("action", "fetch_conversation")
@@ -40,7 +47,7 @@ class SyncApi(private val http: MolaHttp) {
     )
 
     /** 删除云端会话。 */
-    suspend fun deleteConversations(jwt: String, conversationIds: List<String>): Boolean {
+    override suspend fun deleteConversations(jwt: String, conversationIds: List<String>): Boolean {
         if (conversationIds.isEmpty()) return true
         val resp = post(
             jwt,
@@ -76,5 +83,5 @@ class SyncApi(private val http: MolaHttp) {
         }
         if (!resp.status.isSuccess()) return null
         http.json.parseToJsonElement(resp.bodyAsText()).jsonObject
-    }.getOrNull()
+    }.getOrElse { if (it is CancellationException) throw it else null }
 }

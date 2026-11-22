@@ -20,24 +20,18 @@ data class MessageStats(
     val costUsd: Double? = null,
     val costModel: String? = null,
     val pricingMissing: Boolean = false,
+    val modelRequestMs: Long? = null,
 ) {
     val hasAny: Boolean
         get() = promptTokens != null || completionTokens != null || totalTokens != null ||
             durationMs != null || costUsd != null
 
-    /**
-     * 生成速度（token/秒）。
-     *
-     * 分母刻意扣掉 [ttftMs]：等待首 token 的那段没有产出任何 token，算进去会把「连接慢」
-     * 和「生成慢」糊成同一个数字——BYOK 直连海外 API 时前者动辄好几秒，能把 tok/s 压到失真。
-     * 两段分开展示，这个数才是模型真实吐字速度。没有 TTFT 的老消息退回总耗时口径。
-     */
+    /** 按上游模型请求耗时计算吞吐量，旧记录没有分段计时则不展示。 */
     val tokensPerSecond: Double?
         get() {
             val out = completionTokens?.takeIf { it > 0 } ?: return null
-            val total = durationMs?.takeIf { it > 0 } ?: return null
-            val window = ttftMs?.let { (total - it).coerceAtLeast(1L) } ?: total
-            return out * 1000.0 / window
+            val time = modelRequestMs?.takeIf { it > 0 } ?: return null
+            return out * 1000.0 / time
         }
 
     companion object {
@@ -53,6 +47,7 @@ data class MessageStats(
                 reasoningTokens = int(ChatMessageMetadataKeys.REASONING_TOKENS),
                 durationMs = long(ChatMessageMetadataKeys.DURATION_MS),
                 ttftMs = long(ChatMessageMetadataKeys.TTFT_MS),
+                modelRequestMs = long(ChatMessageMetadataKeys.MODEL_REQUEST_MS),
                 costUsd = metadata[ChatMessageMetadataKeys.COST_USD]?.toDoubleOrNull(),
                 costModel = metadata[ChatMessageMetadataKeys.COST_MODEL],
                 pricingMissing = metadata[ChatMessageMetadataKeys.PRICING_MISSING] == "true",

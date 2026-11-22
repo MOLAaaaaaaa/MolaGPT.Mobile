@@ -345,10 +345,12 @@ internal fun AssistantReaderOverlay(state: AssistantReaderState) {
             },
     ) {
         CompositionLocalProvider(
-            // 阅读层在 Scaffold 之外，正文颜色要与列表一致地取自画布的前景色。
+            // 阅读层在 Scaffold 之外，正文颜色要与列表一致地取自画布的前景色；
+            // 选字模式下不挂 VisualHost，Mermaid / HTML 直接退回可选中的源码。
             LocalContentColor provides MaterialTheme.colorScheme.onBackground,
             LocalMarkdownImageRenderer provides { url, modifier -> RemoteImage(url, modifier) },
             LocalFaviconRenderer provides { url, modifier -> RemoteFavicon(url, modifier) },
+            com.molagpt.app.core.render.visual.LocalVisualHost provides null,
         ) {
             MolaGlassHost(
                 backgroundColor = canvas,

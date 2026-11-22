@@ -7,7 +7,7 @@ import kotlinx.serialization.json.JsonObject
 
 /**
  * 对话请求线格式（POST 到模型的 apiUrl）。
- * `{session_id, conversation_id, model, temperature, messages, stream,
+ * `{session_id, conversation_id, model, messages, stream,
  *   use_thinking, reasoning_effort, enabled_tools, privacy_mode}`。
  */
 @Serializable
@@ -15,7 +15,6 @@ data class ChatRequestBody(
     @SerialName("session_id") val sessionId: String,
     @SerialName("conversation_id") val conversationId: String,
     val model: String,
-    val temperature: Double,
     val messages: List<WireMessage>,
     val stream: Boolean,
     @SerialName("use_thinking") val useThinking: Boolean,

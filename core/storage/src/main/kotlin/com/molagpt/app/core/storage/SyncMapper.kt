@@ -84,7 +84,8 @@ object SyncMapper {
         if (s.isNullOrBlank()) 0L else runCatching { isoFormat().parse(s)?.time ?: 0L }.getOrDefault(0L)
 
     // 会话本地 id(sess_) ↔ 服务端 conversation id(chat_)
-    fun conversationIdOf(sessionId: String): String = Ids.conversationIdForSession(sessionId)
+    fun conversationIdOf(sessionId: String): String =
+        if (sessionId.startsWith("sess_")) Ids.conversationIdForSession(sessionId) else sessionId
 
     fun sessionIdOf(conversationId: String): String =
         if (conversationId.startsWith("chat_")) "sess_" + conversationId.removePrefix("chat_") else conversationId

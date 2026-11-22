@@ -78,7 +78,7 @@ class ImageTaskRepository(
             val taskId = UUID.randomUUID().toString()
             val now = System.currentTimeMillis()
             database.withTransaction {
-                conversationDao.upsert(imageConversation(taskId, DEFAULT_TITLE, modelId, now, now, visible = false))
+                check(conversationDao.insert(imageConversation(taskId, DEFAULT_TITLE, modelId, now, now, visible = false)) != -1L)
                 dao.upsertTask(ImageTaskEntity(taskId, providerId, modelId, mode.key, now))
             }
             taskId
@@ -257,7 +257,7 @@ class ImageTaskRepository(
             if (dao.getTask(session.id) != null || conversationDao.getById(session.id) != null) return@forEach
             val base = session.updatedAt - session.records.size
             database.withTransaction {
-                conversationDao.upsert(
+                val inserted = conversationDao.insert(
                     imageConversation(
                         taskId = session.id,
                         title = session.title.ifBlank { DEFAULT_TITLE },
@@ -267,6 +267,7 @@ class ImageTaskRepository(
                         visible = true,
                     ),
                 )
+                if (inserted == -1L) return@withTransaction
                 dao.upsertTask(ImageTaskEntity(session.id, session.providerId, session.modelId, ImageMode.CHAT.key, base))
                 session.records.forEachIndexed { index, record ->
                     val at = base + index
@@ -312,8 +313,8 @@ class ImageTaskRepository(
                         ),
                     )
                 }
+                imported++
             }
-            imported++
         }
         imported
     }

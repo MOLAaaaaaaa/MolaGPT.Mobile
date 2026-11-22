@@ -2,6 +2,9 @@ package com.molagpt.app.nav
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.createSavedStateHandle
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import com.molagpt.app.core.model.AccountStatus
 import com.molagpt.app.core.model.EnabledTools
 import com.molagpt.app.core.network.toAccountStatus
@@ -135,53 +138,56 @@ object ViewModelFactories {
         container: AppContainer,
         sessionId: String,
         settings: AppSettings,
-    ) = factory {
-        ChatViewModel(
-            sessionId = sessionId,
-            chatRepository = container.chatRepository,
-            serverToolApi = container.serverToolApi,
-            backgroundStreams = container.backgroundStreamManager,
-            sessionRepository = container.sessionRepository,
-            personaRepository = container.personaRepository,
-            lorebookRepository = container.lorebookRepository,
-            byokMemoryRepository = container.byokMemoryRepository,
-            skillRepository = container.skillRepository,
-            memoryConsolidatedFlow = container.memoryConsolidated,
-            postProcessFailureFlow = container.postProcessFailures,
-            syncEngine = container.syncEngine,
-            dispatchers = container.dispatchers,
-            modelsFlow = container.modelRegistry.models,
-            modelRefreshingFlow = container.modelRegistry.isRefreshing,
-            modelConfigLoadedFlow = container.modelRegistry.configLoaded,
-            molaModelLoader = { forceRefresh ->
-                if (forceRefresh) container.refreshMolaModels() else container.ensureMolaModelsLoaded()
-            },
-            settingsFlow = container.settingsFlow,
-            byokBaseUrlResolver = { providerId -> providerId?.let { container.byokProviderBaseUrls.value[it] }.orEmpty() },
-            defaultModelId = settings.defaultModel,
-            defaultProviderKind = settings.defaultProviderKind,
-            defaultProviderId = settings.defaultProviderId,
-            persistDefaultModel = { modelId, kind, providerId ->
-                container.settingsStore.setDefaultModelSelection(modelId, kind, providerId)
-            },
-            persistThinkingNotDisableable = { providerId, modelId ->
-                container.markThinkingNotDisableable(providerId, modelId)
-            },
-            // composer 运行时工具开关初值（network/网页拉取/代码执行）。
-            // mcp/vision/imageGeneration 在对话内无开关，由 BYOK 工具设置页实时驱动（见 resolveRequestTools），不在此初始化。
-            tools = EnabledTools(
-                network = settings.toolNetwork,
-                steelBrowser = settings.toolSteel,
-                codeExecution = settings.toolCode,
-            ),
-            useThinking = settings.useThinking,
-            reasoningEffort = settings.reasoningEffort,
-            temperature = settings.temperature,
-            throttleMs = settings.throttleMs,
-            appContext = container.appContext,
-            contextCompactor = container.contextCompactor,
-            persistAutoCompaction = { enabled -> container.settingsStore.setContextCompactionEnabled(enabled) },
-        )
+    ) = viewModelFactory {
+        initializer {
+            ChatViewModel(
+                sessionId = sessionId,
+                chatRepository = container.chatRepository,
+                serverToolApi = container.serverToolApi,
+                backgroundStreams = container.backgroundStreamManager,
+                sessionRepository = container.sessionRepository,
+                personaRepository = container.personaRepository,
+                lorebookRepository = container.lorebookRepository,
+                byokMemoryRepository = container.byokMemoryRepository,
+                skillRepository = container.skillRepository,
+                memoryConsolidatedFlow = container.memoryConsolidated,
+                postProcessFailureFlow = container.postProcessFailures,
+                syncEngine = container.syncEngine,
+                dispatchers = container.dispatchers,
+                modelsFlow = container.modelRegistry.models,
+                modelRefreshingFlow = container.modelRegistry.isRefreshing,
+                modelConfigLoadedFlow = container.modelRegistry.configLoaded,
+                molaModelLoader = { forceRefresh ->
+                    if (forceRefresh) container.refreshMolaModels() else container.ensureMolaModelsLoaded()
+                },
+                settingsFlow = container.settingsFlow,
+                byokBaseUrlResolver = { providerId -> providerId?.let { container.byokProviderBaseUrls.value[it] }.orEmpty() },
+                defaultModelId = settings.defaultModel,
+                defaultProviderKind = settings.defaultProviderKind,
+                defaultProviderId = settings.defaultProviderId,
+                persistDefaultModel = { modelId, kind, providerId ->
+                    container.settingsStore.setDefaultModelSelection(modelId, kind, providerId)
+                },
+                persistThinkingNotDisableable = { providerId, modelId ->
+                    container.markThinkingNotDisableable(providerId, modelId)
+                },
+                // composer 运行时工具开关初值（network/网页拉取/代码执行）。
+                // mcp/vision/imageGeneration 在对话内无开关，由 BYOK 工具设置页实时驱动（见 resolveRequestTools），不在此初始化。
+                tools = EnabledTools(
+                    network = settings.toolNetwork,
+                    steelBrowser = settings.toolSteel,
+                    codeExecution = settings.toolCode,
+                ),
+                useThinking = settings.useThinking,
+                reasoningEffort = settings.reasoningEffort,
+                throttleMs = settings.throttleMs,
+                appContext = container.appContext,
+                contextCompactor = container.contextCompactor,
+                persistAutoCompaction = { enabled -> container.settingsStore.setContextCompactionEnabled(enabled) },
+                draftStore = container.sessionDraftStore,
+                savedState = createSavedStateHandle(),
+            )
+        }
     }
 
     /** 短 token → status.php → AccountStatus（设置页 / 个性化页共用，含读回服务端个性化开关）。 */

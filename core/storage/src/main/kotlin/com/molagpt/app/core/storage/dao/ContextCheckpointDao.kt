@@ -34,4 +34,10 @@ interface ContextCheckpointDao {
 
     @Query("DELETE FROM context_compaction_usage WHERE sessionId = :sessionId")
     suspend fun deleteUsageBySession(sessionId: String)
+
+    @Query("DELETE FROM context_checkpoints WHERE sessionId IN (SELECT sessionId FROM conversations WHERE providerKind = 'MOLAGPT')")
+    suspend fun clearOfficialCheckpoints()
+
+    @Query("DELETE FROM context_compaction_usage WHERE sessionId IN (SELECT sessionId FROM conversations WHERE providerKind = 'MOLAGPT')")
+    suspend fun clearOfficialUsage()
 }

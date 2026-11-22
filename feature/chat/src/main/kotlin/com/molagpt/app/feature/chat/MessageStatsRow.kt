@@ -20,7 +20,7 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.Icon
@@ -178,7 +178,7 @@ private fun StatsDetailCard(stats: MessageStats, spend: ConversationSpend?, modi
                 StatsDetailLine(Icons.Filled.ArrowDownward, "输出", "${formatExact(it)} tokens")
             }
             stats.reasoningTokens?.takeIf { it > 0 }?.let {
-                StatsDetailLine(Icons.Filled.Psychology, "思考", "${formatExact(it)} tokens")
+                StatsDetailLine(Icons.Outlined.Lightbulb, "思考", "${formatExact(it)} tokens")
             }
             stats.tokensPerSecond?.let {
                 StatsDetailLine(Icons.Filled.Bolt, "速度", "${formatOneDecimal(it)} tok/s")

@@ -8,7 +8,9 @@ import com.molagpt.app.core.render.visual.LocalVisualHost
 import com.molagpt.app.feature.webview.HtmlRunner
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.BackEventCompat
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,6 +20,7 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -86,6 +89,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -642,7 +647,8 @@ fun ChatScreen(
                 }
                 Composer(
                     glass = true,
-                    enabled = state.inputEnabled && contextUsage?.manualCompacting != true,
+                    enabled = state.inputEnabled && contextUsage?.manualCompacting != true &&
+                        !(viewModel.isSubmitting && state.editingMessage != null),
                     isStreaming = state.isStreaming,
                     enterToSend = enterToSend,
                     enabledTools = state.enabledTools,
@@ -693,6 +699,10 @@ fun ChatScreen(
                     onStop = viewModel::stop,
                     editingMessage = state.editingMessage,
                     onCancelEdit = viewModel::cancelEdit,
+                    draftText = viewModel.draftText,
+                    onDraftChange = viewModel::saveDraftText,
+                    sendEnabled = !viewModel.isSubmitting,
+                    holdSendForAttachments = true,
                     onOpenModelReasoningSettings = {
                         val model = state.selectedModel ?: return@Composer
                         if (model.providerKind == ProviderKind.BYOK) {
@@ -748,8 +758,10 @@ fun ChatScreen(
                     onRegenerateWithModel = { viewModel.regenerateLast(it) },
                     onEditUser = viewModel::startEditUser,
                     onEditAssistant = { editingAssistantId = it },
-                    canEdit = !state.isStreaming,
-                    canEditAssistant = !state.isStreaming && state.providerKind == ProviderKind.BYOK,
+                    canEdit = !state.isStreaming && !viewModel.isSubmitting,
+                    canEditAssistant = !state.isStreaming && !viewModel.isSubmitting &&
+                        state.providerKind == ProviderKind.BYOK,
+                    canRegenerate = !viewModel.isSubmitting,
                     onNavVersion = viewModel::navVersion,
                     onNavEditSnapshot = viewModel::navEditSnapshot,
                     compactions = state.compactions,
@@ -779,10 +791,32 @@ fun ChatScreen(
                 // 与图片预览同一层：盖住顶栏和输入框。空 pointerInput 阻挡触摸穿透，
                 // 不消费子控件的事件，让全屏正文仍能长按选字。
                 // 退场期间也接住返回键；AnimatedContent 保留旧内容直到动画完成。
-                BackHandler(
-                    enabled = visualOverlayVisible,
-                    onBack = closeVisualOverlay,
-                )
+                // Fullscreen（Mermaid / 图表 / 函数图像）与自由选择页一致地铺满整屏、由内部
+                // VisualFullscreenScaffold 提供上下沉浸玻璃；HtmlRunner 仍保留系统栏与键盘留白，
+                // 避免第三方网页固定顶/底按钮被浮层遮挡。
+                var overlayBackProgress by remember { mutableFloatStateOf(0f) }
+                var overlayBackEdgeSign by remember { mutableIntStateOf(1) }
+                val overlayBackInset = with(density) { 12.dp.toPx() }
+                LaunchedEffect(visualOverlayVisible) {
+                    if (!visualOverlayVisible) overlayBackProgress = 0f
+                }
+                LaunchedEffect(visualHost.overlay) {
+                    if (visualHost.overlay != null) overlayBackProgress = 0f
+                }
+                PredictiveBackHandler(enabled = visualOverlayVisible) { events ->
+                    try {
+                        events.collect { event ->
+                            if (visualHost.overlay != null) {
+                                overlayBackEdgeSign = if (event.swipeEdge == BackEventCompat.EDGE_RIGHT) -1 else 1
+                                overlayBackProgress = MolaMotion.StandardDecelerate.transform(event.progress.coerceIn(0f, 1f))
+                            }
+                        }
+                        closeVisualOverlay()
+                    } catch (e: CancellationException) {
+                        Animatable(overlayBackProgress).animateTo(0f, MolaMotion.effects()) { overlayBackProgress = value }
+                        throw e
+                    }
+                }
                 visualOverlayTransition.AnimatedContent(
                     modifier = Modifier.fillMaxSize(),
                     transitionSpec = {
@@ -797,19 +831,35 @@ fun ChatScreen(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .background(MaterialTheme.colorScheme.surface)
-                                .pointerInput(Unit) { }
-                                .systemBarsPadding()
-                                .imePadding(),
+                                .graphicsLayer {
+                                    val b = overlayBackProgress
+                                    if (b > 0f) {
+                                        val scale = 1f - 0.1f * b
+                                        scaleX = scale
+                                        scaleY = scale
+                                        translationX = overlayBackEdgeSign * (size.width / 20f - overlayBackInset) * b
+                                        shape = RoundedCornerShape(28.dp * b)
+                                        clip = true
+                                    }
+                                }
+                                .pointerInput(Unit) { },
                         ) {
                             when (overlay) {
-                                is VisualOverlay.Html -> HtmlRunner(
-                                    source = overlay.request.source,
-                                    title = overlay.request.title,
-                                    fileName = overlay.request.fileName,
-                                    originKey = overlay.originKey,
-                                    onClose = closeVisualOverlay,
-                                )
+                                is VisualOverlay.Html -> Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .systemBarsPadding()
+                                        .imePadding(),
+                                ) {
+                                    HtmlRunner(
+                                        source = overlay.request.source,
+                                        title = overlay.request.title,
+                                        fileName = overlay.request.fileName,
+                                        originKey = overlay.originKey,
+                                        onClose = closeVisualOverlay,
+                                    )
+                                }
                                 is VisualOverlay.Fullscreen -> overlay.content(closeVisualOverlay)
                             }
                         }

@@ -80,7 +80,13 @@ fun FragmentRenderer(
         )
         is MessageFragment.CodeBlock -> CodeBlockView(fragment.language, fragment.code, modifier)
         is MessageFragment.Latex -> LatexView(fragment.expr, fragment.display, modifier)
-        is MessageFragment.Mermaid -> CodeBlockView("mermaid", fragment.source, modifier)
+        is MessageFragment.Mermaid -> com.molagpt.app.core.render.visual.MermaidBlockView(
+            source = fragment.source,
+            closed = !streamingTail,
+            streaming = streamingTail,
+            stateKey = "frag:${fragment.id}",
+            modifier = modifier,
+        )
         is MessageFragment.SearchResult -> SearchResultView(fragment.query, fragment.refs, modifier)
         is MessageFragment.ToolCall -> {
             val links = LocalSubagentLinks.current

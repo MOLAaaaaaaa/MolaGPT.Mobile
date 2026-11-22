@@ -22,7 +22,7 @@ class ConversationTitler(
     private val dispatchers: DispatcherProvider,
 ) {
     /** 为 [sessionId] 生成标题并回写。返回是否真的改名了；任何一步不满足都静默放弃。 */
-    suspend fun generate(sessionId: String): Boolean = withContext(dispatchers.io) {
+    suspend fun generate(sessionId: String, expected: HistoryIdentity = sessionRepository.identity.value): Boolean = withContext(dispatchers.io) {
         val before = sessionRepository.get(sessionId) ?: return@withContext false
         val modelId = before.model?.trim().orEmpty()
         if (modelId.isBlank()) return@withContext false
@@ -38,6 +38,7 @@ class ConversationTitler(
                     modelId = modelId,
                     messages = window,
                 ),
+                expected,
             )
         }.getOrElse {
             Logger.w(TAG, "生成标题失败：${it.message}", it)
@@ -50,7 +51,7 @@ class ConversationTitler(
         val after = sessionRepository.get(sessionId) ?: return@withContext false
         if (after.title != before.title) return@withContext false
 
-        sessionRepository.rename(sessionId, title)
+        sessionRepository.rename(sessionId, title, expected)
         true
     }
 

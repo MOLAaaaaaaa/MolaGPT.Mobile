@@ -55,6 +55,7 @@ import com.molagpt.app.core.model.Ids
 import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.render.MolaMotion
 import com.molagpt.app.core.storage.AppSettings
+import com.molagpt.app.core.storage.HistoryIdentity
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.feature.agentcontrol.AgentControlScreen
 import com.molagpt.app.feature.agentcontrol.AgentControlViewModel
@@ -296,7 +297,16 @@ fun MolaNavHost(
         }
 
         composable(Routes.CHAT) {
+            val identity by container.credentialStore.historyIdentity.collectAsStateWithLifecycle()
+            if (identity.resetPending) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    androidx.compose.material3.CircularProgressIndicator()
+                }
+                return@composable
+            }
+            key(identity) {
             ChatHost(
+                historyScope = identity,
                 settings = settings,
                 onOpenSettings = {
                     if (navController.currentDestination?.route != Routes.SETTINGS) {
@@ -340,6 +350,7 @@ fun MolaNavHost(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+            }
         }
 
         composable(Routes.SETTINGS) {
@@ -957,6 +968,7 @@ fun MolaNavHost(
 @OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
 @Composable
 private fun ChatHost(
+    historyScope: HistoryIdentity,
     settings: AppSettings,
     onOpenSettings: () -> Unit,
     onOpenByokModelSettings: (providerId: String, modelId: String) -> Unit,
@@ -971,7 +983,7 @@ private fun ChatHost(
     modifier: Modifier = Modifier,
 ) {
     val container = LocalAppContainer.current
-    val sessionVm: SessionViewModel = viewModel(factory = ViewModelFactories.session(container))
+    val sessionVm: SessionViewModel = viewModel(key = "sessions-$historyScope", factory = ViewModelFactories.session(container))
     val account by container.authService.account.collectAsStateWithLifecycle()
     val desktopLink by container.desktopRemoteService.link.collectAsStateWithLifecycle()
     val onlineDesktopIds by container.desktopRemoteService.onlineMachines.collectAsStateWithLifecycle()
@@ -985,6 +997,8 @@ private fun ChatHost(
 
     // 当前会话需要跨二级页面往返和进程重建恢复。
     var currentSessionId by rememberSaveable { mutableStateOf<String?>(Ids.newSessionId()) }
+    // 最近一次尚未发出消息的空白新对话 id：切去历史会话查资料后再点「新对话」时，可恢复未发送草稿。
+    var blankSessionId by rememberSaveable { mutableStateOf<String?>(currentSessionId) }
     var drawerOpen by remember { mutableStateOf(false) }
     val drawerProgress = remember { Animatable(0f) }
     // 主页正在显示的电脑对话；null 即显示本地会话 currentSessionId。
@@ -1165,10 +1179,38 @@ private fun ChatHost(
         }
     }
 
+    /** 打开新对话：优先恢复尚未发送过用户消息的草稿。 */
+    val openNewChat = {
+        drawerOpen = false
+        desktopTarget = null
+        val previousSessionId = currentSessionId
+        scope.launch {
+            val reusable = blankSessionId?.takeIf { id ->
+                container.sessionDraftStore.hasDraft(id) && container.chatRepository.userMessageCount(id) == 0
+            }
+            if (currentSessionId != previousSessionId || desktopTarget != null) return@launch
+            if (reusable != null) {
+                currentSessionId = reusable
+            } else {
+                val fresh = Ids.newSessionId()
+                blankSessionId = fresh
+                currentSessionId = fresh
+            }
+        }
+        Unit
+    }
+
     /** 用指定模型新建本机对话。 */
     fun newChatWithModel(modelId: String, providerId: String?, kind: ProviderKind, personaId: String?) {
         scope.launch {
             // 跨阵营会新建会话，也必须与空白会话直接切换一样更新下次启动默认值。
+            if (kind == ProviderKind.MOLAGPT && !historyScope.canReadOfficial) {
+                if (!historyScope.resetPending) {
+                    container.credentialStore.jwt?.let { container.authService.logoutIfCurrent(it) }
+                    snackbar.showSnackbar("登录状态已失效，请重新登录")
+                }
+                return@launch
+            }
             runCatching {
                 container.settingsStore.setDefaultModelSelection(modelId, kind, providerId)
             }
@@ -1178,6 +1220,7 @@ private fun ChatHost(
                 providerId = providerId,
                 providerKind = kind,
                 personaId = personaId,
+                scope = historyScope,
             )
             currentSessionId = conversation.sessionId
             desktopTarget = null
@@ -1263,10 +1306,12 @@ private fun ChatHost(
     LaunchedEffect(pendingOpen) {
         val target = pendingOpen
         if (!target.isNullOrBlank()) {
+            val allowed = container.sessionRepository.get(target) != null
+            container.pendingOpenSessionId.value = null
+            if (!allowed) return@LaunchedEffect
             currentSessionId = target
             desktopTarget = null
             drawerOpen = false
-            container.pendingOpenSessionId.value = null
         }
     }
 
@@ -1396,7 +1441,7 @@ private fun ChatHost(
             key(selectedSessionId) {
                 val chatVm: com.molagpt.app.feature.chat.ChatViewModel =
                     viewModel(
-                        key = "chat-$selectedSessionId",
+                        key = "chat-$historyScope-$selectedSessionId",
                         factory = ViewModelFactories.chat(
                             container = container,
                             sessionId = selectedSessionId,
@@ -1418,10 +1463,7 @@ private fun ChatHost(
                     onOpenAgentControl = onOpenAgentControl,
                     onOpenImageWorkbench = onOpenImageWorkbench,
                     onNewChatWithModel = ::newChatWithModel,
-                    onNewChat = {
-                        currentSessionId = Ids.newSessionId()
-                        drawerOpen = false
-                    },
+                    onNewChat = openNewChat,
                     drawerOpen = drawerOpen,
                     desktopTargets = desktopTargets,
                     desktopModels = desktopModels,
@@ -1469,15 +1511,15 @@ private fun ChatHost(
                 currentSessionId = currentSessionId.takeIf { desktopTarget == null },
                 currentDesktopKey = desktopTarget?.let { target -> target.conversationId?.let { "${target.machineId}/$it" } },
                 drawerOpen = drawerOpen,
-                onNewChat = {
-                    currentSessionId = Ids.newSessionId()
-                    desktopTarget = null
-                    drawerOpen = false
-                },
+                onNewChat = openNewChat,
                 onSelect = { id ->
-                    currentSessionId = id
-                    desktopTarget = null
-                    drawerOpen = false
+                    scope.launch {
+                        if (container.sessionRepository.get(id) != null && container.credentialStore.historyIdentity.value == historyScope) {
+                            currentSessionId = id
+                            desktopTarget = null
+                            drawerOpen = false
+                        }
+                    }
                 },
                 // 抽屉保持打开：从工作台返回时还在原处。
                 onOpenImageTask = onOpenImageTask,
@@ -1488,8 +1530,10 @@ private fun ChatHost(
                 onDeleteMany = { ids, nextSessionId ->
                     scope.launch {
                         val deleted = sessionVm.deleteAll(ids)
+                        container.sessionDraftStore.clearAll(deleted)
                         if (currentSessionId in ids) {
-                            currentSessionId = nextSessionId ?: Ids.newSessionId()
+                            val next = nextSessionId ?: Ids.newSessionId().also { blankSessionId = it }
+                            currentSessionId = next
                         }
                         deleted.forEach { container.syncEngine.schedulePush(it) }
                         container.imageTaskManager.onConversationsDeleted()
@@ -1613,7 +1657,7 @@ private fun DesktopDraftModelMenu(
 ) {
     val sessionId = remember { localSessionId ?: Ids.newSessionId() }
     val localVm: ChatViewModel = viewModel(
-        key = "chat-$sessionId",
+        key = "chat-${container.credentialStore.historyIdentity.value}-$sessionId",
         factory = ViewModelFactories.chat(container = container, sessionId = sessionId, settings = settings),
     )
     val localState by localVm.uiState.collectAsStateWithLifecycle()

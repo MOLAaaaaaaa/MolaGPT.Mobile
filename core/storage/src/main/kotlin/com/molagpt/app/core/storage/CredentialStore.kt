@@ -6,6 +6,17 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.io.File
 import com.molagpt.app.core.model.AccountSessionTokens
+import com.molagpt.app.core.network.AccountPrincipal
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+data class HistoryIdentity(val owner: String?, val generation: Long, val resetPending: Boolean = false) {
+    companion object { const val GUEST = "guest" }
+    val canReadOfficial get() = owner != null && !resetPending
+    val canSync get() = canReadOfficial && owner != GUEST
+}
+
+class SyncSession(val identity: HistoryIdentity, val jwt: String)
 
 /**
  * 加密凭据存储：JWT、用户名、登录时的 UA hash。
@@ -13,10 +24,9 @@ import com.molagpt.app.core.model.AccountSessionTokens
  *
  * 安全存储不可用时不将凭据写入普通 SharedPreferences。
  */
-class CredentialStore(context: Context) {
+class CredentialStore(context: Context, prefsName: String = DEFAULT_PREFS_NAME) {
 
     private val gate = Any()
-    private var sessionGeneration = 0L
     private val transient = mutableMapOf<String, String>()
     private val prefs: SharedPreferences? = runCatching {
         val masterKey = MasterKey.Builder(context.applicationContext)
@@ -24,40 +34,68 @@ class CredentialStore(context: Context) {
             .build()
         val encrypted = EncryptedSharedPreferences.create(
             context.applicationContext,
-            "mola_creds",
+            prefsName,
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
-        val legacyFile = File(context.applicationInfo.dataDir, "shared_prefs/mola_creds_plain.xml")
-        if (legacyFile.isFile) {
-            val legacy = context.applicationContext.getSharedPreferences("mola_creds_plain", Context.MODE_PRIVATE)
-            val missing = legacy.all.filter { (key, value) -> value is String && !encrypted.contains(key) }
-            if (missing.isNotEmpty()) {
-                val edit = encrypted.edit()
-                missing.forEach { (key, value) -> edit.putString(key, value as String) }
-                check(edit.commit()) { "无法迁移安全存储" }
+        if (prefsName == DEFAULT_PREFS_NAME) {
+            val legacyFile = File(context.applicationInfo.dataDir, "shared_prefs/mola_creds_plain.xml")
+            if (legacyFile.isFile) {
+                val legacy = context.applicationContext.getSharedPreferences("mola_creds_plain", Context.MODE_PRIVATE)
+                val missing = legacy.all.filter { (key, value) -> value is String && !encrypted.contains(key) }
+                if (missing.isNotEmpty()) {
+                    val edit = encrypted.edit()
+                    missing.forEach { (key, value) -> edit.putString(key, value as String) }
+                    check(edit.commit()) { "无法迁移安全存储" }
+                }
+                check(legacy.edit().clear().commit()) { "无法清理旧凭据" }
+                if (android.os.Build.VERSION.SDK_INT >= 24) {
+                    context.applicationContext.deleteSharedPreferences("mola_creds_plain")
+                } else {
+                    legacyFile.delete()
+                }
             }
-            check(legacy.edit().clear().commit()) { "无法清理旧凭据" }
-            if (android.os.Build.VERSION.SDK_INT >= 24) {
-                context.applicationContext.deleteSharedPreferences("mola_creds_plain")
-            } else {
-                legacyFile.delete()
+        }
+        val existingJwt = encrypted.getString(KEY_JWT, null)
+        if (existingJwt != null && encrypted.getString(KEY_LAST_OWNER, null) == null) {
+            AccountPrincipal.fromToken(existingJwt)?.let { owner ->
+                encrypted.edit().putString(KEY_LAST_OWNER, owner).apply()
             }
         }
         encrypted
     }.getOrNull()
+    private var sessionGeneration = prefs?.getLong(KEY_GENERATION, 0L) ?: 0L
 
     val isSecureStorageAvailable: Boolean get() = prefs != null
 
     private fun securePrefs(): SharedPreferences =
         prefs ?: throw IllegalStateException("Android 安全存储不可用，请检查设备安全设置后重新登录。")
 
-    var jwt: String?
-        get() = prefs?.getString(KEY_JWT, null)
-        set(value) = synchronized(gate) {
-            securePrefs().edit().apply { if (value == null) remove(KEY_JWT) else putString(KEY_JWT, value) }.apply()
+    val jwt: String?
+        get() = synchronized(gate) { prefs?.getString(KEY_JWT, null) }
+
+    private fun identity(): HistoryIdentity {
+        val token = jwt
+        val owner = if (token == null) HistoryIdentity.GUEST else AccountPrincipal.fromToken(token)
+        return HistoryIdentity(owner, sessionGeneration, prefs?.getBoolean(KEY_RESET_PENDING, false) == true)
+    }
+    private val _historyIdentity = MutableStateFlow(identity())
+    val historyIdentity = _historyIdentity.asStateFlow()
+
+    // The flag and the credentials change in the same commit. A process death between
+    // logout and Room cleanup must not expose yesterday's cache to the next login.
+    fun finishHistoryReset(expected: HistoryIdentity) = synchronized(gate) {
+        if (expected.resetPending && expected == historyIdentity.value) {
+            check(securePrefs().edit().remove(KEY_RESET_PENDING).commit())
+            _historyIdentity.value = identity()
         }
+    }
+
+    fun syncSession(): SyncSession? = synchronized(gate) {
+        val identity = historyIdentity.value
+        if (identity.canSync) jwt?.let { SyncSession(identity, it) } else null
+    }
 
     var username: String?
         get() = prefs?.getString(KEY_USERNAME, null)
@@ -80,7 +118,18 @@ class CredentialStore(context: Context) {
         refreshToken: String? = null,
         expiresAt: Long? = null,
     ) = synchronized(gate) {
-        check(securePrefs().edit()
+        val secure = securePrefs()
+        val previousOwner = secure.getString(KEY_LAST_OWNER, null)
+            ?: secure.getString(KEY_JWT, null)?.let(AccountPrincipal::fromToken)
+        val nextOwner = AccountPrincipal.fromToken(jwt)
+        val switching = previousOwner != null && nextOwner != previousOwner
+        val resetPending = switching || secure.getBoolean(KEY_RESET_PENDING, false)
+        check(secure.edit()
+            .apply {
+                if (resetPending) putBoolean(KEY_RESET_PENDING, true)
+                if (nextOwner != null) putString(KEY_LAST_OWNER, nextOwner) else remove(KEY_LAST_OWNER)
+            }
+            .putLong(KEY_GENERATION, sessionGeneration + 1)
             .putString(KEY_JWT, jwt)
             .putString(KEY_USERNAME, username)
             .putString(KEY_UA_HASH, uaHash)
@@ -88,6 +137,7 @@ class CredentialStore(context: Context) {
             .putLong(KEY_EXPIRES_AT, expiresAt ?: 0L)
             .commit()) { "无法保存登录凭据" }
         sessionGeneration++
+        _historyIdentity.value = identity()
     }
 
     fun sessionTokens(): AccountSessionTokens? = synchronized(gate) {
@@ -110,7 +160,8 @@ class CredentialStore(context: Context) {
         val secure = prefs ?: return@synchronized false
         if (sessionGeneration != expected.generation ||
             secure.getString(KEY_JWT, null) != expected.accessToken ||
-            secure.getString(KEY_REFRESH_TOKEN, null) != expected.refreshToken
+            secure.getString(KEY_REFRESH_TOKEN, null) != expected.refreshToken ||
+            AccountPrincipal.fromToken(accessToken) != AccountPrincipal.fromToken(expected.accessToken)
         ) return@synchronized false
         check(secure.edit().putString(KEY_JWT, accessToken)
             .putString(KEY_REFRESH_TOKEN, refreshToken)
@@ -119,26 +170,49 @@ class CredentialStore(context: Context) {
     }
 
     fun clear() = synchronized(gate) {
-        val persisted = prefs?.edit()?.remove(KEY_JWT)?.remove(KEY_USERNAME)?.remove(KEY_UA_HASH)
-            ?.remove(KEY_REFRESH_TOKEN)?.remove(KEY_EXPIRES_AT)?.commit() ?: true
-        // Invalidate in-flight refreshes even if the storage write reports failure.
-        sessionGeneration++
-        check(persisted) { "无法持久化清除本地登录凭据" }
+        val secure = prefs ?: return@synchronized
+        if (secure.getString(KEY_JWT, null) != null || secure.getString(KEY_LAST_OWNER, null) != null) {
+            clearLocked(evictHistory = true)
+        }
     }
 
+    /** 被动会话失效（如 401 / 刷新失败）：只清过期凭据并保留归属，同号重登不丢本地记录，换号再清库。 */
     fun clearIfCurrent(expected: String): Boolean = synchronized(gate) {
         val secure = prefs ?: return@synchronized false
         if (secure.getString(KEY_JWT, null) != expected) return@synchronized false
-        val persisted = secure.edit().remove(KEY_JWT).remove(KEY_USERNAME).remove(KEY_UA_HASH)
-            .remove(KEY_REFRESH_TOKEN).remove(KEY_EXPIRES_AT).commit()
-        sessionGeneration++
-        check(persisted) { "无法持久化清除本地登录凭据" }
+        clearLocked(evictHistory = false, invalidatedToken = expected)
         true
+    }
+
+    private fun clearLocked(evictHistory: Boolean, invalidatedToken: String? = null) {
+        val secure = securePrefs()
+        val preservedOwner = if (evictHistory) null else {
+            secure.getString(KEY_LAST_OWNER, null) ?: invalidatedToken?.let(AccountPrincipal::fromToken)
+        }
+        check(secure.edit()
+            .remove(KEY_JWT)
+            .remove(KEY_USERNAME)
+            .remove(KEY_UA_HASH)
+            .remove(KEY_REFRESH_TOKEN)
+            .remove(KEY_EXPIRES_AT)
+            .apply {
+                if (evictHistory) {
+                    remove(KEY_LAST_OWNER)
+                    putBoolean(KEY_RESET_PENDING, true)
+                } else if (preservedOwner != null) {
+                    putString(KEY_LAST_OWNER, preservedOwner)
+                }
+            }
+            .putLong(KEY_GENERATION, sessionGeneration + 1)
+            .commit()) { "无法持久化清除本地登录凭据" }
+        sessionGeneration++
+        _historyIdentity.value = identity()
     }
 
     fun replaceJwtIfCurrent(expected: String, replacement: String): Boolean = synchronized(gate) {
         val secure = prefs ?: return@synchronized false
-        if (secure.getString(KEY_JWT, null) != expected) return@synchronized false
+        if (secure.getString(KEY_JWT, null) != expected ||
+            AccountPrincipal.fromToken(replacement) != AccountPrincipal.fromToken(expected)) return@synchronized false
         secure.edit().putString(KEY_JWT, replacement).apply()
         true
     }
@@ -170,11 +244,15 @@ class CredentialStore(context: Context) {
     }
 
     private companion object {
+        const val DEFAULT_PREFS_NAME = "mola_creds"
         const val KEY_JWT = "molagpt.jwt"
         const val KEY_USERNAME = "molagpt.username"
         const val KEY_UA_HASH = "molagpt.ua_hash"
         const val KEY_REFRESH_TOKEN = "molagpt.refresh_token"
         const val KEY_EXPIRES_AT = "molagpt.expires_at"
+        const val KEY_LAST_OWNER = "molagpt.last_owner"
+        const val KEY_RESET_PENDING = "molagpt.history_reset_pending"
+        const val KEY_GENERATION = "molagpt.login_generation"
         val TRANSIENT_KEYS = setOf("agent.device_id", "molagpt.device_cookie")
     }
 }

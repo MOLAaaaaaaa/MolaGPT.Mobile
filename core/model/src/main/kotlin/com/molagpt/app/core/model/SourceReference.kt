@@ -47,6 +47,8 @@ data class Usage(
      * 多轮累加后其余字段是各轮之和，只有这一项保留最后一轮。
      */
     val contextTokens: Int? = null,
+    /** 各次上游模型请求的耗时之和，工具执行不在请求内。 */
+    val modelRequestMs: Long? = null,
 ) {
     /** 这份用量对应的上下文有多大；没有上报 prompt 时为 null。 */
     val contextSize: Int?

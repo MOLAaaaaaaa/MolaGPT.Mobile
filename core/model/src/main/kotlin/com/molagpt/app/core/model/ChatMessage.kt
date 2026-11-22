@@ -76,6 +76,7 @@ object ChatMessageMetadataKeys {
     const val REASONING_TOKENS = "reasoningTokens"
     const val DURATION_MS = "durationMs"
     const val TTFT_MS = "ttftMs"
+    const val MODEL_REQUEST_MS = "modelRequestMs"
     const val COST_ID = "costId"
     const val COST_USD = "costUsd"
     const val COST_MODEL = "costModel"

@@ -3,12 +3,15 @@ package com.molagpt.app.feature.auth
 import android.net.Uri
 import android.util.Base64
 import com.molagpt.app.core.common.DispatcherProvider
+import com.molagpt.app.core.network.AccountPrincipal
 import com.molagpt.app.core.network.AuthApi
 import com.molagpt.app.core.network.MolaEndpoints
 import com.molagpt.app.core.network.UserAgentProvider
 import com.molagpt.app.core.network.dto.LoginResponse
 import com.molagpt.app.core.storage.CredentialStore
+import com.molagpt.app.core.storage.HistoryIdentity
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +26,7 @@ class MolaGptAuthService(
     private val credentials: CredentialStore,
     private val userAgent: String,
     private val dispatchers: DispatcherProvider,
+    private val beforeLogout: suspend (HistoryIdentity) -> Unit = {},
     private val onAuthChanged: () -> Unit = {},
 ) {
     private val sessionGate = Any()
@@ -130,7 +134,8 @@ class MolaGptAuthService(
         val token = response.token
         if (!response.success || token.isNullOrBlank()) return response.message ?: "登录失败"
         if (response.sessionProtocol != 2 || response.refreshToken.isNullOrBlank() ||
-            (response.expiresAt ?: 0L) <= System.currentTimeMillis() / 1000
+            (response.expiresAt ?: 0L) <= System.currentTimeMillis() / 1000 ||
+            AccountPrincipal.fromToken(token) == null
         ) return "服务器未返回有效会话，请重新登录。"
         synchronized(sessionGate) {
             if (generation != sessionGeneration) return "登录状态已变化，请重试。"
@@ -155,26 +160,26 @@ class MolaGptAuthService(
         notifyAuthChanged()
     }
 
-    suspend fun logoutRemote(): Boolean = withContext(dispatchers.io) {
-        val (token, generation) = synchronized(sessionGate) { credentials.jwt to sessionGeneration }
-        val revoked = if (token.isNullOrBlank()) true else try {
+    suspend fun logoutRemote(): Boolean = withContext(NonCancellable + dispatchers.io) {
+        val (token, expected) = synchronized(sessionGate) { credentials.jwt to credentials.historyIdentity.value }
+        if (token == null) return@withContext true
+        try {
+            // A failed final upload must not prevent either remote revocation or local logout.
+            runCatching { withTimeoutOrNull(3_000) { beforeLogout(expected) } }
             withTimeoutOrNull(5_000) { authApi.logout(token) } == true
-        } catch (e: CancellationException) {
-            throw e
         } catch (_: Exception) {
             false
-        }
-        var cleared = false
-        synchronized(sessionGate) {
-            if (generation == sessionGeneration) {
-                sessionGeneration++
-                cancelOAuthLocked()
-                credentials.clear()
-                cleared = true
+        } finally {
+            val cleared = synchronized(sessionGate) {
+                if (credentials.historyIdentity.value.generation != expected.generation) false else {
+                    sessionGeneration++
+                    cancelOAuthLocked()
+                    credentials.clear()
+                    true
+                }
             }
+            if (cleared) notifyAuthChanged()
         }
-        if (cleared) notifyAuthChanged()
-        revoked
     }
 
     fun logoutIfCurrent(expectedJwt: String): Boolean {
@@ -188,9 +193,16 @@ class MolaGptAuthService(
     }
 
     fun ensureJwtValidForUa() {
-        if (!credentials.isLoggedIn || credentials.sessionTokens()?.refreshToken != null) return
+        val current = credentials.jwt ?: return
+        if (AccountPrincipal.fromToken(current) == null) {
+            logoutIfCurrent(current)
+            return
+        }
+        if (credentials.sessionTokens()?.refreshToken != null) return
         val stored = credentials.uaHash
-        if (stored == null || !stored.equals(UserAgentProvider.sha256(userAgent), ignoreCase = true)) logout()
+        if (stored == null || !stored.equals(UserAgentProvider.sha256(userAgent), ignoreCase = true)) {
+            logoutIfCurrent(current)
+        }
     }
 
     private fun snapshot() = AccountState(credentials.isLoggedIn, credentials.username)

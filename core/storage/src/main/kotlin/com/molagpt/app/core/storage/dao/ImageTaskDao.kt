@@ -125,13 +125,13 @@ interface ImageTaskDao {
 
     // —— 会话表上那一行 ——
 
-    @Query("UPDATE conversations SET updatedAt = :now, visibleInList = 1, model = :modelId WHERE sessionId = :taskId")
+    @Query("UPDATE conversations SET updatedAt = :now, visibleInList = 1, model = :modelId WHERE sessionId = :taskId AND providerId = 'image-workbench' AND providerKind = 'BYOK'")
     suspend fun touchConversation(taskId: String, modelId: String, now: Long)
 
-    @Query("UPDATE conversations SET title = :title WHERE sessionId = :taskId")
+    @Query("UPDATE conversations SET title = :title WHERE sessionId = :taskId AND providerId = 'image-workbench' AND providerKind = 'BYOK'")
     suspend fun setConversationTitle(taskId: String, title: String)
 
-    @Query("DELETE FROM conversations WHERE sessionId = :taskId")
+    @Query("DELETE FROM conversations WHERE sessionId = :taskId AND providerId = 'image-workbench' AND providerKind = 'BYOK'")
     suspend fun deleteConversation(taskId: String)
 }
 

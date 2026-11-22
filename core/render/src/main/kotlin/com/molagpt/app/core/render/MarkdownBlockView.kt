@@ -77,6 +77,7 @@ import com.molagpt.app.core.markdown.MdInline
 import com.molagpt.app.core.markdown.MdTableAlignment
 import com.molagpt.app.core.markdown.visual.HtmlFence
 import com.molagpt.app.core.render.visual.HtmlFenceView
+import com.molagpt.app.core.render.visual.MermaidBlockView
 import com.molagpt.app.core.render.visual.MolaUiBlockView
 import com.molagpt.app.core.model.SourceReference
 
@@ -182,7 +183,13 @@ fun MarkdownBlockView(
             CodeBlockView(language = block.language, code = block.code, modifier = modifier)
         }
         is MdBlock.MathBlock -> LatexView(expr = block.expr, display = true, modifier = modifier.padding(vertical = 4.dp))
-        is MdBlock.Mermaid -> CodeBlockView(language = "mermaid", code = block.source, modifier = modifier)
+        is MdBlock.Mermaid -> MermaidBlockView(
+            source = block.source,
+            closed = block.closed,
+            streaming = tailFade,
+            stateKey = blockKey,
+            modifier = modifier.padding(vertical = 4.dp),
+        )
         is MdBlock.MolaUi -> MolaUiBlockView(block, streaming = tailFade, modifier = modifier.padding(vertical = 6.dp))
         MdBlock.Divider -> HorizontalDivider(modifier = modifier.padding(vertical = 8.dp))
     }

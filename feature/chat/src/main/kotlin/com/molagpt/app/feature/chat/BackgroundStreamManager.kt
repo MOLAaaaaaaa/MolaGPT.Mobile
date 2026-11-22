@@ -9,6 +9,7 @@ import com.molagpt.app.core.model.ProviderKind
 import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.ToolStatus
 import com.molagpt.app.core.storage.ChatRepository
+import com.molagpt.app.core.storage.HistoryIdentity
 import com.molagpt.app.core.storage.StreamTaskRecord
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +32,7 @@ data class BackgroundStreamState(
     val error: String? = null,
     val streamSessionId: String? = null,
     val active: Boolean = false,
+    val official: Boolean = false,
 ) {
     val isStreaming: Boolean get() = active || inFlight?.isStreaming == true
 }
@@ -52,7 +54,7 @@ class BackgroundStreamManager(
      * 首轮回答完成后的自动标题。挂在这里而非 ViewModel，是因为本管理器持有 application scope——
      * 用户答案一出来就退出会话时，绑 viewModelScope 的标题请求会被取消。
      */
-    private val titleGenerator: suspend (sessionId: String) -> Unit = {},
+    private val titleGenerator: suspend (String, HistoryIdentity) -> Unit = { _, _ -> },
     /**
      * BYOK 回答正常完成后的记忆整理。挂在这里的理由与 [titleGenerator] 相同：
      * 需要 application scope 才能在用户退出会话后继续跑完。
@@ -65,6 +67,7 @@ class BackgroundStreamManager(
         val sessionId: String,
         val conversationId: String,
         val modelDisplayName: String?,
+        val officialSession: HistoryIdentity?,
     )
 
     private data class Task(
@@ -72,6 +75,7 @@ class BackgroundStreamManager(
         val streamSessionId: String,
         val providerKind: ProviderKind,
         val job: Job,
+        val identity: HistoryIdentity,
         /** 本轮结束后是否自动起标题（仅首轮为 true；重试/重生成不改已有标题）。 */
         val generateTitle: Boolean = false,
     )
@@ -115,14 +119,16 @@ class BackgroundStreamManager(
         throttleMs: Long,
         priorAttempts: List<RetryAttempt> = emptyList(),
         generateTitleOnFinish: Boolean = false,
+        expected: HistoryIdentity = chatRepository.identity.value,
     ) {
+        if (request.providerKind == ProviderKind.MOLAGPT && (!expected.canReadOfficial || expected != chatRepository.identity.value)) return
         // 取代同会话上一条流：本地取消旧 job（不走 stop() 的异步 removeStreamTask，避免与下面的 persist 竞争）。
         val previous = tasks.remove(request.sessionId)
         previous?.job?.cancel()
         val previousStreamId = previous?.streamSessionId
 
         val state = stateFor(request.sessionId)
-        state.update { it.copy(error = null, streamSessionId = request.streamSessionId, active = true) }
+        state.update { it.copy(error = null, streamSessionId = request.streamSessionId, active = true, official = request.providerKind == ProviderKind.MOLAGPT) }
         val apiUrl = apiUrlResolver(request.providerId, request.modelId)
 
         // 先停旧服务端流、再持久化新任务，二者在同一协程里顺序执行，避免 remove/persist 乱序。
@@ -132,7 +138,7 @@ class BackgroundStreamManager(
                 previousStreamId != request.streamSessionId &&
                 previous.providerKind == ProviderKind.MOLAGPT
             ) {
-                runCatching { chatRepository.stop(previousStreamId) }
+                runCatching { chatRepository.stop(request.sessionId, previousStreamId, previous.identity) }
             }
             chatRepository.persistStreamTask(
                 StreamTaskRecord(
@@ -147,10 +153,11 @@ class BackgroundStreamManager(
                     apiUrl = apiUrl,
                     createdAt = System.currentTimeMillis(),
                 ),
+                expected,
             )
         }
 
-        val job = chatRepository.streamAssistant(request, assistantMessageId, priorAttempts)
+        val job = chatRepository.streamAssistant(request, assistantMessageId, priorAttempts, expected)
             .chunkedTimeWindow(
                 windowMillis = { StreamRenderPacing.windowMillis(throttleMs) },
                 emitImmediately = {
@@ -165,6 +172,7 @@ class BackgroundStreamManager(
                         error = null,
                         streamSessionId = request.streamSessionId,
                         active = true,
+                        official = request.providerKind == ProviderKind.MOLAGPT,
                     )
                 }
             }
@@ -179,16 +187,18 @@ class BackgroundStreamManager(
             streamSessionId = request.streamSessionId,
             providerKind = request.providerKind,
             job = job,
+            identity = expected,
             generateTitle = generateTitleOnFinish,
         )
         publishActiveCount()
     }
 
     /** 启动对账：续接一个进程死亡前未完成的任务（resume from offset=0，覆盖已完成/进行中两种）。 */
-    fun resume(record: StreamTaskRecord) {
+    fun resume(record: StreamTaskRecord, expected: HistoryIdentity) {
+        if (!expected.canReadOfficial || expected != chatRepository.identity.value) return
         if (isStreaming(record.sessionId)) return
         val state = stateFor(record.sessionId)
-        state.update { it.copy(error = null, streamSessionId = record.streamSessionId, active = true) }
+        state.update { it.copy(error = null, streamSessionId = record.streamSessionId, active = true, official = true) }
 
         val job = chatRepository.resumeAssistant(
             assistantMessageId = record.assistantMessageId,
@@ -197,6 +207,7 @@ class BackgroundStreamManager(
             streamSessionId = record.streamSessionId,
             model = record.modelId,
             modelDisplayName = record.modelDisplayName,
+            scope = expected,
         )
             .chunkedTimeWindow(
                 windowMillis = { StreamRenderPacing.windowMillis(defaultThrottleMs) },
@@ -212,6 +223,7 @@ class BackgroundStreamManager(
                         error = null,
                         streamSessionId = record.streamSessionId,
                         active = true,
+                        official = true,
                     )
                 }
             }
@@ -221,7 +233,7 @@ class BackgroundStreamManager(
             }
             .launchIn(scope)
 
-        tasks[record.sessionId] = Task(record.sessionId, record.streamSessionId, ProviderKind.MOLAGPT, job)
+        tasks[record.sessionId] = Task(record.sessionId, record.streamSessionId, ProviderKind.MOLAGPT, job, expected)
         publishActiveCount()
     }
 
@@ -232,10 +244,23 @@ class BackgroundStreamManager(
         task.job.cancel()
         scope.launch {
             if (task.providerKind == ProviderKind.MOLAGPT) {
-                chatRepository.stop(task.streamSessionId)
+                chatRepository.stop(sessionId, task.streamSessionId, task.identity)
             }
-            chatRepository.removeStreamTask(sessionId)
+            chatRepository.removeStreamTask(sessionId, task.identity)
         }
+    }
+
+    fun cancelOfficialTasks(expected: HistoryIdentity? = null): List<Job> = tasks.values.mapNotNull { task ->
+        if (task.providerKind != ProviderKind.MOLAGPT || (expected != null && task.identity != expected) ||
+            !tasks.remove(task.sessionId, task)) return@mapNotNull null
+        task.job.cancel()
+        states.remove(task.sessionId)?.value = BackgroundStreamState()
+        publishActiveCount()
+        task.job
+    }
+
+    fun forgetHistory(ids: List<String>) {
+        (ids + states.filterValues { it.value.official }.keys).forEach { states.remove(it)?.value = BackgroundStreamState() }
     }
 
     private fun finishTask(
@@ -247,14 +272,16 @@ class BackgroundStreamManager(
         // 仅当本 job 仍是该会话的当前任务时才收尾——否则它已被新一轮 start 取代，不可误删新任务记录。
         val current = tasks[sessionId]
         if (current?.streamSessionId != streamSessionId) return
-        tasks.remove(sessionId)
+        if (!tasks.remove(sessionId, current)) return
         publishActiveCount()
         stateFor(sessionId).update { it.copy(active = false) }
-        scope.launch { chatRepository.removeStreamTask(sessionId) }
+        scope.launch { chatRepository.removeStreamTask(sessionId, current.identity) }
+        val official = current.identity.takeIf { current.providerKind == ProviderKind.MOLAGPT }
+        if (official != null && official != chatRepository.identity.value) return
         if (stateFor(sessionId).value.inFlight?.status == MessageStatus.COMPLETE) {
-            _completions.tryEmit(Completion(sessionId, conversationId, modelDisplayName))
+            _completions.tryEmit(Completion(sessionId, conversationId, modelDisplayName, official))
             // 标题失败不该影响正常收尾，也不该冒泡到 UI——内部已自行回退占位标题。
-            if (current.generateTitle) scope.launch { runCatching { titleGenerator(sessionId) } }
+            if (current.generateTitle) scope.launch { runCatching { titleGenerator(sessionId, current.identity) } }
             // 只对 BYOK 触发：MolaGPT 会话的记忆由服务端 Tracks 维护。
             // 停止与失败的回答走不到这里，因此「被打断的回答不学习」是天然成立的。
             if (current.providerKind == ProviderKind.BYOK) {

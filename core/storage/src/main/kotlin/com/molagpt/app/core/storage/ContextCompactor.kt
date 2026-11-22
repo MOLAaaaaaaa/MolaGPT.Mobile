@@ -70,6 +70,7 @@ class ContextCompactor(
     private val autoEnabled: () -> Boolean,
     /** 精简较早轮次的工具结果与图片。 */
     private val slimEnabled: () -> Boolean,
+    private val preserveSlimBoundary: suspend (ChatRequest) -> Boolean,
     /** 设置里指定的摘要模型 (providerId, modelId)；null 用当前对话模型。 */
     private val summaryModel: suspend () -> Pair<String, String>?,
     private val pricingOf: suspend (providerId: String, modelId: String) -> ModelPricing?,
@@ -142,11 +143,26 @@ class ContextCompactor(
     suspend fun prepare(request: ChatRequest): Prepared {
         val loaded = load(request.sessionId, request.messages)
         val applied = loaded.applyTo(request)
-        val ready = loaded.slimmed(applied)
-        if (!autoEnabled()) return ready
+        val auto = autoEnabled()
+        val maxSlimTurns = loaded.slimTurns()
+        val keepBoundary = maxSlimTurns > 0 && preserveSlimBoundary(request)
+        if (!auto && !keepBoundary) return loaded.slimmed(applied, maxSlimTurns)
+
         val window = windowOf(request.providerId, request.modelId)
-        val before = ContextPlanner.measure(applied.request, loaded.timeline, applied.checkpointId, ready.slimTurns)
-        if (before.tokens < ContextCompactionPolicy.threshold(window)) return ready
+        val threshold = ContextCompactionPolicy.threshold(window)
+        var slimTurns = if (keepBoundary) {
+            ContextPlanner.lastSlimTurns(applied.request, loaded.timeline, applied.checkpointId)
+                .coerceIn(0, maxSlimTurns)
+        } else {
+            maxSlimTurns
+        }
+        var before = ContextPlanner.measure(applied.request, loaded.timeline, applied.checkpointId, slimTurns)
+        if (before.tokens >= threshold && slimTurns < maxSlimTurns) {
+            slimTurns = maxSlimTurns
+            before = ContextPlanner.measure(applied.request, loaded.timeline, applied.checkpointId, slimTurns)
+        }
+        val ready = loaded.slimmed(applied, slimTurns)
+        if (!auto || before.tokens < threshold) return ready
         return compact(request, loaded, window, before, ContextCompactionReason.THRESHOLD) ?: ready
     }
 
@@ -225,10 +241,8 @@ class ContextCompactor(
 
     private fun Loaded.slimTurns(): Int = if (slimEnabled()) ContextPlanner.slimTurns(timeline) else 0
 
-    private fun Loaded.slimmed(applied: Prepared): Prepared {
-        val turns = slimTurns()
-        return applied.copy(request = ContextPlanner.slim(applied.request, timeline, turns), slimTurns = turns)
-    }
+    private fun Loaded.slimmed(applied: Prepared, turns: Int = slimTurns()): Prepared =
+        applied.copy(request = ContextPlanner.slim(applied.request, timeline, turns), slimTurns = turns)
 
     private fun Loaded.applyTo(request: ChatRequest): Prepared {
         // 锚点之后还没有消息时，这次请求里没有地方放摘要，照原样发。

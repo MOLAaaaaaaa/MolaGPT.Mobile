@@ -90,6 +90,7 @@ fun MolaAccountScreen(
     val statusLoading by viewModel.statusLoading.collectAsStateWithLifecycle()
     val statusError by viewModel.statusError.collectAsStateWithLifecycle()
     val syncing by viewModel.syncing.collectAsStateWithLifecycle()
+    val history by viewModel.historyIdentity.collectAsStateWithLifecycle()
 
     // 配额只在真正打开本页时才确保拉取（命中容器级缓存则不重拉）。
     // 改版前这行挂在设置页上，等于每次进设置都可能触发一次 status.php。
@@ -141,7 +142,7 @@ fun MolaAccountScreen(
                     label = "使用云同步",
                     checked = s.cloudSyncEnabled,
                     onChange = viewModel::setCloudSync,
-                    enabled = !syncing,
+                    enabled = history.canSync && !syncing,
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -162,7 +163,7 @@ fun MolaAccountScreen(
                 }
                 TextButton(
                     onClick = viewModel::syncNow,
-                    enabled = s.cloudSyncEnabled && !syncing,
+                    enabled = s.cloudSyncEnabled && history.canSync && !syncing,
                 ) {
                     Text(if (syncing) "同步中…" else "立即同步")
                 }

@@ -21,7 +21,8 @@ sealed interface MdBlock {
     ) : MdBlock
     /** [closed]：围栏已写出结束标记。流式中还没写完的代码块为 false。 */
     data class Code(val language: String?, val code: String, val closed: Boolean = true) : MdBlock
-    data class Mermaid(val source: String) : MdBlock
+    /** [closed]：围栏已写出结束标记。流式中还没写完的 Mermaid 块为 false。 */
+    data class Mermaid(val source: String, val closed: Boolean = true) : MdBlock
 
     /**
      * `mola-ui` 围栏：内嵌组件（函数图像、图表、数据表、指标卡、条目卡）。

@@ -257,6 +257,7 @@ internal fun parseOpenAiResponseUsage(root: JsonObject): Usage? {
             ?: if (prompt != null && completion != null) prompt + completion else null,
         reasoningTokens = int(u["output_tokens_details"] as? JsonObject, "reasoning_tokens"),
         cachedTokens = int(u["input_tokens_details"] as? JsonObject, "cached_tokens"),
+        cacheWriteTokens = int(u["input_tokens_details"] as? JsonObject, "cache_write_tokens"),
     )
 }
 
@@ -276,6 +277,7 @@ internal fun Usage?.accumulate(next: Usage?): Usage? {
             next.promptTokens != null && next.completionTokens != null,
         // 上下文大小不是求和：最后一轮请求已经包含前面各轮的全部内容。
         contextTokens = next.contextSize ?: contextSize,
+        modelRequestMs = modelRequestMs?.let { elapsed -> next.modelRequestMs?.let { elapsed + it } },
     )
 }
 

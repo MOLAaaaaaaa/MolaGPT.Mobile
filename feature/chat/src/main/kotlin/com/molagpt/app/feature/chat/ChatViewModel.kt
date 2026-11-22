@@ -2,6 +2,10 @@ package com.molagpt.app.feature.chat
 
 import android.content.Context
 import android.net.Uri
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.molagpt.app.core.common.DispatcherProvider
@@ -50,9 +54,11 @@ import com.molagpt.app.core.storage.RetryAttempts
 import com.molagpt.app.core.storage.SessionRepository
 import com.molagpt.app.core.storage.SkillRepository
 import com.molagpt.app.core.storage.SyncEngine
+import com.molagpt.app.core.storage.SyncMapper
 import com.molagpt.app.feature.file.AttachmentEncoder
 import com.molagpt.app.feature.file.AttachmentStore
 import com.molagpt.app.feature.file.DocumentTextExtractor
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -114,13 +120,15 @@ class ChatViewModel(
     private val tools: EnabledTools,
     useThinking: Boolean,
     reasoningEffort: String,
-    private val temperature: Double,
     private val throttleMs: Long,
     private val appContext: Context,
     /** BYOK 上下文压缩：压缩记录与发送前的覆盖范围。 */
     private val contextCompactor: ContextCompactor? = null,
     /** 写入「自动压缩」开关（与设置页同一项）。 */
     private val persistAutoCompaction: suspend (Boolean) -> Unit = {},
+    /** 会话级未发送草稿箱（按 sessionId 隔离保存，切换会话不丢草稿）。 */
+    draftStore: SessionDraftStore = SessionDraftStore(),
+    private val savedState: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
     suspend fun retryServerTool(ticket: String) = serverToolApi.retry(ticket)
 
@@ -129,7 +137,7 @@ class ChatViewModel(
     }
 
 
-    private val conversationId = Ids.conversationIdForSession(sessionId)
+    private val openingIdentity = sessionRepository.identity.value
 
     /** BYOK 附件的本地托管目录与文本抽取器。BYOK 不经服务端，附件字节只在本机流转。 */
     private val attachmentStore = AttachmentStore(appContext)
@@ -169,9 +177,22 @@ class ChatViewModel(
     private val _reasoningEffort = MutableStateFlow(reasoningEffort)
     /** 本次回复未检测到推理内容时的自校正提示（低置信配置更易触发）。 */
     private val _reasoningMismatchHint = MutableStateFlow<ReasoningMismatchHint?>(null)
-    private val _pendingAttachments = MutableStateFlow<List<FileInfo>>(emptyList())
+    private val draft = draftStore.getOrCreate(sessionId, savedState.get<String>("draftText").orEmpty())
+    val draftText = draft.text.asStateFlow()
+    private val editAttachments = MutableStateFlow<List<FileInfo>>(emptyList())
+    var isSubmitting by mutableStateOf(false)
+        private set
     /** 编辑用户消息：发送前按 createdAt 截断该条及之后，再按普通 send 重发。 */
     private val _editingMessage = MutableStateFlow<EditingUserMessage?>(null)
+
+    private val currentAttachments
+        get() = if (_editingMessage.value == null) draft.attachments else editAttachments
+
+    fun saveDraftText(text: String) {
+        draft.byok = _conversationProviderKind.value == ProviderKind.BYOK
+        draft.setText(text)
+        savedState["draftText"] = text
+    }
     // 占位会话懒加载期间为 true（仅在确认要发网络请求时才置位）→ 驱动聊天页居中转圈。
     private val _loadingHistory = MutableStateFlow(false)
 
@@ -183,7 +204,7 @@ class ChatViewModel(
         // onFetchStart 仅在「确认占位、即将发起网络请求」时回调 → 据此转圈；普通本地会话不会误闪。
         viewModelScope.launch {
             runCatching {
-                syncEngine.loadConversationIfNeeded(sessionId) { _loadingHistory.value = true }
+                syncEngine.loadConversationIfNeeded(sessionId, openingIdentity) { _loadingHistory.value = true }
             }
             val restored = restoreConversationModel()
             if (!restored) persistReconciledDefaultIfNeeded()
@@ -483,11 +504,11 @@ class ChatViewModel(
     }
 
     private val uiMeta = combine(
-        uiMetaCore, _pendingAttachments, _editingMessage, modelConfigLoadedFlow,
-    ) { meta, pending, editing, configLoaded ->
+        uiMetaCore, draft.attachments, editAttachments, _editingMessage, modelConfigLoadedFlow,
+    ) { meta, pending, edited, editing, configLoaded ->
         ChatUiMeta(
             controls = meta.controls,
-            pendingAttachments = pending,
+            pendingAttachments = if (editing == null) pending else edited,
             editingMessage = editing,
             isModelRefreshing = meta.isModelRefreshing,
             isLoadingHistory = meta.isLoadingHistory,
@@ -615,6 +636,7 @@ class ChatViewModel(
         _selectedModel.value = selected.id
         _conversationProviderId.value = selected.providerId
         _conversationProviderKind.value = selected.providerKind
+        draft.byok = selected.providerKind == ProviderKind.BYOK
         adaptThinkingStateTo(selected)
         viewModelScope.launch {
             runCatching {
@@ -745,46 +767,41 @@ class ChatViewModel(
      */
     fun attachFile(uri: Uri) {
         val tempId = Ids.newFragmentId()
+        val attachments = currentAttachments
+        draft.byok = _conversationProviderKind.value == ProviderKind.BYOK
+        attachments.update { it + FileInfo(tempId, "正在读取附件", uploadStatus = UploadStatus.UPLOADING) }
+
+        fun updateAttachment(transform: (FileInfo) -> FileInfo) {
+            attachments.update { files -> files.map { if (it.id == tempId) transform(it) else it } }
+        }
+
         viewModelScope.launch {
             val meta = withContext(dispatchers.io) { attachmentStore.probe(uri) }
             if (meta == null) {
+                attachments.update { files -> files.filterNot { it.id == tempId } }
                 _error.value = "无法读取所选附件"
                 return@launch
             }
+            if (attachments.value.none { it.id == tempId }) return@launch
             val (name, mime, size) = meta
             val isByokAttachment = _conversationProviderKind.value == ProviderKind.BYOK
-            val rejectReason = when {
-                !isByokAttachment -> null
-                else -> AttachmentMime.unsupportedReason(mime, name)
-            }
-            if (rejectReason != null) {
-                _pendingAttachments.update {
-                    it + FileInfo(
-                        id = tempId,
-                        name = name,
-                        mimeType = mime,
-                        sizeBytes = size.takeIf { bytes -> bytes >= 0 },
-                        uploadStatus = UploadStatus.FAILED,
-                    )
-                }
-                _error.value = rejectReason
-                return@launch
-            }
-            _pendingAttachments.update {
-                it + FileInfo(
-                    id = tempId,
+            val rejectReason = if (isByokAttachment) AttachmentMime.unsupportedReason(mime, name) else null
+            updateAttachment {
+                it.copy(
                     name = name,
                     mimeType = mime,
                     sizeBytes = size.takeIf { bytes -> bytes >= 0 },
-                    uploadStatus = UploadStatus.UPLOADING,
+                    uploadStatus = if (rejectReason == null) UploadStatus.UPLOADING else UploadStatus.FAILED,
                 )
+            }
+            if (rejectReason != null) {
+                _error.value = rejectReason
+                return@launch
             }
             if (isByokAttachment) {
                 val relativePath = withContext(dispatchers.io) { attachmentStore.save(uri, meta) }
                 if (relativePath == null) {
-                    _pendingAttachments.update { list ->
-                        list.map { if (it.id == tempId) it.copy(uploadStatus = UploadStatus.FAILED) else it }
-                    }
+                    updateAttachment { it.copy(uploadStatus = UploadStatus.FAILED) }
                     _error.value = if (size > AttachmentStore.MAX_FILE_BYTES) {
                         "附件超过 ${AttachmentStore.MAX_FILE_BYTES / 1024 / 1024}MB 上限"
                     } else {
@@ -792,18 +809,9 @@ class ChatViewModel(
                     }
                     return@launch
                 }
-                _pendingAttachments.update { list ->
-                    list.map {
-                        if (it.id == tempId) {
-                            it.copy(
-                                url = AttachmentStore.displayUrl(appContext, relativePath),
-                                localPath = relativePath,
-                                uploadStatus = UploadStatus.UPLOADED,
-                            )
-                        } else {
-                            it
-                        }
-                    }
+                val url = AttachmentStore.displayUrl(appContext, relativePath)
+                updateAttachment {
+                    it.copy(url = url, localPath = relativePath, uploadStatus = UploadStatus.UPLOADED)
                 }
                 return@launch
             }
@@ -811,48 +819,51 @@ class ChatViewModel(
                 runCatching { appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
             }
             if (bytes == null) {
-                _pendingAttachments.update { list ->
-                    list.map { if (it.id == tempId) it.copy(uploadStatus = UploadStatus.FAILED) else it }
-                }
+                updateAttachment { it.copy(uploadStatus = UploadStatus.FAILED) }
                 _error.value = "无法读取所选附件"
                 return@launch
             }
-            runCatching { chatRepository.uploadFile(bytes, name, mime, conversationId) }
-                .onSuccess { info ->
-                    _pendingAttachments.update { list ->
-                        list.map {
-                            if (it.id == tempId) {
-                                info.copy(
-                                    id = tempId,
-                                    uploadStatus = if (!info.url.isNullOrBlank() || !info.sandboxPath.isNullOrBlank()) {
-                                        UploadStatus.UPLOADED
-                                    } else {
-                                        UploadStatus.FAILED
-                                    },
-                                )
-                            } else {
-                                it
-                            }
-                        }
+            try {
+                val conversationId = SyncMapper.conversationIdOf(sessionId)
+                if (!openingIdentity.canReadOfficial || sessionRepository.identity.value != openingIdentity) return@launch
+                val info = chatRepository.uploadFile(bytes, name, mime, conversationId, openingIdentity)
+                updateAttachment {
+                    info.copy(
+                        id = tempId,
+                        uploadStatus = if (!info.url.isNullOrBlank() || !info.sandboxPath.isNullOrBlank()) {
+                            UploadStatus.UPLOADED
+                        } else {
+                            UploadStatus.FAILED
+                        },
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                updateAttachment { it.copy(uploadStatus = UploadStatus.FAILED) }
+            }
+        }.invokeOnCompletion { cause ->
+            if (cause is CancellationException) {
+                updateAttachment { file ->
+                    if (file.uploadStatus == UploadStatus.UPLOADING) {
+                        file.copy(uploadStatus = UploadStatus.FAILED)
+                    } else {
+                        file
                     }
                 }
-                .onFailure {
-                    _pendingAttachments.update { list ->
-                        list.map { if (it.id == tempId) it.copy(uploadStatus = UploadStatus.FAILED) else it }
-                    }
-                }
+            }
         }
     }
 
     fun attachImage(uri: Uri) = attachFile(uri)
 
     fun removeAttachment(id: String) {
-        _pendingAttachments.update { list -> list.filterNot { it.id == id } }
+        currentAttachments.update { files -> files.filterNot { it.id == id } }
     }
 
     /** 编辑用户消息：文案填入 Composer，附件回填待发送区；发送时截断该条及之后后重发。 */
     fun startEditUser(messageId: String) {
-        if (backgroundStreams.isStreaming(sessionId)) return
+        if (isSubmitting || backgroundStreams.isStreaming(sessionId)) return
         val msg = uiState.value.messages.firstOrNull {
             it.messageId == messageId && it.role == Role.USER
         } ?: return
@@ -861,13 +872,7 @@ class ChatViewModel(
                 msg.fragments.filterIsInstance<com.molagpt.app.core.model.MessageFragment.Text>()
                     .joinToString("\n") { it.markdown }
             }
-        _editingMessage.value = EditingUserMessage(
-            messageId = msg.messageId,
-            createdAt = msg.createdAt,
-            text = text,
-            revision = System.currentTimeMillis(),
-        )
-        _pendingAttachments.value = msg.attachments.map { attachment ->
+        editAttachments.value = msg.attachments.map { attachment ->
             val missing = attachment.localPath != null && !attachmentStore.exists(attachment.localPath)
             FileInfo(
                 id = attachment.id,
@@ -882,24 +887,27 @@ class ChatViewModel(
                 uploadStatus = if (missing || attachment.unavailable) UploadStatus.MISSING else UploadStatus.UPLOADED,
             )
         }
+        _editingMessage.value = EditingUserMessage(
+            messageId = msg.messageId,
+            createdAt = msg.createdAt,
+            text = text,
+            revision = System.currentTimeMillis(),
+        )
         _error.value = null
     }
 
     fun cancelEdit() {
-        if (_editingMessage.value == null) return
+        if (isSubmitting || _editingMessage.value == null) return
         _editingMessage.value = null
-        _pendingAttachments.value = emptyList()
+        editAttachments.value = emptyList()
     }
 
-    /** 已就绪可发送：MolaGPT 看服务端 url/sandboxPath，BYOK 看本地托管副本。 */
-    private val FileInfo.isReadyToSend: Boolean
-        get() = uploadStatus == UploadStatus.UPLOADED &&
-            (!url.isNullOrBlank() || !sandboxPath.isNullOrBlank() || !localPath.isNullOrBlank())
-
     fun send(text: String) {
-        val content = text.trim()
-        val hasReadyAttachment = _pendingAttachments.value.any { it.isReadyToSend }
-        if ((content.isEmpty() && !hasReadyAttachment) || backgroundStreams.isStreaming(sessionId)) return
+        val editing = _editingMessage.value
+        val content = (if (editing == null) draft.text.value else text).trim()
+        val attachments = currentAttachments.value
+        if (isSubmitting || backgroundStreams.isStreaming(sessionId)) return
+        if ((content.isEmpty() && attachments.isEmpty()) || attachments.any { !it.isReadyToSend }) return
         // 手动压缩还没写完检查点时发送，两边会各自压一遍。
         if (_manualCompacting.value) return
         val visibleModels = modelsFlow.value.filter { it.providerKind == _conversationProviderKind.value && it.supportsChat }
@@ -910,8 +918,8 @@ class ChatViewModel(
         _error.value = null
 
         // 非视觉 BYOK 模型上传图片时，必须开启外挂视觉工具，否则上游 API 会拒收 image_url。
-        val hasImageAttachment = _pendingAttachments.value.any {
-            it.isReadyToSend && AttachmentMime.isImage(AttachmentMime.resolve(it.mimeType, it.name))
+        val hasImageAttachment = attachments.any {
+            AttachmentMime.isImage(AttachmentMime.resolve(it.mimeType, it.name))
         }
         if (selectedModel.providerKind == ProviderKind.BYOK &&
             hasImageAttachment &&
@@ -927,90 +935,110 @@ class ChatViewModel(
             return
         }
 
+        val submittedDraftRevision = draft.textRevision
+        isSubmitting = true
         viewModelScope.launch {
-            // 编辑重发：先把当前整条时间线存为一个历史分支（可切回），再截断重发。
-            // 分支元数据要挂到下面新建的用户消息上——被编辑的那条马上就被删了。
-            var editSnapshotMeta: String? = null
-            val editing = _editingMessage.value
-            if (editing != null) {
-                editSnapshotMeta = chatRepository.snapshotBeforeEdit(sessionId, editing.messageId)
-                chatRepository.deleteMessagesFrom(sessionId, editing.createdAt)
-                _editingMessage.value = null
-            }
-            // 看「用户说过几句」而不是总条数：角色会话开场就有一条助手开场白，
-            // 用总条数判断会让首轮标题永远生成不出来。
-            val shouldGenerateTitle = chatRepository.userMessageCount(sessionId) == 0
-            val titleSeed = content.ifBlank { _pendingAttachments.value.firstOrNull()?.name ?: "附件" }
-            sessionRepository.ensure(
-                sessionId = sessionId,
-                title = titleFallback(titleSeed),
-                model = modelId,
-                providerId = selectedModel.providerId,
-                providerKind = selectedModel.providerKind,
-                personaId = _conversationPersonaId.value.takeIf { selectedModel.providerKind == ProviderKind.BYOK },
-            )
-            sessionRepository.updateModel(sessionId, modelId, selectedModel.providerId, selectedModel.providerKind)
-            // 会话行到这里才第一次落库。用户在首轮之前关掉的记忆开关必须跟着写进去——
-            // 否则进程重建后它会退回全局开关，用户以为关着的记忆又开了。
-            persistMemoryOverrides()
-            _conversationProviderId.value = selectedModel.providerId
-            _conversationProviderKind.value = selectedModel.providerKind
-            val now = System.currentTimeMillis()
-            val storedReady = _pendingAttachments.value
-                .filter { it.isReadyToSend }
-                .map { file ->
-                    val managed = !file.localPath.isNullOrBlank()
-                    Attachment(
-                        id = file.id,
-                        name = file.name,
-                        mimeType = AttachmentMime.resolve(file.mimeType, file.name),
-                        localPath = file.localPath,
-                        // 托管附件不落 remoteUrl/thumbnailUrl：显示用的 file:// 是绝对路径，跨安装即失效。
-                        remoteUrl = file.url.takeUnless { managed },
-                        thumbnailUrl = file.url.takeUnless { managed },
-                        sandboxPath = file.sandboxPath,
-                        label = AttachmentMime.label(file.mimeType, file.name),
-                        sizeBytes = file.sizeBytes,
-                    )
+            try {
+                val historyBeforeEdit = editing?.let { edit ->
+                    uiState.value.messages.filter { it.createdAt < edit.createdAt }
                 }
-            val prepared = if (selectedModel.providerKind == ProviderKind.BYOK) {
-                withContext(dispatchers.io) { prepareByokAttachments(storedReady) }
-            } else {
-                PreparedAttachments(storedReady, buildSandboxHint(storedReady))
-            }
-            val requestReady = prepared.attachments
-            val sendContent = prepared.hint?.let { appendHiddenSystemHint(content, it) } ?: content
-            val messageMetadata = buildMap {
-                if (sendContent != content) {
-                    put("sendContent", sendContent)
-                    put("displayContent", content)
+                // 编辑重发：先把当前整条时间线存为一个历史分支（可切回），再截断重发。
+                // 分支元数据要挂到下面新建的用户消息上——被编辑的那条马上就被删了。
+                val editSnapshotMeta = editing?.let { chatRepository.snapshotBeforeEdit(sessionId, it.messageId) }
+                // 看「用户说过几句」而不是总条数：角色会话开场就有一条助手开场白，
+                // 用总条数判断会让首轮标题永远生成不出来。
+                val shouldGenerateTitle = historyBeforeEdit?.none { it.role == Role.USER }
+                    ?: (chatRepository.userMessageCount(sessionId) == 0)
+                val titleSeed = content.ifBlank { attachments.firstOrNull()?.name ?: "附件" }
+                val allowed = sessionRepository.ensure(
+                    sessionId = sessionId,
+                    title = titleFallback(titleSeed),
+                    model = modelId,
+                    providerId = selectedModel.providerId,
+                    providerKind = selectedModel.providerKind,
+                    personaId = _conversationPersonaId.value.takeIf { selectedModel.providerKind == ProviderKind.BYOK },
+                    scope = openingIdentity,
+                )
+                if (!allowed) {
+                    _error.value = "登录状态已变化，请重试"
+                    return@launch
                 }
-                editSnapshotMeta?.let { put(EditSnapshots.KEY, it) }
-            }
-            val userMsg = ChatMessage(
-                messageId = Ids.newMessageId(),
-                sessionId = sessionId,
-                role = Role.USER,
-                status = MessageStatus.COMPLETE,
-                createdAt = now,
-                updatedAt = now,
-                rawText = content,
-                fragments = if (content.isBlank()) {
-                    emptyList()
+                sessionRepository.updateModel(sessionId, modelId, selectedModel.providerId, selectedModel.providerKind, openingIdentity)
+                // 会话行到这里才第一次落库。用户在首轮之前关掉的记忆开关必须跟着写进去——
+                // 否则进程重建后它会退回全局开关，用户以为关着的记忆又开了。
+                persistMemoryOverrides()
+                _conversationProviderId.value = selectedModel.providerId
+                _conversationProviderKind.value = selectedModel.providerKind
+                val now = System.currentTimeMillis()
+                val storedReady = attachments
+                    .map { file ->
+                        val managed = !file.localPath.isNullOrBlank()
+                        Attachment(
+                            id = file.id,
+                            name = file.name,
+                            mimeType = AttachmentMime.resolve(file.mimeType, file.name),
+                            localPath = file.localPath,
+                            // 托管附件不落 remoteUrl/thumbnailUrl：显示用的 file:// 是绝对路径，跨安装即失效。
+                            remoteUrl = file.url.takeUnless { managed },
+                            thumbnailUrl = file.url.takeUnless { managed },
+                            sandboxPath = file.sandboxPath,
+                            label = AttachmentMime.label(file.mimeType, file.name),
+                            sizeBytes = file.sizeBytes,
+                        )
+                    }
+                val prepared = if (selectedModel.providerKind == ProviderKind.BYOK) {
+                    withContext(dispatchers.io) { prepareByokAttachments(storedReady) }
                 } else {
-                    listOf(com.molagpt.app.core.model.MessageFragment.Text(Ids.newFragmentId(), content))
-                },
-                attachments = storedReady,
-                metadata = messageMetadata,
-            )
-            chatRepository.persistUserMessage(userMsg)
-            syncEngine.schedulePush(sessionId)
-            _pendingAttachments.value = emptyList()
-            startStream(
-                modelId = modelId,
-                latestUserMessage = userMsg.copy(attachments = requestReady),
-                generateTitleOnFinish = shouldGenerateTitle,
-            )
+                    PreparedAttachments(storedReady, buildSandboxHint(storedReady))
+                }
+                val requestReady = prepared.attachments
+                val sendContent = prepared.hint?.let { appendHiddenSystemHint(content, it) } ?: content
+                val messageMetadata = buildMap {
+                    if (sendContent != content) {
+                        put("sendContent", sendContent)
+                        put("displayContent", content)
+                    }
+                    editSnapshotMeta?.let { put(EditSnapshots.KEY, it) }
+                }
+                val userMsg = ChatMessage(
+                    messageId = Ids.newMessageId(),
+                    sessionId = sessionId,
+                    role = Role.USER,
+                    status = MessageStatus.COMPLETE,
+                    createdAt = now,
+                    updatedAt = now,
+                    rawText = content,
+                    fragments = if (content.isBlank()) {
+                        emptyList()
+                    } else {
+                        listOf(com.molagpt.app.core.model.MessageFragment.Text(Ids.newFragmentId(), content))
+                    },
+                    attachments = storedReady,
+                    metadata = messageMetadata,
+                )
+                chatRepository.persistUserMessage(userMsg, replacingFrom = editing?.createdAt, expected = openingIdentity) ?: return@launch
+                if (editing != null) {
+                    _editingMessage.value = null
+                    editAttachments.value = emptyList()
+                } else {
+                    val sentIds = attachments.mapTo(hashSetOf()) { it.id }
+                    draft.attachments.update { files -> files.filterNot { it.id in sentIds } }
+                    if (draft.clearText(submittedDraftRevision)) savedState["draftText"] = ""
+                }
+                syncEngine.schedulePush(sessionId)
+                startStream(
+                    modelId = modelId,
+                    latestUserMessage = userMsg.copy(attachments = requestReady),
+                    generateTitleOnFinish = shouldGenerateTitle,
+                    historyOverride = historyBeforeEdit,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _error.value = error.message ?: "发送失败"
+            } finally {
+                isSubmitting = false
+            }
         }
     }
 
@@ -1161,7 +1189,7 @@ class ChatViewModel(
     /** 重发：保留旧答案为一个版本，重新生成一版并切到新版本（可在版本间切换）。
      *  [overrideModelId] 非空表示换模型重试（对齐 Web 的 startRegenerate(overrideModelKey)）。 */
     fun regenerateLast(overrideModelId: String? = null) {
-        if (backgroundStreams.isStreaming(sessionId) || _manualCompacting.value) return
+        if (isSubmitting || backgroundStreams.isStreaming(sessionId) || _manualCompacting.value) return
         val msgs = uiState.value.messages
         // MolaGPT 对齐 Web：只有停在最新编辑版本时才能重试（对应 Web 的「只能重试最新一条回答」）。
         // 历史快照是冻结的，在其上重生成会在切换分支后丢失（改动无处保存）。BYOK 无此限制——
@@ -1190,12 +1218,13 @@ class ChatViewModel(
                 modelId,
                 selectedModel?.providerId ?: _conversationProviderId.value,
                 selectedModel?.providerKind ?: _conversationProviderKind.value,
+                openingIdentity,
             )
             selectedModel?.let {
                 _conversationProviderId.value = it.providerId
                 _conversationProviderKind.value = it.providerKind
             }
-            chatRepository.deleteMessagesFrom(sessionId, lastAssistant.createdAt)
+            chatRepository.deleteMessagesFrom(sessionId, lastAssistant.createdAt, openingIdentity)
             startStream(modelId, priorAttempts = prior, historyOverride = historyForRetry)
         }
     }
@@ -1205,7 +1234,7 @@ class ChatViewModel(
      * **不重新请求模型**——这是「编辑回答」，不是「重新生成」。
      */
     fun editAssistant(messageId: String, text: String) {
-        if (backgroundStreams.isStreaming(sessionId)) return
+        if (isSubmitting || backgroundStreams.isStreaming(sessionId)) return
         // 仅 BYOK：MolaGPT 会话与网页端双向同步，改回答要连同那边的版本语义一起想清楚，
         // 不在这次范围内。用户消息编辑、重试、EditSnapshots 两个阵营都照旧。
         if (_conversationProviderKind.value != ProviderKind.BYOK) return
@@ -1238,19 +1267,19 @@ class ChatViewModel(
         )
         backgroundStreams.updateInFlight(sessionId, updated)
         viewModelScope.launch {
-            chatRepository.updateMessage(updated)
+            chatRepository.updateMessage(updated, openingIdentity)
             syncEngine.schedulePush(sessionId)
         }
     }
 
     /** 切换用户消息的编辑分支（delta = -1/+1）：整体换回该分支的时间线。 */
     fun navEditSnapshot(messageId: String, delta: Int) {
-        if (backgroundStreams.isStreaming(sessionId)) return
+        if (isSubmitting || backgroundStreams.isStreaming(sessionId)) return
         // BYOK 纯本地、无 Web 冻结快照的约束，离开历史分支时把改动写回该分支（分支可独立编辑）；
         // MolaGPT 保持 Web 语义，历史分支冻结。
         val persistBack = _conversationProviderKind.value == ProviderKind.BYOK
         viewModelScope.launch {
-            if (chatRepository.navigateEditSnapshot(sessionId, messageId, delta, persistBack)) {
+            if (chatRepository.navigateEditSnapshot(sessionId, messageId, delta, persistBack, openingIdentity)) {
                 // 时间线整体换过、消息 id 已重建，旧的 in-flight 帧再叠加就会多出一条。
                 backgroundStreams.clearCompletedInFlight(sessionId)
                 syncEngine.schedulePush(sessionId)
@@ -1270,7 +1299,7 @@ class ChatViewModel(
     /** 在重试版本间切换（delta = -1/+1）。改 in-flight 帧并落库,头部模型名随版本变化。 */
     fun navVersion(messageId: String, delta: Int) {
         // 生成中禁止切换：与 navEditSnapshot、Web 一致，否则切换写库会与流式写入相互覆盖。
-        if (backgroundStreams.isStreaming(sessionId)) return
+        if (isSubmitting || backgroundStreams.isStreaming(sessionId)) return
         val msg = uiState.value.messages.firstOrNull { it.messageId == messageId } ?: return
         val attempts = RetryAttempts.decode(msg.metadata[RetryAttempts.KEY_ATTEMPTS])
         if (attempts.size <= 1) return
@@ -1297,7 +1326,7 @@ class ChatViewModel(
         )
         backgroundStreams.updateInFlight(sessionId, updated)
         viewModelScope.launch {
-            chatRepository.updateMessage(updated)
+            chatRepository.updateMessage(updated, openingIdentity)
             syncEngine.schedulePush(sessionId)
         }
     }
@@ -1388,7 +1417,7 @@ class ChatViewModel(
         viewModelScope.launch { runCatching { persistAutoCompaction(enabled) } }
     }
 
-    private fun startStream(
+    private suspend fun startStream(
         modelId: String,
         latestUserMessage: ChatMessage? = null,
         /** 仅首轮为 true：本轮答完后由后台流管理器起标题（重试/重生成不改已有标题）。 */
@@ -1396,116 +1425,113 @@ class ChatViewModel(
         priorAttempts: List<RetryAttempt> = emptyList(),
         historyOverride: List<ChatMessage>? = null,
     ) {
-        viewModelScope.launch {
-            // 取代同会话上一条流由 backgroundStreams.start() 内部完成（取消旧 job + 停旧服务端流 + 落新任务记录）；
-            // 此处不再额外 stop()，否则其异步 removeStreamTask 会与 start 的 persistStreamTask 竞争、误删新任务。
-            // 拉历史 + 刚落库的用户消息作为上下文。[historyOverride] 供重试显式传入截取好的上下文——
-            // 删库后 uiState（combine + Room Flow）不会同步刷新，直接读会把旧回答当上下文带上。
-            val historySnapshot = (historyOverride ?: uiState.value.messages).filter { it.role != Role.SYSTEM }
-            val history = if (latestUserMessage == null) {
-                historySnapshot
-            } else {
-                historySnapshot.filterNot { it.messageId == latestUserMessage.messageId } + latestUserMessage
-            }
-            val assistantId = Ids.newMessageId()
-            val streamSessionId = Ids.newSessionId()
-            val providerModel = modelsFlow.value.firstOrNull {
-                it.id == modelId &&
-                    it.providerKind == _conversationProviderKind.value &&
-                    (_conversationProviderId.value == null || it.providerId == _conversationProviderId.value)
-            } ?: modelsFlow.value.firstOrNull {
-                it.id == modelId && it.providerKind == _conversationProviderKind.value
-            }
-            val modelDisplayName = providerModel?.displayName ?: modelId
-            val settings = settingsFlow.value ?: AppSettings()
-            val skills = if (_conversationProviderKind.value == ProviderKind.BYOK && providerModel?.supportsToolCalling == true) {
-                enabledSkills(skillRepository.skills.value, settings.disabledSkillIds)
-            } else emptyList()
-            val requestTools = resolveRequestTools(providerModel).copy(skills = skills.isNotEmpty())
-            // 角色注入：仅 BYOK 模型，把当前角色的 system prompt（插值后）作为首条 system 消息 prepend。
-            // 官方账号模型不注入（服务端已有系统提示 + 个性化记忆）。该 system 消息不落库，仅用于本次请求。
-            val effectiveKind = providerModel?.providerKind ?: _conversationProviderKind.value
-            // 已被压缩的消息不会发出去，附件也就不必重新编码。
-            val coverage = if (effectiveKind == ProviderKind.BYOK) {
-                runCatching { contextCompactor?.coverage(sessionId, history) }.getOrNull()
-            } else {
-                null
-            }
-            val requestHistory = if (effectiveKind == ProviderKind.BYOK) {
-                withContext(dispatchers.io) {
-                    history.map { message ->
-                        if (message.attachments.isEmpty() || coverage?.coveredIds?.contains(message.messageId) == true) {
-                            message
-                        } else {
-                            message.copy(attachments = hydrateByokAttachments(message.attachments))
-                        }
+        // 取代同会话上一条流由 backgroundStreams.start() 内部完成（取消旧 job + 停旧服务端流 + 落新任务记录）；
+        // 此处不再额外 stop()，否则其异步 removeStreamTask 会与 start 的 persistStreamTask 竞争、误删新任务。
+        // 拉历史 + 刚落库的用户消息作为上下文。[historyOverride] 供重试显式传入截取好的上下文——
+        // 删库后 uiState（combine + Room Flow）不会同步刷新，直接读会把旧回答当上下文带上。
+        val historySnapshot = (historyOverride ?: uiState.value.messages).filter { it.role != Role.SYSTEM }
+        val history = if (latestUserMessage == null) {
+            historySnapshot
+        } else {
+            historySnapshot.filterNot { it.messageId == latestUserMessage.messageId } + latestUserMessage
+        }
+        val assistantId = Ids.newMessageId()
+        val streamSessionId = Ids.newSessionId()
+        val providerModel = modelsFlow.value.firstOrNull {
+            it.id == modelId &&
+                it.providerKind == _conversationProviderKind.value &&
+                (_conversationProviderId.value == null || it.providerId == _conversationProviderId.value)
+        } ?: modelsFlow.value.firstOrNull {
+            it.id == modelId && it.providerKind == _conversationProviderKind.value
+        }
+        val modelDisplayName = providerModel?.displayName ?: modelId
+        val settings = settingsFlow.value ?: AppSettings()
+        val skills = if (_conversationProviderKind.value == ProviderKind.BYOK && providerModel?.supportsToolCalling == true) {
+            enabledSkills(skillRepository.skills.value, settings.disabledSkillIds)
+        } else emptyList()
+        val requestTools = resolveRequestTools(providerModel).copy(skills = skills.isNotEmpty())
+        // 角色注入：仅 BYOK 模型，把当前角色的 system prompt（插值后）作为首条 system 消息 prepend。
+        // 官方账号模型不注入（服务端已有系统提示 + 个性化记忆）。该 system 消息不落库，仅用于本次请求。
+        val effectiveKind = providerModel?.providerKind ?: _conversationProviderKind.value
+        // 已被压缩的消息不会发出去，附件也就不必重新编码。
+        val coverage = if (effectiveKind == ProviderKind.BYOK) {
+            runCatching { contextCompactor?.coverage(sessionId, history) }.getOrNull()
+        } else {
+            null
+        }
+        val requestHistory = if (effectiveKind == ProviderKind.BYOK) {
+            withContext(dispatchers.io) {
+                history.map { message ->
+                    if (message.attachments.isEmpty() || coverage?.coveredIds?.contains(message.messageId) == true) {
+                        message
+                    } else {
+                        message.copy(attachments = hydrateByokAttachments(message.attachments))
                     }
                 }
-            } else {
-                history
             }
-            val messages = if (effectiveKind == ProviderKind.BYOK) {
-                val vars = buildPromptVariables(providerModel, modelDisplayName)
-                // 角色卡（酒馆）走完整组装：人设分段、示例对话、世界书按位置插入。
-                // 普通助手角色仍是「一段 system 提示」那条老路，没必要为它跑一遍匹配器。
-                val role = buildRolePrompt(vars, requestHistory, streamSessionId)
-                val personaText = role?.systemPrompt ?: SystemPromptComposer.compose(
-                    personaPrompt = activePersona.value?.systemPrompt,
-                    conversationPrompt = _conversationSystemPrompt.value,
-                    mode = _conversationSystemPromptMode.value,
-                    vars = vars,
-                )
-                // 顺序固定为 角色提示 → 会话提示 → 记忆块 → 记忆使用规则 → 可视化协议：
-                // 记忆是背景数据，必须排在角色定义之后，不能反过来影响助手身份。
-                // 可视化协议是这台设备能渲染什么，与桌面端一样放在最后。
-                val visualAnswers = (settingsFlow.value ?: AppSettings()).visualAnswersEnabled
-                val sysText = listOfNotNull(
-                    personaText?.takeIf { it.isNotBlank() },
-                    buildMemoryContext(requestTools),
-                    skillCatalogForPrompt(skills),
-                    VisualAnswerPrompt.TEXT.takeIf { visualAnswers },
-                ).joinToString("\n\n").takeIf { it.isNotBlank() }
-                val body = applyRolePlan(requestHistory, role?.plan)
-                if (sysText != null) listOf(systemMessage(sysText)) + body else body
-            } else {
-                requestHistory
-            }
-            // 按当前模型推理配置校正（send/retry 都经此单一出口）：常开模型强制开启；档位越界
-            // （如 Kimi K3 不支持 medium）回落到该 kind 默认档，杜绝把不支持的 reasoning_effort 发到上游。
-            val thinkingCfg = providerModel?.thinkingConfig
-            val alwaysOnThinking = thinkingCfg?.alwaysOn == true ||
-                com.molagpt.app.core.model.ThinkingKinds.isKimiK3(modelId)
-            val effectiveEffort = if (thinkingCfg != null) {
-                val levels = com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(thinkingCfg)
-                if (levels.isNotEmpty() && _reasoningEffort.value !in levels) {
-                    com.molagpt.app.core.model.ThinkingKinds.resolveDefaultEffort(thinkingCfg)
-                } else {
-                    _reasoningEffort.value
-                }
+        } else {
+            history
+        }
+        val messages = if (effectiveKind == ProviderKind.BYOK) {
+            val vars = buildPromptVariables(providerModel, modelDisplayName)
+            // 角色卡（酒馆）走完整组装：人设分段、示例对话、世界书按位置插入。
+            // 普通助手角色仍是「一段 system 提示」那条老路，没必要为它跑一遍匹配器。
+            val role = buildRolePrompt(vars, requestHistory, streamSessionId)
+            val personaText = role?.systemPrompt ?: SystemPromptComposer.compose(
+                personaPrompt = activePersona.value?.systemPrompt,
+                conversationPrompt = _conversationSystemPrompt.value,
+                mode = _conversationSystemPromptMode.value,
+                vars = vars,
+            )
+            // 顺序固定为 角色提示 → 会话提示 → 记忆块 → 记忆使用规则 → 可视化协议：
+            // 记忆是背景数据，必须排在角色定义之后，不能反过来影响助手身份。
+            // 可视化协议是这台设备能渲染什么，与桌面端一样放在最后。
+            val visualAnswers = (settingsFlow.value ?: AppSettings()).visualAnswersEnabled
+            val sysText = listOfNotNull(
+                personaText?.takeIf { it.isNotBlank() },
+                buildMemoryContext(requestTools),
+                skillCatalogForPrompt(skills),
+                VisualAnswerPrompt.TEXT.takeIf { visualAnswers },
+            ).joinToString("\n\n").takeIf { it.isNotBlank() }
+            val body = applyRolePlan(requestHistory, role?.plan)
+            if (sysText != null) listOf(systemMessage(sysText)) + body else body
+        } else {
+            requestHistory
+        }
+        // 按当前模型推理配置校正（send/retry 都经此单一出口）：常开模型强制开启；档位越界
+        // （如 Kimi K3 不支持 medium）回落到该 kind 默认档，杜绝把不支持的 reasoning_effort 发到上游。
+        val thinkingCfg = providerModel?.thinkingConfig
+        val alwaysOnThinking = thinkingCfg?.alwaysOn == true ||
+            com.molagpt.app.core.model.ThinkingKinds.isKimiK3(modelId)
+        val effectiveEffort = if (thinkingCfg != null) {
+            val levels = com.molagpt.app.core.model.ThinkingKinds.resolveEffortLevels(thinkingCfg)
+            if (levels.isNotEmpty() && _reasoningEffort.value !in levels) {
+                com.molagpt.app.core.model.ThinkingKinds.resolveDefaultEffort(thinkingCfg)
             } else {
                 _reasoningEffort.value
             }
-            val request = ChatRequest(
-                modelId = modelId,
-                modelDisplayName = modelDisplayName,
-                providerId = providerModel?.providerId ?: _conversationProviderId.value ?: ProviderIds.MOLAGPT,
-                providerKind = providerModel?.providerKind ?: _conversationProviderKind.value,
-                messages = messages,
-                sessionId = sessionId,
-                streamSessionId = streamSessionId,
-                conversationId = conversationId,
-                temperature = temperature,
-                useThinking = _useThinking.value || alwaysOnThinking,
-                reasoningEffort = effectiveEffort,
-                enabledTools = requestTools,
-                rolePlay = effectiveKind == ProviderKind.BYOK && activePersona.value?.isRolePlay == true,
-                contextCheckpointId = coverage?.checkpointId,
-                availableSkills = skills,
-            )
-            backgroundStreams.start(request, assistantId, throttleMs, priorAttempts, generateTitleOnFinish)
-            // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，
-            // Room 落库的同一条消息不会与之重复显示，也避免“清空→回灌”的瞬时闪烁。
+        } else {
+            _reasoningEffort.value
         }
+        val request = ChatRequest(
+            modelId = modelId,
+            modelDisplayName = modelDisplayName,
+            providerId = providerModel?.providerId ?: _conversationProviderId.value ?: ProviderIds.MOLAGPT,
+            providerKind = providerModel?.providerKind ?: _conversationProviderKind.value,
+            messages = messages,
+            sessionId = sessionId,
+            streamSessionId = streamSessionId,
+            conversationId = SyncMapper.conversationIdOf(sessionId),
+            useThinking = _useThinking.value || alwaysOnThinking,
+            reasoningEffort = effectiveEffort,
+            enabledTools = requestTools,
+            rolePlay = effectiveKind == ProviderKind.BYOK && activePersona.value?.isRolePlay == true,
+            contextCheckpointId = coverage?.checkpointId,
+            availableSkills = skills,
+        )
+        backgroundStreams.start(request, assistantId, throttleMs, priorAttempts, generateTitleOnFinish, openingIdentity)
+        // 说明：流正常结束后 manager 保留最终 in-flight 帧；combine 的合并逻辑按 messageId 去重，
+        // Room 落库的同一条消息不会与之重复显示，也避免“清空→回灌”的瞬时闪烁。
     }
 
     /**
@@ -1706,6 +1732,7 @@ class ChatViewModel(
         val conversation = sessionRepository.get(sessionId) ?: return false
         _conversationProviderId.value = conversation.providerId ?: ProviderIds.MOLAGPT
         _conversationProviderKind.value = conversation.providerKind
+        draft.byok = conversation.providerKind == ProviderKind.BYOK
         _conversationPersonaId.value = conversation.personaId
         _conversationSystemPrompt.value = conversation.systemPrompt
         _conversationSystemPromptMode.value = conversation.systemPromptMode

@@ -27,6 +27,14 @@ data class ByokProvider(
     fun imageFormatFor(modelId: String): ByokImageFormat =
         models.firstOrNull { it.id == modelId }?.imageFormat ?: imageFormat
 
+    val isOfficialOpenAiResponses: Boolean
+        get() = type == ByokProviderType.OPENAI_RESPONSE && runCatching {
+            val url = java.net.URI(baseUrl.trimEnd('/') + "/" + chatPath.trimStart('/'))
+            url.scheme.equals("https", ignoreCase = true) &&
+                url.host.equals("api.openai.com", ignoreCase = true) && (url.port == -1 || url.port == 443) &&
+                (url.rawPath == "/v1/responses" || url.rawPath == "/v1/responses/")
+        }.getOrDefault(false)
+
     val isOpenRouter: Boolean
         get() {
             val host = runCatching { java.net.URI(baseUrl.trim()).host.orEmpty() }.getOrDefault("").lowercase()
