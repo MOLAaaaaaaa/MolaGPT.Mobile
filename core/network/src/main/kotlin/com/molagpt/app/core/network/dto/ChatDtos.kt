@@ -23,6 +23,7 @@ data class ChatRequestBody(
     @SerialName("privacy_mode") val privacyMode: Boolean,
     @SerialName("client_features") val clientFeatures: Map<String, Int>,
     @SerialName("molagpt_routes") val molaGptRoutes: JsonObject? = null,
+    @SerialName("mola_error_protocol") val molaErrorProtocol: Int = 1,
 )
 
 /** content 使用 JsonElement，支持纯文本 String 或多模态数组 image_url 等。 */

@@ -104,7 +104,22 @@ sealed interface MessageFragment {
     /** 错误片段（流中错误、被拦截等）。 */
     @Serializable
     @SerialName("error")
-    data class Error(override val id: String, val message: String) : MessageFragment
+    data class Error(
+        override val id: String,
+        val message: String,
+        @SerialName("error_type") val type: String? = null,
+        val action: String? = null,
+        val retryAt: Long? = null,
+        val requestError: kotlinx.serialization.json.JsonObject? = null,
+    ) : MessageFragment {
+        fun retryBlock(currentModel: String?, previousModel: String?, now: Long = System.currentTimeMillis()): String? {
+            if (type == "request_already_accepted") return message
+            val seconds = ((retryAt ?: 0L) - now + 999L) / 1000L
+            if (seconds > 0) return "$seconds 秒后重试"
+            if (action == "switch_model" && currentModel == previousModel) return "请切换模型后重试。"
+            return null
+        }
+    }
 }
 
 enum class ToolStatus { RUNNING, SUCCESS, FAILED, CANCELLED }

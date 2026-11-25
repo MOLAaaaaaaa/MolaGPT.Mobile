@@ -40,23 +40,53 @@ class StreamParser(
      * （见 ByokChatService 的 SSE 循环：payload.isDone 时无条件再调一次 finishTail）。
      */
     private var lastUsage: Usage? = null
+    // Only hold a possible prefix of the fixed old provider notice on official turns.
+    private var legacyQuotaCandidate: StringBuilder? = if (serverTurn) StringBuilder() else null
+
+    private fun feedVisibleText(text: String, events: MutableList<StreamEvent>) {
+        val candidate = legacyQuotaCandidate
+        if (candidate == null) {
+            webArtifacts.feed(text).forEach { appendArtifact(it, events) }
+            return
+        }
+        candidate.append(text)
+        val probe = candidate.toString().trimStart()
+        if (candidate.length <= LEGACY_SHARED_QUOTA_NOTICE.length + 64
+            && (LEGACY_SHARED_QUOTA_NOTICE.startsWith(probe) || probe.trimEnd() == LEGACY_SHARED_QUOTA_NOTICE)) return
+        legacyQuotaCandidate = null
+        webArtifacts.feed(candidate.toString()).forEach { appendArtifact(it, events) }
+    }
+
+    private fun flushLegacyQuota(events: MutableList<StreamEvent>): Boolean {
+        val candidate = legacyQuotaCandidate ?: return false
+        legacyQuotaCandidate = null
+        val text = candidate.toString()
+        if (text.trim() == LEGACY_SHARED_QUOTA_NOTICE) return true
+        if (text.isNotEmpty()) webArtifacts.feed(text).forEach { appendArtifact(it, events) }
+        return false
+    }
 
     fun parse(payload: SsePayload): List<StreamEvent> {
         if (payload.isDone) return finishTail("stop")
         val raw = payload.data
         if (raw.isBlank()) return emptyList()
         val root = runCatching { json.parseToJsonElement(raw) }.getOrNull() as? JsonObject
-            ?: return emptyList()
 
         val events = ArrayList<StreamEvent>(2)
-        (root["molagpt_subagents"] as? JsonObject)?.let { events.add(StreamEvent.Subagents(it)) }
-
-        // —— 流内错误 ——
-        root["error"]?.let { err ->
-            val msg = (err as? JsonPrimitive)?.contentOrNull
-                ?: (err as? JsonObject)?.get("message")?.prim()?.contentOrNull
-            if (!msg.isNullOrBlank()) return listOf(StreamEvent.Failed(msg))
+        val failure = if (root == null && payload.event in listOf("error", "mola_error", "response.failed"))
+            providerChatFailure(raw) else parseMolaStreamFailure(root, payload.event)
+        if (failure != null) {
+            val legacy = flushLegacyQuota(events)
+            webArtifacts.flush().forEach { appendArtifact(it, events) }
+            val tail = think.flush()
+            if (tail.visible.isNotEmpty() || tail.thinking.isNotEmpty())
+                events.add(StreamEvent.Delta(text = tail.visible.ifEmpty { null }, thinking = tail.thinking.ifEmpty { null }))
+            events.add(if (legacy && failure.type in listOf(null, "upstream_unavailable", "server_error", "shared_quota_exhausted"))
+                sharedQuotaFailure() else failure)
+            return events
         }
+        if (root == null) return emptyList()
+        (root["molagpt_subagents"] as? JsonObject)?.let { events.add(StreamEvent.Subagents(it)) }
 
         // —— 来源 / 引用 ——
         parseSources(root)?.let { if (it.isNotEmpty()) events.add(StreamEvent.Sources(it)) }
@@ -75,9 +105,7 @@ class StreamParser(
             events.add(StreamEvent.Delta(thinking = thinking))
         }
         val appendText: (String) -> Unit = { text ->
-            webArtifacts.feed(text).forEach { artifact ->
-                appendArtifact(artifact, events)
-            }
+            feedVisibleText(text, events)
         }
         forEachOpenAiContentPart(
             delta?.get("content") ?: root["content"] ?: responseTextDelta(root, eventType)?.let(::JsonPrimitive),
@@ -107,6 +135,10 @@ class StreamParser(
     /** 流自然结束（EOF / [DONE]）时调用，冲刷 splitter 残余并补一个 Finish。 */
     fun finishTail(reason: String?, usage: Usage? = null): List<StreamEvent> {
         val out = ArrayList<StreamEvent>(2)
+        if (flushLegacyQuota(out)) {
+            out.add(sharedQuotaFailure())
+            return out
+        }
         webArtifacts.flush().forEach { artifact ->
             appendArtifact(artifact, out)
         }

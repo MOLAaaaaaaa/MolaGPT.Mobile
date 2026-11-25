@@ -26,6 +26,22 @@ import kotlinx.coroutines.CancellationException
 /** 鉴权相关低层调用（Ktor）。编排（存 token、UA hash 校验）在 feature:auth 的 MolaGptAuthService。 */
 class AuthApi(private val http: MolaHttp) {
 
+    suspend fun accountSecurityLink(jwt: String): String = withTimeoutOrNull(20_000L) {
+        val response = http.accountClient.post(MolaEndpoints.absolute("api/auth/risk_appeal.php")) {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Authorization, "Bearer $jwt")
+            setBody(buildJsonObject { put("operation", kotlinx.serialization.json.JsonPrimitive("handoff")) })
+        }
+        if (response.status.value == 401) throw MolaAuthExpiredException()
+        if (!response.status.isSuccess()) {
+            throw MolaApiException(response.status.value, "暂时无法打开账户安全，请稍后重试。")
+        }
+        val path = http.json.parseToJsonElement(response.bodyAsText()).jsonObject["path"]?.jsonPrimitive?.contentOrNull
+        val prefix = "/v2/api/auth/risk_appeal.php?handoff="
+        if (path == null || !path.startsWith(prefix)) throw MolaApiException(null, "账户安全入口无效。")
+        "https://chatgpt.wljay.cn" + path
+    } ?: throw MolaApiException(null, "打开账户安全超时，请重试。")
+
     suspend fun logout(jwt: String): Boolean {
         val resp = http.accountClient.post(MolaEndpoints.absolute(MolaEndpoints.LOGOUT)) {
             header(HttpHeaders.Authorization, "Bearer $jwt")
@@ -48,6 +64,10 @@ class AuthApi(private val http: MolaHttp) {
         if (!resp.status.isSuccess()) {
             // 登录限频（429）、账号服务不可用（503）都带 message，只显示那一句
             val body = resp.bodyAsText()
+            if (resp.status.value == 403) {
+                val limited = runCatching { http.json.decodeFromString<LoginResponse>(body) }.getOrNull()
+                if (limited?.appealOnly == true) return@withTimeoutOrNull limited
+            }
             return@withTimeoutOrNull LoginResponse(
                 success = false,
                 message = molaServerErrorMessage(resp.status.value, body)
@@ -91,6 +111,10 @@ class AuthApi(private val http: MolaHttp) {
         }
         if (!resp.status.isSuccess()) {
             val body = resp.bodyAsText()
+            if (resp.status.value == 403) {
+                val limited = runCatching { http.json.decodeFromString<LoginResponse>(body) }.getOrNull()
+                if (limited?.appealOnly == true) return@withTimeoutOrNull limited
+            }
             return@withTimeoutOrNull LoginResponse(
                 success = false,
                 message = molaServerErrorMessage(resp.status.value, body)

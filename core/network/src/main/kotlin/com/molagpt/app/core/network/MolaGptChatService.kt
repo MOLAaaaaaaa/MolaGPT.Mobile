@@ -26,8 +26,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.addJsonObject
@@ -109,19 +111,30 @@ class MolaGptChatService(
         } catch (c: CancellationException) {
             throw c
         } catch (e: MolaAuthExpiredException) {
-            throw e
+            emit(StreamEvent.Failed("登录状态已失效，请重新登录。", "auth_expired", "sign_in"))
+        } catch (e: MolaChatRejectedException) {
+            if (!resumeUntilFinished(apiUrl, body.sessionId, offset, parser, e, waitForRun = true)) emit(e.failure)
         } catch (e: IOException) {
             if (currentCoroutineContext().isActive) {
                 val restored = resumeUntilFinished(apiUrl, body.sessionId, offset, parser, e)
-                if (!restored) emit(StreamEvent.Failed("网络中断，恢复失败"))
+                if (!restored) emit(StreamEvent.Failed("网络中断，回答没有完成。", "interrupted", "retry"))
             }
         } catch (e: Exception) {
             // 用户停止会导致连接被取消并抛 IOException——此时协程已不活跃，安静收尾。
             if (currentCoroutineContext().isActive) {
                 Logger.w("MolaChat", "stream error", e)
-                emit(StreamEvent.Failed(e.message ?: "网络错误"))
+                emit(StreamEvent.Failed("服务暂时不可用，请稍后重试。", "server_error", "retry"))
             }
         }
+    }.catch { error ->
+        val failure = when (error) {
+            is MolaChatRejectedException -> error.failure
+            is MolaAuthExpiredException -> StreamEvent.Failed("登录状态已失效，请重新登录。", "auth_expired", "sign_in")
+            is IOException -> StreamEvent.Failed("无法连接服务，请检查网络后重试。", "network", "retry")
+            is MolaApiException -> StreamEvent.Failed("服务暂时不可用，请稍后重试。", "server_error", "retry")
+            else -> throw error
+        }
+        emit(failure)
     }.flowOn(dispatchers.io)
 
     override suspend fun stopGeneration(streamSessionId: String) {
@@ -170,10 +183,10 @@ class MolaGptChatService(
             )
             if (!finished) throw IOException("流式连接提前结束")
         } catch (e: MolaAuthExpiredException) {
-            throw e
+            emit(StreamEvent.Failed("登录状态已失效，请重新登录。", "auth_expired", "sign_in"))
         } catch (e: IOException) {
             val restored = resumeUntilFinished(apiUrl, streamSessionId, counter, parser, e)
-            if (!restored) emit(StreamEvent.Failed("网络中断，恢复失败"))
+            if (!restored) emit(StreamEvent.Failed("网络中断，回答没有完成。", "interrupted", "retry"))
         }
     }.flowOn(dispatchers.io)
 
@@ -292,9 +305,11 @@ class MolaGptChatService(
             .post(bodyJson.toRequestBody(JSON_MEDIA))
             .build()
         http.accountOkHttp.newCall(req).execute().use { resp ->
-            if (resp.code == 401) throw MolaAuthExpiredException()
             val text = resp.body?.string().orEmpty().trimStart('\uFEFF')
             if (!resp.isSuccessful) {
+                val root = runCatching { http.json.parseToJsonElement(text) as? JsonObject }.getOrNull()
+                parseMolaChatFailure(root?.get("mola_error"))?.let { throw MolaChatRejectedException(it) }
+                if (resp.code == 401) throw MolaAuthExpiredException()
                 val detail = molaServerErrorMessage(resp.code, text)
                 throw MolaApiException(resp.code, detail ?: "MolaGPT Routes 请求失败：HTTP ${resp.code} ${text.take(160)}")
             }
@@ -395,7 +410,8 @@ class MolaGptChatService(
         streamSessionId: String,
         offset: ResumeOffset,
         parser: StreamParser,
-        firstError: IOException,
+        firstError: Exception,
+        waitForRun: Boolean = false,
     ): Boolean {
         Logger.w("MolaChat", "stream interrupted, resume from offset=${offset.value}", firstError)
         var delayMs = INITIAL_RESUME_DELAY_MS
@@ -410,6 +426,7 @@ class MolaGptChatService(
                     operationName = "流恢复",
                     parser = parser,
                     offset = offset,
+                    waitForRun = waitForRun,
                 )
                 if (finished) return true
                 Logger.w("MolaChat", "resume stream ended before finish, offset=${offset.value}")
@@ -428,31 +445,35 @@ class MolaGptChatService(
         operationName: String,
         parser: StreamParser,
         offset: ResumeOffset,
+        waitForRun: Boolean = false,
     ): Boolean {
         val call = streamClient.newCall(request)
         try {
             call.execute().use { resp ->
-                if (resp.code == 401) throw MolaAuthExpiredException()
                 if (!resp.isSuccessful) {
-                    // 服务端给了原因（请登录后使用 / 该模型暂不可用 / 人数较多）就直接说原因
-                    val detail = molaServerErrorMessage(resp.code, resp.body?.string().orEmpty())
-                    throw MolaApiException(resp.code, detail ?: "$operationName 失败：HTTP ${resp.code}")
+                    val raw = resp.body?.string().orEmpty()
+                    val root = runCatching { http.json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+                    val business = parseMolaChatFailure(root?.get("mola_error"))
+                    if (business == null && resp.code == 401) throw MolaAuthExpiredException()
+                    if (resp.code == 404 && waitForRun) return false
+                    val failure = business ?: parseMolaStreamFailure(root, statusCode = resp.code)
+                        ?: providerChatFailure(molaServerErrorMessage(resp.code, raw), resp.code)
+                    if (failure.type == "request_already_accepted" && !waitForRun)
+                        throw MolaChatRejectedException(failure)
+                    emit(failure.copy(retryAfter = failure.retryAfter ?: resp.header("Retry-After")?.toIntOrNull()))
+                    return true
                 }
                 val source = resp.body?.source() ?: throw MolaApiException(resp.code, "$operationName 响应为空")
                 var finished = false
-                sseFlow { source.readUtf8Line() }.collect { payload ->
+                sseFlow { source.readUtf8Line() }.takeWhile { payload ->
                     currentCoroutineContext().ensureActive()
-                    if (payload.isDone) {
-                        parser.finishTail("stop").forEach { emit(it) }
-                        finished = true
-                        return@collect
-                    }
-                    if (payload.countsForResumeOffset()) offset.value++
-                    parser.parse(payload).forEach { ev ->
-                        emit(ev)
-                        if (ev is StreamEvent.Finish) finished = true
-                    }
-                }
+                    if (!payload.isDone && payload.countsForResumeOffset()) offset.value++
+                    val events = parser.parse(payload)
+                    for (event in events) emit(event)
+                    val failed = events.any { it is StreamEvent.Failed }
+                    finished = finished || payload.isDone || failed || events.any { it is StreamEvent.Finish }
+                    !payload.isDone && !failed
+                }.collect { }
                 return finished
             }
         } finally {
@@ -466,6 +487,7 @@ class MolaGptChatService(
             put("action", "resume")
             put("session_id", streamSessionId)
             put("offset", offset)
+            put("mola_error_protocol", 1)
         }
         return Request.Builder()
             .url(MolaEndpoints.absolute(apiUrl))

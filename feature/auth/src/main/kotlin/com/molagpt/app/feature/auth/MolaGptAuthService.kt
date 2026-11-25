@@ -32,6 +32,15 @@ class MolaGptAuthService(
     private val sessionGate = Any()
     private var sessionGeneration = 0L
     private var lastOAuthCode: String? = null
+    private var appealToken: String? = null
+    private val _canAppeal = MutableStateFlow(false)
+    val canAppeal: StateFlow<Boolean> = _canAppeal.asStateFlow()
+
+    suspend fun appealLink(): String? {
+        val token = synchronized(sessionGate) { appealToken } ?: return null
+        val link = authApi.accountSecurityLink(token)
+        return synchronized(sessionGate) { link.takeIf { appealToken == token } }
+    }
     val isLoggedIn: Boolean get() = credentials.isLoggedIn
     val username: String? get() = credentials.username
     val currentJwt: String? get() = credentials.jwt
@@ -40,6 +49,8 @@ class MolaGptAuthService(
     val account: StateFlow<AccountState> = _account.asStateFlow()
     private val _oauth = MutableStateFlow(OAuthLoginState())
     val oauth: StateFlow<OAuthLoginState> = _oauth.asStateFlow()
+    private val _verifiedLogin = MutableStateFlow(0L)
+    val verifiedLogin: StateFlow<Long> = _verifiedLogin.asStateFlow()
 
     suspend fun login(username: String, password: String): String? = withContext(dispatchers.io) {
         if (!credentials.isSecureStorageAvailable)
@@ -88,6 +99,8 @@ class MolaGptAuthService(
     private fun cancelOAuthLocked() {
         if (credentials.isSecureStorageAvailable) credentials.removeSecret(OAUTH_ATTEMPT)
         _oauth.value = OAuthLoginState()
+        appealToken = null
+        _canAppeal.value = false
     }
 
     suspend fun completeOAuthCallback(uri: Uri): String? = withContext(dispatchers.io) {
@@ -131,6 +144,14 @@ class MolaGptAuthService(
     }
 
     private fun applyLogin(response: LoginResponse, generation: Long, fallbackName: String): String? {
+        if (response.appealOnly) {
+            synchronized(sessionGate) {
+                if (generation != sessionGeneration) return "登录状态已变化，请重试。"
+                appealToken = response.appealToken
+                _canAppeal.value = appealToken != null
+            }
+            return response.message ?: "账户已暂停使用，请查看限制详情。"
+        }
         val token = response.token
         if (!response.success || token.isNullOrBlank()) return response.message ?: "登录失败"
         if (response.sessionProtocol != 2 || response.refreshToken.isNullOrBlank() ||
@@ -148,6 +169,7 @@ class MolaGptAuthService(
             )
         }
         notifyAuthChanged()
+        _verifiedLogin.value = generation
         return null
     }
 

@@ -1202,6 +1202,11 @@ class ChatViewModel(
         if (lastAssistantIdx < 0) return
         val lastAssistant = msgs[lastAssistantIdx]
         val modelId = overrideModelId ?: uiState.value.selectedModelId ?: return
+        lastAssistant.fragments.filterIsInstance<MessageFragment.Error>().lastOrNull()
+            ?.retryBlock(modelId, lastAssistant.model)?.let { message ->
+                _error.value = message
+                return
+            }
         _selectedModel.value = modelId
         // 已有版本则全部带上；否则把现有答案作为 v0。
         val prior = RetryAttempts.decode(lastAssistant.metadata[RetryAttempts.KEY_ATTEMPTS])

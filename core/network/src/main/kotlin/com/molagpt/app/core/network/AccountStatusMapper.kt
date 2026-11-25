@@ -6,6 +6,10 @@ import com.molagpt.app.core.model.MembershipInfo
 import com.molagpt.app.core.model.WebSearchUsage
 import com.molagpt.app.core.model.QuotaItem
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -93,6 +97,24 @@ fun JsonObject.toAccountStatus(displayNameOf: (String) -> String? = { null }): A
         )
     }.orEmpty()
 
+    val security = user?.get("account_security") as? JsonObject
+    val permissions = security?.get("permissions") as? JsonObject
+    val restrictions = (security?.get("restrictions") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+    fun recoveryText(type: String, field: String): String? {
+        val active = restrictions.filter { it["type"]?.prim()?.contentOrNull == type }
+        if (active.isEmpty()) return null
+        val dates = active.map { it[field]?.prim()?.longOrNull?.takeIf { t -> t > System.currentTimeMillis() / 1000L } }
+        if (dates.any { it == null }) return null
+        val latest = dates.filterNotNull().maxOrNull() ?: return null
+        return SimpleDateFormat("M月d日 HH:mm", Locale.CHINA).format(Date(latest * 1000L))
+    }
+    val securityStatus = when {
+        permissions?.get("official_models").boolishOrNull() == false ->
+            "官方模型服务暂时受限。" + (recoveryText("suspend_model", "ends_at")?.let { "预计于 $it 恢复。" } ?: "")
+        permissions?.get("free_usage").boolishOrNull() == false ->
+            "免费额度暂时受限。" + (recoveryText("free_cooldown", "blocked_until")?.let { "预计于 $it 起逐步恢复。" } ?: "")
+        else -> null
+    }
     return AccountStatus(
         loggedIn = loggedIn,
         userType = type,
@@ -103,6 +125,7 @@ fun JsonObject.toAccountStatus(displayNameOf: (String) -> String? = { null }): A
         credits = credits,
         personalizedMemoryEnabled = (user?.get("settings") as? JsonObject)
             ?.get("personalized_memory_enabled").boolishOrNull(),
+        securityStatus = securityStatus,
         cloudSyncEnabled = (user?.get("settings") as? JsonObject)
             ?.get("cloud_sync_enabled").boolishOrNull(),
     )

@@ -22,6 +22,7 @@ data class AccountStatus(
     val personalizedMemoryEnabled: Boolean? = null,
     /** 服务端 `user.settings.cloud_sync_enabled`；null=未知/未返回。 */
     val cloudSyncEnabled: Boolean? = null,
+    val securityStatus: String? = null,
 ) {
     val isRegistered: Boolean get() = userType.equals("registered", ignoreCase = true)
 

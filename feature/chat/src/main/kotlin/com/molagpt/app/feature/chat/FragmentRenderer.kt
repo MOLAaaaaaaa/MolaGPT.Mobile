@@ -16,15 +16,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,6 +58,7 @@ fun FragmentRenderer(
     fragment: MessageFragment,
     modifier: Modifier = Modifier,
     streamingTail: Boolean = false,
+    onRequestErrorAction: (() -> Unit)? = null,
 ) {
     // 提供 Markdown 行内图片的真实 Coil 渲染器；包住整个 when，使 Thinking/ToolCall 内嵌的
     // StreamingMarkdownView 也能渲染图片（生成图片走正文 Markdown 的 ![](url)，url 含 =imgtemp）。
@@ -168,12 +173,47 @@ fun FragmentRenderer(
             color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = modifier,
         )
-        is MessageFragment.Error -> androidx.compose.material3.Text(
-            text = fragment.message,
-            color = androidx.compose.material3.MaterialTheme.colorScheme.error,
-            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-            modifier = modifier,
-        )
+        is MessageFragment.Error -> {
+            val label = when (fragment.action) {
+                "account_security" -> "查看详情"
+                "sign_in" -> "重新登录"
+                "switch_model" -> "切换模型"
+                "view_usage" -> "查看用量"
+                "retry" -> "重新回答"
+                else -> null
+            }
+            val retryAt = fragment.retryAt.takeIf { fragment.action == "retry" }
+            fun secondsLeft() = (((retryAt ?: 0L) - System.currentTimeMillis() + 999L) / 1000L).coerceAtLeast(0L)
+            var remaining by remember(fragment.id, retryAt) { mutableStateOf(secondsLeft()) }
+            androidx.compose.runtime.LaunchedEffect(fragment.id, retryAt) {
+                while (true) {
+                    remaining = secondsLeft()
+                    if (remaining == 0L) break
+                    kotlinx.coroutines.delay(1000)
+                }
+            }
+            val errorColor = if (fragment.type == "account_restricted") {
+                if (MaterialTheme.colorScheme.surface.luminance() < 0.5f) Color(0xFFE6B45F) else Color(0xFFA56A1B)
+            } else MaterialTheme.colorScheme.onSurfaceVariant
+            val errorShape = RoundedCornerShape(10.dp)
+            Row(
+                modifier.fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow, errorShape)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, errorShape)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Filled.Info, contentDescription = null, tint = errorColor, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(fragment.message, Modifier.weight(1f),
+                    color = errorColor, style = MaterialTheme.typography.bodyMedium)
+                if (label != null && onRequestErrorAction != null) {
+                    androidx.compose.material3.TextButton(onClick = onRequestErrorAction, enabled = remaining == 0L) {
+                        Text(if (remaining > 0L) "$remaining 秒后重试" else label)
+                    }
+                }
+            }
+        }
     }
     }
 }

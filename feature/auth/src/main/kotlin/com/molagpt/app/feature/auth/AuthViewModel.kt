@@ -19,6 +19,21 @@ class AuthViewModel(private val authService: MolaGptAuthService) : ViewModel() {
         AuthUiState(loggedIn = authService.isLoggedIn, username = authService.username),
     )
     val state: StateFlow<AuthUiState> = _state.asStateFlow()
+    val canAppeal = authService.canAppeal
+    val verifiedLogin = authService.verifiedLogin
+
+    fun openAppeal(launch: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                authService.appealLink()?.let(launch)
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(error = "暂时无法打开账户安全，请稍后重试。")
+            }
+        }
+    }
+
     private var passwordLoginInProgress = false
 
     init {
@@ -57,11 +72,10 @@ class AuthViewModel(private val authService: MolaGptAuthService) : ViewModel() {
 
     fun logout() {
         viewModelScope.launch {
-            val revoked = authService.logoutRemote()
+            authService.logoutRemote()
             _state.value = AuthUiState(
                 loggedIn = authService.isLoggedIn,
                 username = authService.username,
-                error = if (revoked) null else "服务器会话撤销未确认，请联系管理员撤销旧会话。",
             )
         }
     }

@@ -1,5 +1,6 @@
 package com.molagpt.app.feature.settings
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,6 +23,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -46,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -75,6 +79,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun MolaAccountScreen(
     onOpenSupport: () -> Unit = {},
+    onOpenAccountSecurity: () -> Unit = {},
     viewModel: SettingsViewModel,
     loggedIn: Boolean,
     username: String?,
@@ -128,6 +133,12 @@ fun MolaAccountScreen(
             )
 
             if (!loggedIn) GuestBenefitsCard(onOpenLogin = onOpenLogin)
+            else {
+                AccountSecurityEntryCard(
+                    securityStatus = status?.securityStatus,
+                    onClick = onOpenAccountSecurity,
+                )
+            }
 
             SectionTitle("配额用量")
             QuotaSection(status = status, loading = statusLoading, error = statusError, onRefresh = viewModel::refreshStatus)
@@ -614,6 +625,61 @@ private fun MolaGptToolsSection(
             }
             ToggleRow("联网搜索", webAccess, onChange = onWebAccessChange)
             ToggleRow("代码执行", code, onChange = onCodeChange)
+        }
+    }
+}
+
+/** 账户与安全入口卡：正常态与「支持者状态」同构；受限态切为琥珀色提示卡，限制文案用 bodySmall 收敛字号。 */
+@Composable
+private fun AccountSecurityEntryCard(securityStatus: String?, onClick: () -> Unit) {
+    val restricted = !securityStatus.isNullOrBlank()
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+    val amberFg = if (dark) Color(0xFFE6B45F) else Color(0xFFA56A1B)
+    val amberBg = if (dark) Color(0xFF3B2C16) else Color(0xFFFFF4DF)
+    val containerColor = if (restricted) amberBg else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f)
+    val border = if (restricted) BorderStroke(1.dp, amberFg.copy(alpha = 0.32f)) else null
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = containerColor,
+        border = border,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (restricted) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(RoundedCornerShape(15.dp))
+                        .background(amberFg.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.WarningAmber,
+                        contentDescription = null,
+                        tint = amberFg,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            } else {
+                SettingsRowIcon(Icons.Outlined.Shield)
+            }
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("账户与安全", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = securityStatus ?: "查看账户状态、安全限制与申诉记录",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (restricted) amberFg else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            ForwardChevron()
         }
     }
 }

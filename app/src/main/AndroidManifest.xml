@@ -19,6 +19,12 @@
       - 拍照委托系统相机 app，声明 CAMERA 反而会被强制要求运行时授权。
     -->
 
+    <queries>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".MolaApp"
         android:allowBackup="true"

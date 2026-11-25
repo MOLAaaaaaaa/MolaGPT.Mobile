@@ -29,6 +29,8 @@ data class LoginResponse(
     @SerialName("expires_at") val expiresAt: Long? = null,
     @SerialName("expires_in") val expiresIn: Int? = null,
     @SerialName("session_protocol") val sessionProtocol: Int = 1,
+    @SerialName("appeal_only") val appealOnly: Boolean = false,
+    @SerialName("appeal_token") val appealToken: String? = null,
 )
 
 @Serializable

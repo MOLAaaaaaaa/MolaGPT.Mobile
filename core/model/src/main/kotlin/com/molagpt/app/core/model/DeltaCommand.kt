@@ -14,5 +14,5 @@ sealed interface DeltaCommand {
     data class AddImage(val url: String, val prompt: String?) : DeltaCommand
     data class SetMetadata(val key: String, val value: String) : DeltaCommand
     data class Complete(val usage: Usage? = null, val finishReason: String? = null) : DeltaCommand
-    data class Fail(val message: String) : DeltaCommand
+    data class Fail(val error: StreamEvent.Failed) : DeltaCommand
 }

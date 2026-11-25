@@ -42,8 +42,12 @@ fun LoginScreen(
     onLoggedIn: () -> Unit,
     onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    requireFreshLogin: Boolean = false,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val verifiedLogin by viewModel.verifiedLogin.collectAsStateWithLifecycle()
+    val previousLogin = rememberSaveable { verifiedLogin }
+    val canAppeal by viewModel.canAppeal.collectAsStateWithLifecycle()
     var username by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     val context = LocalContext.current
@@ -55,7 +59,7 @@ fun LoginScreen(
             viewModel.oauthLaunchFailed()
         }
     }
-    if (state.loggedIn) {
+    if (state.loggedIn && (!requireFreshLogin || verifiedLogin != previousLogin)) {
         androidx.compose.runtime.LaunchedEffect(Unit) { onLoggedIn() }
     }
 
@@ -114,6 +118,12 @@ fun LoginScreen(
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
             } else {
                 Text("登录")
+            }
+        }
+
+        if (canAppeal) {
+            androidx.compose.material3.TextButton(onClick = { viewModel.openAppeal { openAccountSecurityTab(context, it) } }) {
+                Text("查看账户限制")
             }
         }
 

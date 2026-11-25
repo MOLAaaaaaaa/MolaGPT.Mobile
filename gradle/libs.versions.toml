@@ -60,6 +60,7 @@ espresso = "3.6.1"
 
 [libraries]
 # AndroidX 基础
+androidx-browser = { module = "androidx.browser:browser", version = "1.9.0" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }

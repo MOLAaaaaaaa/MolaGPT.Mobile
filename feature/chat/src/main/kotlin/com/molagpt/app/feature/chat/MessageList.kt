@@ -96,6 +96,10 @@ internal fun MessageList(
     contentPadding: PaddingValues = PaddingValues(12.dp),
     bottomOverlayPadding: Dp = 0.dp,
     onRegenerate: () -> Unit = {},
+    onAccountSecurity: () -> Unit = {},
+    onViewUsage: (() -> Unit)? = null,
+    onSignIn: () -> Unit = {},
+    onSwitchModel: () -> Unit = {},
     onRegenerateWithModel: (String) -> Unit = {},
     onEditUser: (String) -> Unit = {},
     onEditAssistant: (String) -> Unit = {},
@@ -425,8 +429,20 @@ internal fun MessageList(
                         LocalCitationSources provides row.citationSources,
                     ) {
                         val body = row.fragment.isAssistantBodyText()
+                        val errorAction = (row.fragment as? MessageFragment.Error)?.action
+                        val recovery = when (errorAction) {
+                            "account_security" -> onAccountSecurity
+                            "view_usage" -> onViewUsage
+                            "sign_in" -> onSignIn
+                            "switch_model" -> onSwitchModel
+                            "retry" -> onRegenerate.takeIf {
+                                canRegenerate && messages.lastOrNull { it.role == Role.ASSISTANT }?.messageId == row.messageId
+                            }
+                            else -> null
+                        }
                         FragmentRenderer(
                             fragment = row.fragment,
+                            onRequestErrorAction = recovery,
                             modifier = rowModifier
                                 .then(if (body) Modifier.readerTracked(row.key) else Modifier)
                                 .onAssistantTextDoubleTap(

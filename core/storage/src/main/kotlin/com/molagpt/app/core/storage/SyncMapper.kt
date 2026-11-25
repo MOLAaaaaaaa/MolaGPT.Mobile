@@ -65,6 +65,7 @@ object SyncMapper {
         "sources",
         "subagents",
         "retry",
+        "error",
         "response_stats",
         "thinking",
         "model",
@@ -145,6 +146,7 @@ object SyncMapper {
         // 重试版本：本地 RetryAttempt 列表 → Web 的 meta.retry（此前只读不写，换端即丢）。
         if (!isUser) {
             retryToJson(meta)?.let { metaFields["retry"] = it }
+            errorToJson(MessageJson.decodeFragments(m.fragmentsJson))?.let { metaFields["error"] = it }
         }
         if (metaFields.isNotEmpty()) {
             put("meta", JsonObject(metaFields))
@@ -165,6 +167,7 @@ object SyncMapper {
                         add(
                             buildJsonObject {
                                 put("content", webTimelineContent(a.fragments, a.rawText))
+                                errorToJson(a.fragments)?.let { put("error", it) }
                                 a.model?.let { put("model", it) }
                                 a.modelDisplayName?.let { put("model_label", it) }
                                 a.subagents?.let { put("subagents", syncJson.parseToJsonElement(it)) }
@@ -257,6 +260,7 @@ object SyncMapper {
             sources = sources,
             role = role,
         )
+        val error = if (role == Role.ASSISTANT) errorFromJson(metaObj?.get("error")) else null
         val ts = parseMessageTimestamp(obj["timestamp"])
         val createdAt = ts
         val meta = buildMap {
@@ -288,12 +292,12 @@ object SyncMapper {
             messageId = "${sessionId}_${ts}_${index}_${role.name}",
             sessionId = sessionId,
             role = role.name,
-            status = MessageStatus.COMPLETE.name,
+            status = if (error == null) MessageStatus.COMPLETE.name else MessageStatus.ERROR.name,
             createdAt = createdAt,
             updatedAt = createdAt,
             fragmentsJson = MessageJson.encodeFragments(normalized.fragments.map {
                 if (it is MessageFragment.ToolCall) ServerSubagents.tool(it, ServerSubagents.read(meta)) else it
-            }),
+            } + listOfNotNull(error)),
             rawText = normalized.rawText,
             model = model,
             metadataJson = MessageJson.encodeMeta(meta),
@@ -737,16 +741,17 @@ object SyncMapper {
                         sources = sources,
                         role = Role.ASSISTANT,
                     )
+                    val error = errorFromJson(item["error"])
                     RetryAttempt(
                         fragments = normalized.fragments.map {
                             if (it is MessageFragment.ToolCall) ServerSubagents.tool(it,
                                 (item["subagents"] as? JsonObject)?.let(ServerSubagents::finish) ?: JsonObject(emptyMap())) else it
-                        },
+                        } + listOfNotNull(error),
                         rawText = normalized.rawText,
                         model = item["model"]?.jsonPrimitive?.contentOrNull,
                         modelDisplayName = item["model_label"]?.jsonPrimitive?.contentOrNull,
                         subagents = (item["subagents"] as? JsonObject)?.let { ServerSubagents.finish(it).toString() },
-                        status = MessageStatus.COMPLETE.name,
+                        status = if (error == null) MessageStatus.COMPLETE.name else MessageStatus.ERROR.name,
                     )
                 }
                 else -> null
@@ -996,11 +1001,39 @@ object SyncMapper {
                     is MessageFragment.SearchResult -> if (!hasSearchTool) append(webSearchMarkup(f))
                     is MessageFragment.Image -> append("\n\n![${escapeMarkdownAlt(f.prompt ?: "生成的图片")}](${f.url})\n\n")
                     is MessageFragment.Tip -> append("\n\n").append(f.text).append("\n\n")
-                    is MessageFragment.Error -> append("\n\n").append(f.message).append("\n\n")
                     else -> Unit
                 }
             }
         }.trim()
+    }
+
+    private fun errorToJson(fragments: List<MessageFragment>): JsonObject? {
+        val error = fragments.filterIsInstance<MessageFragment.Error>().lastOrNull() ?: return null
+        return buildJsonObject {
+            error.requestError?.forEach { (key, value) -> put(key, value) }
+            put("message", error.message)
+            error.type?.let { put("type", it) }
+            if (error.requestError == null) {
+                put("retryable", error.action == "retry")
+                if (error.action == "sign_in") put("reauth", true)
+                error.action?.takeUnless { it == "retry" }?.let { put("next_action", it) }
+            }
+            error.retryAt?.let { put("retry_at", it) }
+        }
+    }
+
+    private fun errorFromJson(value: JsonElement?): MessageFragment.Error? {
+        val error = value as? JsonObject ?: return null
+        fun text(key: String) = (error[key] as? JsonPrimitive)?.contentOrNull
+        val message = text("message")?.takeIf(String::isNotBlank) ?: return null
+        val action = when {
+            text("reauth") == "true" -> "sign_in"
+            text("next_action") != null -> text("next_action")
+            text("type") == "quota_exhausted" -> "view_usage"
+            text("retryable") == "true" -> "retry"
+            else -> null
+        }
+        return MessageFragment.Error(Ids.newFragmentId(), message, text("type"), action, text("retry_at")?.toLongOrNull(), error)
     }
 
     private fun StringBuilder.appendWebThink(text: String) {

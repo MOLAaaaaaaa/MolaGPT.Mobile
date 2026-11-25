@@ -49,5 +49,11 @@ sealed interface StreamEvent {
     data class Finish(val reason: String? = null, val usage: Usage? = null) : StreamEvent
 
     /** 流内错误。 */
-    data class Failed(val message: String) : StreamEvent
+    data class Failed(
+        val message: String,
+        val type: String? = null,
+        val action: String? = null,
+        val retryAfter: Int? = null,
+        val requestError: kotlinx.serialization.json.JsonObject? = null,
+    ) : StreamEvent
 }

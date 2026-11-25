@@ -41,6 +41,6 @@ class ChatStreamController {
         )
         is StreamEvent.UsageUpdate -> emptyList()
         is StreamEvent.Finish -> listOf(DeltaCommand.Complete(event.usage, event.reason))
-        is StreamEvent.Failed -> listOf(DeltaCommand.Fail(event.message))
+        is StreamEvent.Failed -> listOf(DeltaCommand.Fail(event))
     }
 }

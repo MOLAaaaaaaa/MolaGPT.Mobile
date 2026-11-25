@@ -1,6 +1,7 @@
 package com.molagpt.app.nav
 
 import android.net.Uri
+import com.molagpt.app.feature.auth.openAccountSecurityTab
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.layout.Box
@@ -111,6 +112,7 @@ import kotlinx.coroutines.flow.debounce
 
 private object Routes {
     const val LOGIN = "login"
+    const val REAUTHENTICATE = "login/reauthenticate"
     const val AGENT_LOGIN = "login/agent-control"
     const val CHAT = "chat"
     const val SETTINGS = "settings"
@@ -264,6 +266,17 @@ fun MolaNavHost(
             )
         }
 
+        composable(Routes.REAUTHENTICATE) {
+            val vm: AuthViewModel = viewModel(factory = ViewModelFactories.auth(container))
+            LoginScreen(
+                viewModel = vm,
+                onLoggedIn = { navController.popBackStack() },
+                onBack = { navController.popBackStack() },
+                modifier = Modifier.fillMaxSize(),
+                requireFreshLogin = true,
+            )
+        }
+
         composable(Routes.AGENT_LOGIN) {
             val vm: AuthViewModel = viewModel(factory = ViewModelFactories.auth(container))
             // A notification target must survive a successful login so the Agent
@@ -315,6 +328,12 @@ fun MolaNavHost(
                         }
                     }
                 },
+                onOpenAccountUsage = {
+                    if (navController.currentDestination?.route != Routes.MOLA_ACCOUNT) {
+                        navController.navigate(Routes.SETTINGS) { launchSingleTop = true }
+                        navController.navigate(Routes.MOLA_ACCOUNT) { launchSingleTop = true }
+                    }
+                },
                 onOpenByokModelSettings = { providerId, modelId ->
                     val encodedModel = android.net.Uri.encode(modelId)
                     val target = "${Routes.BYOK_PROVIDER_DETAIL}/$providerId?editModel=$encodedModel"
@@ -342,10 +361,8 @@ fun MolaNavHost(
                     }
                 },
                 onAuthExpired = {
-                    // 只在服务端关了游客聊天时才会走到这里（点了需登录的模型，或登录已失效）。
-                    // 游客聊天开放时短 token 失败只由聊天错误条提示，不会触发跳转。
-                    if (navController.currentDestination?.route != Routes.LOGIN) {
-                        navController.navigate(Routes.LOGIN) { launchSingleTop = true }
+                    if (navController.currentDestination?.route != Routes.REAUTHENTICATE) {
+                        navController.navigate(Routes.REAUTHENTICATE) { launchSingleTop = true }
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
@@ -450,8 +467,19 @@ fun MolaNavHost(
                 factory = ViewModelFactories.settings(container),
             )
             val account by container.authService.account.collectAsStateWithLifecycle()
+            val securityContext = androidx.compose.ui.platform.LocalContext.current
+            LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { container.accountStatusCache.ensure(force = true) }
             MolaAccountScreen(
                 onOpenSupport = openSupport,
+                onOpenAccountSecurity = {
+                    navScope.launch {
+                        openAccountSecurity(container, securityContext) {
+                            if (navController.currentDestination?.route != Routes.REAUTHENTICATE) {
+                                navController.navigate(Routes.REAUTHENTICATE) { launchSingleTop = true }
+                            }
+                        }
+                    }
+                },
                 viewModel = vm,
                 loggedIn = account.loggedIn,
                 username = account.username,
@@ -462,12 +490,7 @@ fun MolaNavHost(
                 },
                 onLogout = {
                     navScope.launch {
-                        if (!container.authService.logoutRemote()) {
-                            android.widget.Toast.makeText(
-                                appContext, "服务器会话撤销未确认，请联系管理员撤销旧会话。",
-                                android.widget.Toast.LENGTH_LONG,
-                            ).show()
-                        }
+                        container.authService.logoutRemote()
                     }
                 },
                 onBack = {
@@ -971,6 +994,7 @@ private fun ChatHost(
     historyScope: HistoryIdentity,
     settings: AppSettings,
     onOpenSettings: () -> Unit,
+    onOpenAccountUsage: () -> Unit,
     onOpenByokModelSettings: (providerId: String, modelId: String) -> Unit,
     onOpenAgentControl: () -> Unit,
     /** 从主页以外（「电脑」页、通知）要打开的电脑对话，消费后清空。 */
@@ -1017,6 +1041,11 @@ private fun ChatHost(
     }
 
     val scope = rememberCoroutineScope()
+    val securityContext = androidx.compose.ui.platform.LocalContext.current
+    val accountStatus by container.accountStatusCache.status.collectAsStateWithLifecycle()
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        if (account.loggedIn) container.accountStatusCache.ensure(force = true)
+    }
     // 抽屉里的删除反馈。ChatHost 没有 Scaffold，所以在根 Box 内自建宿主；
     // 抽屉盖在聊天页之上，Snackbar 必须画在最外层才可见。
     val snackbar = remember { SnackbarHostState() }
@@ -1450,6 +1479,11 @@ private fun ChatHost(
                     )
                 ChatScreen(
                     viewModel = chatVm,
+                    securityStatus = accountStatus?.securityStatus,
+                    onOpenAccountSecurity = {
+                        scope.launch { openAccountSecurity(container, securityContext, onAuthExpired) }
+                    },
+                    onOpenAccountUsage = onOpenAccountUsage,
                     enterToSend = settings.enterToSend,
                     htmlAsCard = settings.htmlAsCard,
                     showAgentControlShortcut = settings.showAgentControlShortcut,
@@ -1715,4 +1749,27 @@ private fun DesktopDraftModelMenu(
                 remoteSettings.modelId == modelId
         },
     )
+}
+
+private suspend fun openAccountSecurity(
+    container: com.molagpt.app.di.AppContainer,
+    context: android.content.Context,
+    onAuthExpired: () -> Unit,
+) {
+    try {
+        val session = container.credentialStore.sessionTokens()
+            ?: throw MolaAuthExpiredException("请重新登录后查看账户安全。")
+        val url = container.authApi.accountSecurityLink(session.accessToken)
+        if (container.credentialStore.sessionTokens()?.generation != session.generation) {
+            android.widget.Toast.makeText(context, "登录账户已变化，请重试。", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        openAccountSecurityTab(context, url)
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: MolaAuthExpiredException) {
+        onAuthExpired()
+    } catch (error: Exception) {
+        android.widget.Toast.makeText(context, "暂时无法打开账户安全，请稍后重试。", android.widget.Toast.LENGTH_SHORT).show()
+    }
 }

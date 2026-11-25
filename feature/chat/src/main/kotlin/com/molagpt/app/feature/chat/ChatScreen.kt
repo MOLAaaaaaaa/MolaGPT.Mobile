@@ -159,6 +159,9 @@ fun ChatScreen(
     onOpenPersonaManagement: () -> Unit,
     onOpenByokMemory: () -> Unit,
     onAuthExpired: () -> Unit,
+    securityStatus: String? = null,
+    onOpenAccountSecurity: () -> Unit = {},
+    onOpenAccountUsage: (() -> Unit)? = null,
     onNewChatWithModel: (modelId: String, providerId: String?, kind: ProviderKind, personaId: String?) -> Unit,
     onNewChat: () -> Unit,
     onOpenAgentControl: () -> Unit = {},
@@ -588,6 +591,16 @@ fun ChatScreen(
                         Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
+                if (state.providerKind == ProviderKind.MOLAGPT && securityStatus != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(securityStatus, Modifier.weight(1f), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium)
+                        androidx.compose.material3.TextButton(onClick = onOpenAccountSecurity) { Text("查看详情") }
+                    }
+                }
                 state.error?.let { err ->
                     Text(
                         text = err,
@@ -755,6 +768,10 @@ fun ChatScreen(
                     spend = state.spend.takeIf { state.providerKind == ProviderKind.BYOK },
                     models = state.models,
                     onRegenerate = { viewModel.regenerateLast() },
+                    onAccountSecurity = onOpenAccountSecurity,
+                    onViewUsage = onOpenAccountUsage.takeIf { state.providerKind == ProviderKind.MOLAGPT },
+                    onSignIn = onAuthExpired,
+                    onSwitchModel = { modelMenuOpen = true },
                     onRegenerateWithModel = { viewModel.regenerateLast(it) },
                     onEditUser = viewModel::startEditUser,
                     onEditAssistant = { editingAssistantId = it },

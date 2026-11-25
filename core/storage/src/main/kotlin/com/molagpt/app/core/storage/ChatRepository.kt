@@ -574,7 +574,23 @@ class ChatRepository(
             is DeltaCommand.Fail -> {
                 status = MessageStatus.ERROR
                 collapseThinking(frags)
-                frags.add(MessageFragment.Error(Ids.newFragmentId(), cmd.message))
+                val error = cmd.error
+                // Only remove the exact duplicated provider notice after a confirmed shared-quota error.
+                if (error.type == "shared_quota_exhausted") {
+                    val last = frags.lastOrNull() as? MessageFragment.Text
+                    val notice = "该供应商共享额度已用完，请稍后再试。"
+                    if (last != null && last.markdown.trimEnd().endsWith(notice)) {
+                        val cleaned = last.markdown.trimEnd().removeSuffix(notice).trimEnd()
+                        if (cleaned.isEmpty()) frags.removeAt(frags.lastIndex)
+                        else frags[frags.lastIndex] = last.copy(markdown = cleaned)
+                    }
+                }
+                frags.add(MessageFragment.Error(
+                    Ids.newFragmentId(), error.message, error.type, error.action,
+                    (error.requestError?.get("retry_at") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
+                        ?: error.retryAfter?.takeIf { it > 0 }?.let { System.currentTimeMillis() + it * 1000L },
+                    error.requestError,
+                ))
                 meta = meta - setOf("pending", "pendingRecovery")
             }
         }

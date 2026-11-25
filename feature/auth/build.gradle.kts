@@ -31,6 +31,7 @@ dependencies {
     implementation(project(":core:render")) // ImeDismissBackHandler
 
     implementation(libs.bundles.compose)
+    implementation(libs.androidx.browser)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
