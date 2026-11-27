@@ -395,17 +395,10 @@ internal class AgentNotificationMonitor(
     private val scope: CoroutineScope,
     private val notifyEnabled: () -> Boolean,
     private val isAuthenticated: () -> Boolean,
+    private val appForeground: () -> Boolean,
 ) {
     private val tracker = AgentNotificationTracker()
     private val wake = Channel<Unit>(Channel.CONFLATED)
-    @Volatile private var foregroundRunning = false
-    /** Forces one stop() on the first sync: a service (and its ongoing
-     *  notification) can outlive the monitor that started it — e.g. the process
-     *  was killed while a turn was in flight and Android restarted the service
-     *  alone.  Without this the leftover notification only clears when something
-     *  else happens to start and stop the service again. */
-    @Volatile private var foregroundSynced = false
-
     init {
         scope.launch { runLoop() }
     }
@@ -455,17 +448,13 @@ internal class AgentNotificationMonitor(
         }
     }
 
-    @Synchronized
+    fun onAppForegroundChanged() = syncForegroundService()
+
     private fun syncForegroundService() {
-        val activeId = tracker.activeSessionId()
-        val shouldRun = activeId != null && notifyEnabled() && isAuthenticated()
-        if (shouldRun && !foregroundRunning) {
-            foregroundRunning = AgentMonitorForegroundService.start(controller.context, activeId)
-        } else if (!shouldRun && (foregroundRunning || !foregroundSynced)) {
-            AgentMonitorForegroundService.stop(controller.context)
-            foregroundRunning = false
+        scope.launch(kotlinx.coroutines.Dispatchers.Main.immediate) {
+            val activeId = tracker.activeSessionId().takeIf { notifyEnabled() && isAuthenticated() }
+            AgentMonitorForegroundService.update(controller.context, activeId, appForeground())
         }
-        foregroundSynced = true
     }
 
     private suspend fun awaitWake(timeoutMs: Long) {

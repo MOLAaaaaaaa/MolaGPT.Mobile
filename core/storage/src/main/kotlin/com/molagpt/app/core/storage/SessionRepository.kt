@@ -170,8 +170,10 @@ class SessionRepository(
     suspend fun setPinned(sessionId: String, pinned: Boolean, expected: HistoryIdentity = identity.value) =
         database.withTransaction { conversationDao.setPinned(sessionId, pinned, expected == identity.value && expected.canReadOfficial) }
 
-    suspend fun setFavorite(sessionId: String, favorite: Boolean) =
-        withContext(dispatchers.io) { conversationDao.setFavorite(sessionId, favorite, includeOfficial) }
+    suspend fun setFavorite(sessionId: String, favorite: Boolean, expected: HistoryIdentity = identity.value) =
+        database.withTransaction {
+            conversationDao.setFavorite(sessionId, favorite, expected == identity.value && expected.canReadOfficial)
+        }
 
     suspend fun delete(sessionId: String) { deleteAll(listOf(sessionId)) }
 

@@ -107,7 +107,7 @@ object ReasoningDialects {
             off = ReasoningOff.THINKING_DISABLED,
         ),
         ProviderDialect(
-            hosts = listOf("dashscope.aliyuncs.com"),
+            hosts = listOf("dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"),
             forceKind = ThinkingParamKind.QWEN_THINKING_BUDGET,
             off = ReasoningOff.ENABLE_THINKING_FALSE,
         ),
@@ -134,15 +134,11 @@ object ReasoningDialects {
     /** 未知服务商：形状与关闭方式都按模型推断出的 kind 走。 */
     private val FALLBACK = ProviderDialect(hosts = emptyList(), off = ReasoningOff.OMIT)
 
-    private fun hostOf(baseUrl: String): String =
-        runCatching { java.net.URI(baseUrl).host.orEmpty() }.getOrDefault("").lowercase()
-
     /** 命中的方言条目；未知 host 返回 [FALLBACK]。 */
     fun forBaseUrl(baseUrl: String): ProviderDialect {
-        val host = hostOf(baseUrl)
-        if (host.isEmpty()) return FALLBACK
+        val host = HostUrl.parseHttpHost(baseUrl) ?: return FALLBACK
         return TABLE.firstOrNull { entry ->
-            entry.hosts.any { host == it || host.endsWith(".$it") }
+            entry.hosts.any { HostUrl.matchesDomain(host, it) }
         } ?: FALLBACK
     }
 

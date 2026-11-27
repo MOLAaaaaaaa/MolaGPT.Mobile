@@ -11,6 +11,7 @@ import com.molagpt.app.core.model.ThinkingDetectSource
 import com.molagpt.app.core.model.ThinkingKinds
 import com.molagpt.app.core.model.ThinkingParamKind
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.model.ModelCapabilityCatalog
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
@@ -61,6 +62,9 @@ class ByokModelApi(private val http: MolaHttp) {
     )
 
     private suspend fun fetchModelsRoot(provider: ByokProvider, url: String): JsonObject {
+        if (provider.host == null) {
+            throw MolaApiException(0, "服务地址无效：${provider.baseUrl}")
+        }
         val resp = http.client.get(url) {
             provider.applyAuthHeaders { name, value -> header(name, value) }
         }
@@ -106,20 +110,28 @@ class ByokModelApi(private val http: MolaHttp) {
             val obj = item as? JsonObject ?: return@mapNotNull null
             val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
-            // chat 用途：仅保留聊天模型，图像模型交给 image 用途 provider。
-            if (!looksLikeByokChatModel(id)) return@mapNotNull null
+            // chat 用途：优先采用模型列表声明的输入/输出类型。
             val supportedParams = parseSupportedParameters(obj)
+            val architecture = obj["architecture"] as? JsonObject
+            val inputModalities = architecture?.get("input_modalities") as? JsonArray
+            val outputModalities = architecture?.get("output_modalities") as? JsonArray
+            val chat = if (inputModalities != null && outputModalities != null)
+                inputModalities.any { it.jsonPrimitive.contentOrNull == "text" } &&
+                    outputModalities.any { it.jsonPrimitive.contentOrNull == "text" }
+            else looksLikeByokChatModel(id)
+            if (!chat) return@mapNotNull null
             val thinkingConfig = thinkingConfigFor(provider, id, supportedParams, parseReasoningCapability(obj))
-            val isThinking = thinkingConfig != null
+            val isThinking = thinkingConfig != null && thinkingConfig.kind != ThinkingParamKind.NONE
             ProviderModel(
                 id = id,
                 displayName = beautifyModelName(id),
                 apiUrl = provider.chatPath,
-                supportsVision = looksLikeByokVisionModel(id),
+                supportsVision = inputModalities?.any { it.jsonPrimitive.contentOrNull in setOf("image", "vision") }
+                    ?: looksLikeByokVisionModel(id),
                 supportsThinking = isThinking,
-                supportsReasoningEffort = isThinking &&
-                    ThinkingKinds.resolveEffortLevels(thinkingConfig).isNotEmpty(),
-                supportsToolCalling = looksLikeByokToolModel(id),
+                supportsReasoningEffort = thinkingConfig?.let { ThinkingKinds.resolveEffortLevels(it, provider.baseUrl).isNotEmpty() } == true,
+                supportsToolCalling = supportedParams?.any { it.equals("tools", true) || it.equals("tool_choice", true) }
+                    ?: looksLikeByokToolModel(id),
                 supportsImageGeneration = false,
                 supportsChat = true,
                 providerId = provider.id,
@@ -180,15 +192,14 @@ class ByokModelApi(private val http: MolaHttp) {
             val id = obj["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
             val thinkingConfig = thinkingConfigFor(provider, id)
-            val isThinking = thinkingConfig != null
+            val isThinking = thinkingConfig != null && thinkingConfig.kind != ThinkingParamKind.NONE
             ProviderModel(
                 id = id,
                 displayName = obj["display_name"]?.jsonPrimitive?.contentOrNull ?: beautifyModelName(id),
                 apiUrl = provider.chatPath,
                 supportsVision = looksLikeByokVisionModel(id),
                 supportsThinking = isThinking,
-                supportsReasoningEffort = isThinking &&
-                    ThinkingKinds.resolveEffortLevels(thinkingConfig).isNotEmpty(),
+                supportsReasoningEffort = thinkingConfig?.let { ThinkingKinds.resolveEffortLevels(it, provider.baseUrl).isNotEmpty() } == true,
                 supportsToolCalling = true,
                 supportsImageGeneration = false,
                 supportsChat = true,
@@ -220,15 +231,14 @@ class ByokModelApi(private val http: MolaHttp) {
             // chat 用途：跳过 imagen 与不支持 generateContent 的模型。
             if (isImagen || !supportsGenerateContent) return@mapNotNull null
             val thinkingConfig = thinkingConfigFor(provider, id)
-            val isThinking = thinkingConfig != null
+            val isThinking = thinkingConfig != null && thinkingConfig.kind != ThinkingParamKind.NONE
             ProviderModel(
                 id = id,
                 displayName = obj["displayName"]?.jsonPrimitive?.contentOrNull ?: beautifyModelName(id),
                 apiUrl = provider.chatPath,
                 supportsVision = looksLikeByokVisionModel(id),
                 supportsThinking = isThinking,
-                supportsReasoningEffort = isThinking &&
-                    ThinkingKinds.resolveEffortLevels(thinkingConfig).isNotEmpty(),
+                supportsReasoningEffort = thinkingConfig?.let { ThinkingKinds.resolveEffortLevels(it, provider.baseUrl).isNotEmpty() } == true,
                 supportsToolCalling = true,
                 supportsImageGeneration = false,
                 supportsChat = true,
@@ -316,25 +326,17 @@ class ByokModelApi(private val http: MolaHttp) {
         // 有能力表：以能力表为准（即使名字不像推理模型）。
         if (supportedParams != null) {
             return ThinkingKinds.autoConfigFor(id, provider.baseUrl, supportedParams, capability)
+                ?: ThinkingKinds.NONE_CONFIG.copy(detectSource = ThinkingDetectSource.CAPABILITY)
         }
-        // 无能力表：仅当名字命中「精选推理模型集」才给配置。
-        // 不能放宽到 inferFromModelId——它把所有 Claude/Gemini/Kimi 都归类为推理，
-        // 会让 Claude 3.5、Gemini 1.5 等非推理模型误显推理开关并下发不支持的参数（400）。
-        if (!looksLikeByokReasoningModel(id)) {
-            return null
-        }
-        return ThinkingKinds.autoConfigFor(id, provider.baseUrl, supportedParams = null)
-            ?: ThinkingKinds.configFor(
-                ThinkingKinds.inferFromModelId(id).takeIf { it != ThinkingParamKind.NONE }
-                    ?: ThinkingKinds.hostInferredKind(provider.baseUrl)
-                    ?: ThinkingParamKind.OPENAI_REASONING_EFFORT,
-                alwaysOn = ThinkingKinds.isKimiK3(id),
-                detectSource = ThinkingDetectSource.HEURISTIC,
-            )
+        // 无能力表：复用 ByokProvider 单一推理能力解析规则（仅已知/精选推理模型返回配置）。
+        return provider.thinkingConfigFor(id, declared = null)
+            ?: ThinkingKinds.NONE_CONFIG.copy(detectSource = ThinkingDetectSource.HEURISTIC)
+                .takeIf { ModelCapabilityCatalog.find(id)?.reasoning == false }
     }
 }
 
 internal fun looksLikeByokChatModel(id: String): Boolean {
+    ModelCapabilityCatalog.find(id)?.let { return it.chat }
     val lower = id.lowercase()
     // 排除非聊天模型：embedding/moderation/tts/transcribe/whisper/audio/realtime/computer-use/
     // deep-research/live/veo/lyria，以及所有图像模型。
@@ -449,37 +451,8 @@ fun inferByokImageFormat(provider: ByokProvider, modelId: String, declaredImages
  *  - Qwen3 / QwQ / GLM-5 / GLM-4.x / MiniMax-M2/3 / MiMo / magistral / seed-oss / gemma-4 / pangu-pro-moe
  * 非 `-non-reasoning` 变体被显式排除。
  */
-internal fun looksLikeByokReasoningModel(id: String): Boolean {
-    val lower = id.lowercase()
-    if (lower.contains("-non-reasoning")) return false
-    val leaf = lower.substringAfterLast('/')
-
-    // DeepSeek 系列推理模型：v3.2（含 .x 子版本）、v4+、chat、reasoner、r1。
-    if (Regex("(\\w+-)?deepseek-v(?:3(?:\\.\\d|\\d)|[4-9]\\d*|[1-9]\\d{1,})(?:[.-]\\w+)*").containsMatchIn(lower) ||
-        lower.contains("deepseek-chat") || lower.contains("deepseek-reasoner") ||
-        lower.contains("deepseek-r1")) return true
-
-    // Kimi：kimi-k2-thinking(+turbo)、kimi-k2.5+、kimi-k3+。
-    if (Regex("kimi-k(?:2-thinking(?:-turbo)?|2\\.[5-9]\\d*|[3-9]\\d*(?:\\.\\d+)?)").containsMatchIn(leaf)) return true
-
-    return leaf.startsWith("o1") || leaf.startsWith("o3") || leaf.startsWith("o4") ||
-        leaf.startsWith("gpt-5") || lower.contains("gpt-oss") ||
-        lower.contains("reasoning") || lower.contains("reasoner") ||
-        lower.contains("thinking") || lower.contains("think") ||
-        Regex("-(?:r|R)\\d+").containsMatchIn(leaf) ||
-        lower.contains("qwq") || lower.contains("qwen3") ||
-        lower.contains("hunyuan-t1") || lower.contains("glm-zero-preview") ||
-        lower.contains("glm-5") || Regex("glm-4\\.\\d").containsMatchIn(lower) ||
-        Regex("minimax-m[23]").containsMatchIn(lower) || lower.contains("mimo-v2-flash") ||
-        lower.contains("grok-3-mini") || lower.contains("grok-4") ||
-        lower.contains("gemini-2.5") || lower.contains("gemini-3") || lower.contains("gemini-4") ||
-        lower.contains("claude-3-7") || lower.contains("claude-3.7") ||
-        lower.contains("sonnet-4") || lower.contains("opus-4") || lower.contains("haiku-4") ||
-        lower.contains("magistral") || lower.contains("seed-oss") ||
-        lower.contains("gemma-4") || lower.contains("pangu-pro-moe")
-}
-
 internal fun looksLikeByokVisionModel(id: String): Boolean {
+    ModelCapabilityCatalog.find(id)?.let { return it.vision }
     val lower = id.lowercase()
     return lower.contains("vision") || lower.contains("gpt-4o") || lower.contains("gpt-4.1") ||
         lower.contains("gpt-5") || lower.contains("gemini") ||
@@ -531,6 +504,7 @@ fun looksLikeByokImageReasoningModel(id: String): Boolean {
 }
 
 internal fun looksLikeByokToolModel(id: String): Boolean {
+    ModelCapabilityCatalog.find(id)?.let { return it.tools }
     val lower = id.lowercase()
     return looksLikeByokChatModel(id) && !lower.contains("base") && !lower.contains("instruct")
 }
@@ -555,12 +529,14 @@ internal const val OpenRouterRefererUrl =
 
 fun ByokProvider.applyAuthHeaders(add: (String, String) -> Unit) {
     val key = apiKey?.takeIf { it.isNotBlank() }
+    val customNames = customHeaders.mapNotNull { it.name.trim().takeIf { n -> n.isNotEmpty() } }
+    fun hasCustom(name: String) = customNames.any { it.equals(name, ignoreCase = true) }
+    if (type == ByokProviderType.ANTHROPIC && !hasCustom("anthropic-version")) {
+        add("anthropic-version", "2023-06-01")
+    }
     if (key != null) {
         when (type) {
-            ByokProviderType.ANTHROPIC -> {
-                add("x-api-key", key)
-                add("anthropic-version", "2023-06-01")
-            }
+            ByokProviderType.ANTHROPIC -> add("x-api-key", key)
             ByokProviderType.GEMINI -> Unit
             ByokProviderType.OPENAI_COMPAT, ByokProviderType.OPENAI_RESPONSE -> add("Authorization", "Bearer $key")
         }
@@ -578,9 +554,7 @@ fun ByokProvider.applyAuthHeaders(add: (String, String) -> Unit) {
  * 若用户已在 [ByokProvider.customHeaders] 里配置同名头（含 `Referer` 别名），则跳过对应默认值。
  */
 internal fun ByokProvider.applyOpenRouterAttributionHeaders(add: (String, String) -> Unit) {
-    // 归因头是 HTTP 层的事，与推理方言无关，所以这里独立判 host 而不复用方言表。
-    val host = runCatching { java.net.URI(baseUrl).host.orEmpty() }.getOrDefault("").lowercase()
-    if (!host.endsWith("openrouter.ai")) return
+    if (!isOpenRouter) return
     val names = customHeaders.mapNotNull { it.name.trim().takeIf { n -> n.isNotEmpty() } }
     fun has(name: String) = names.any { it.equals(name, ignoreCase = true) }
     if (!has("HTTP-Referer") && !has("Referer")) add("HTTP-Referer", OpenRouterRefererUrl)

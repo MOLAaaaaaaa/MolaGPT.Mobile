@@ -73,7 +73,7 @@ class AgentControlService(
                 val jwt = jwtProvider() ?: error("missing jwt")
                 val request = Request.Builder().url("$base/api/auth/agent_realtime.php")
                     .header("Authorization", "Bearer $jwt").build()
-                val ticket = jsonHttp.newCall(request).execute().use { response ->
+                val ticket = jsonHttp.newCall(request).useCancellable { response ->
                     check(response.isSuccessful)
                     http.json.parseToJsonElement(response.body!!.string()).asObject()!!.string("ticket")!!
                 }
@@ -130,7 +130,7 @@ class AgentControlService(
         val jwt = jwtProvider() ?: error("missing jwt")
         val req = Request.Builder().url("$base/api/auth/agent_command.php?session=${URLEncoder.encode(sessionId, "UTF-8")}&cmdId=${URLEncoder.encode(cmdId, "UTF-8")}")
             .header("Authorization", "Bearer $jwt").build()
-        jsonHttp.newCall(req).execute().use { response ->
+        jsonHttp.newCall(req).useCancellable { response ->
             check(response.isSuccessful) { "HTTP ${response.code}" }
             http.json.parseToJsonElement(response.body!!.string()).asObject()!!.obj("command")?.string("status")
         }
@@ -161,12 +161,12 @@ class AgentControlService(
         return withContext(dispatchers.io) {
             runCatching {
                 Logger.d("AgentRelay", "sending request to ${req.url}")
-                jsonHttp.newCall(req).execute().use { resp ->
+                jsonHttp.newCall(req).useCancellable { resp ->
                     Logger.d("AgentRelay", "response: HTTP ${resp.code}")
                     if (!resp.isSuccessful) {
                         val body = resp.body?.string().orEmpty().take(200)
                         Logger.w("AgentRelay", "HTTP ${resp.code}: $body")
-                        return@use AgentSessionsSnapshot()
+                        return@useCancellable AgentSessionsSnapshot()
                     }
                     val text = resp.body?.string().orEmpty().trimStart('\uFEFF')
                     Logger.d("AgentRelay", "response body (${text.length} chars)")
@@ -179,6 +179,7 @@ class AgentControlService(
                     snapshot
                 }
             }.getOrElse { ex ->
+                if (ex is CancellationException) throw ex
                 Logger.w("AgentRelay", "listSessions failed", ex)
                 AgentSessionsSnapshot()
             }
@@ -250,7 +251,7 @@ class AgentControlService(
             .header("Authorization", "Bearer $jwt")
             .get()
             .build()
-        jsonHttp.newCall(req).execute().use { resp ->
+        jsonHttp.newCall(req).useCancellable { resp ->
             val text = resp.body?.string().orEmpty().trimStart('\uFEFF')
             if (!resp.isSuccessful) {
                 throw Exception("HTTP ${resp.code}: ${text.take(160)}")
@@ -290,13 +291,14 @@ class AgentControlService(
             )
             .build()
         runCatching<Boolean> {
-            jsonHttp.newCall(req).execute().use { resp ->
+            jsonHttp.newCall(req).useCancellable { resp ->
                 if (!resp.isSuccessful) {
                     Logger.w("AgentRelay", "command ${op.name} rejected: HTTP ${resp.code}")
                 }
                 resp.isSuccessful && http.json.parseToJsonElement(resp.body!!.string()).asObject()!!.bool("success") == true
             }
         }.getOrElse { ex ->
+            if (ex is CancellationException) throw ex
             Logger.w("AgentRelay", "command ${op.name} failed: ${ex.message}")
             false
         }

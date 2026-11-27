@@ -29,7 +29,7 @@ class ServerToolApi(private val http: MolaHttp, private val accountTokenProvider
     suspend fun retry(ticket: String): MessageFragment.ToolCall {
         val request = request(ticket, "retry")
         return withContext(Dispatchers.IO) {
-            client.newCall(request).execute().use { response ->
+            client.newCall(request).useCancellable { response ->
                 val body = http.json.parseToJsonElement(response.body!!.string()).jsonObject
                 if (!response.isSuccessful) throw IOException(body["message"]?.jsonPrimitive?.contentOrNull ?: "请求失败（${response.code}）")
                 val html = body["html"]!!.jsonPrimitive.content
@@ -43,7 +43,7 @@ class ServerToolApi(private val http: MolaHttp, private val accountTokenProvider
     suspend fun download(ticket: String, destination: OutputStream) {
         val request = request(ticket, "file")
         withContext(Dispatchers.IO) {
-            client.newCall(request).execute().use { response ->
+            client.newCall(request).useCancellable { response ->
                 if (!response.isSuccessful) {
                     val body = http.json.parseToJsonElement(response.body!!.string()).jsonObject
                     throw IOException(body["message"]?.jsonPrimitive?.contentOrNull ?: "下载失败（${response.code}）")

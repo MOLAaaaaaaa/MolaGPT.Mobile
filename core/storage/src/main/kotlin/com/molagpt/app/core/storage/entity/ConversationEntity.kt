@@ -1,8 +1,10 @@
 package com.molagpt.app.core.storage.entity
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.molagpt.app.core.storage.CloudChange
 
 /** 会话表。 */
 @Entity(
@@ -49,4 +51,15 @@ data class ConversationEntity(
     val byokConversationRecallEnabled: Boolean? = null,
     /** 记忆整理水位线：createdAt 大于它的消息才是待整理的。0 = 从未整理。 */
     val byokMemoryWatermarkAt: Long = 0L,
-)
+    @ColumnInfo(defaultValue = "0") val localRevision: Long = 0,
+    @ColumnInfo(defaultValue = "0") val syncChanges: Int = 0,
+    @ColumnInfo(defaultValue = "NULL") val remoteVersion: Long? = null,
+    @ColumnInfo(defaultValue = "NULL") val bodyVersion: Long? = null,
+    @ColumnInfo(defaultValue = "NULL") val bodyFingerprint: String? = null,
+) {
+    val needsCloudBody: Boolean
+        get() = placeholder || remoteVersion != null && bodyVersion != remoteVersion
+
+    val hasBodyChanges: Boolean
+        get() = syncChanges and CloudChange.BODY != 0 || !placeholder && syncChanges and CloudChange.LEGACY != 0
+}

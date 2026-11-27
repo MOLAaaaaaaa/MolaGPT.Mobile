@@ -11,7 +11,6 @@ import com.molagpt.app.core.model.TitleRequest
 import com.molagpt.app.core.model.UploadStatus
 import com.molagpt.app.core.network.dto.ChatRequestBody
 import com.molagpt.app.core.network.dto.WireEnabledTools
-import com.molagpt.app.core.network.sse.SsePayload
 import com.molagpt.app.core.network.sse.sseFlow
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -68,6 +67,7 @@ class MolaGptChatService(
 ) : ChatService {
     private val streamClient = http.accountOkHttp.newBuilder()
         .readTimeout(90, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.SECONDS)
         .build()
 
     override fun sendMessage(request: ChatRequest): Flow<StreamEvent> = flow {
@@ -138,33 +138,36 @@ class MolaGptChatService(
     }.flowOn(dispatchers.io)
 
     override suspend fun stopGeneration(streamSessionId: String) {
-        val jwt = runCatching { shortTokenManager.freshToken() }.getOrNull() ?: return
+        val jwt = runCatching { shortTokenManager.freshToken() }.getOrElse { if (it is CancellationException) throw it else null } ?: return
         runCatching {
             http.accountClient.post(MolaEndpoints.absolute(MolaEndpoints.STOP_STREAM)) {
                 header(HttpHeaders.Authorization, "Bearer $jwt")
                 contentType(ContentType.Application.Json)
                 setBody(buildJsonObject { put("session_id", streamSessionId) })
             }
-        }.onFailure { Logger.w("MolaChat", "stopGeneration failed", it) }
+        }.onFailure { if (it is CancellationException) throw it else Logger.w("MolaChat", "stopGeneration failed", it) }
     }
 
     override suspend fun checkStreamStatus(streamSessionId: String): StreamStatus? = withContext(dispatchers.io) {
-        val jwt = runCatching { shortTokenManager.freshToken() }.getOrNull() ?: return@withContext null
+        val jwt = runCatching { shortTokenManager.freshToken() }.getOrElse { if (it is CancellationException) throw it else null } ?: return@withContext null
         runCatching {
             val resp = http.accountClient.post(MolaEndpoints.absolute(MolaEndpoints.CHECK_STREAM_STATUS)) {
                 header(HttpHeaders.Authorization, "Bearer $jwt")
                 contentType(ContentType.Application.Json)
                 setBody(buildJsonObject { putJsonArray("session_ids") { add(streamSessionId) } })
             }
+            if (resp.status.value !in 200..299) return@runCatching null
             val root = http.json.parseToJsonElement(resp.bodyAsText()).jsonObject
-            val entry = root["results"]?.jsonObject?.get(streamSessionId) as? JsonObject
-                ?: return@runCatching null
+            if (root["success"] != JsonPrimitive(true)) return@runCatching null
+            val entry = (root["results"] as? JsonObject)?.get(streamSessionId)
+            if (entry == kotlinx.serialization.json.JsonNull) return@runCatching StreamStatus("missing", null, 0)
+            if (entry !is JsonObject) return@runCatching null
             StreamStatus(
                 status = entry["status"]?.jsonPrimitive?.contentOrNull ?: "unknown",
                 conversationId = entry["conversation_id"]?.jsonPrimitive?.contentOrNull,
                 chunksCount = entry["chunks_count"]?.jsonPrimitive?.intOrNull ?: 0,
             )
-        }.getOrNull()
+        }.getOrElse { if (it is CancellationException) throw it else null }
     }
 
     /**
@@ -210,7 +213,7 @@ class MolaGptChatService(
             .header("Authorization", "Bearer $jwt")
             .post(multipart)
             .build()
-        http.accountOkHttp.newCall(req).execute().use { resp ->
+        http.accountOkHttp.newCall(req).useCancellable { resp ->
             if (resp.code == 401) throw MolaAuthExpiredException()
             val text = resp.body?.string().orEmpty()
             val fileObj = runCatching {
@@ -233,7 +236,7 @@ class MolaGptChatService(
 
     override suspend fun generateTitle(request: TitleRequest): String {
         val fallback = request.fallbackTitle()
-        val jwt = runCatching { shortTokenManager.freshToken() }.getOrNull() ?: return fallback
+        val jwt = runCatching { shortTokenManager.freshToken() }.getOrElse { if (it is CancellationException) throw it else null } ?: return fallback
         val user = request.firstUserText.orEmpty().trim()
         val assistantPreview = request.lastAssistantText.orEmpty().trim().take(1000)
         if (user.isBlank() || assistantPreview.isBlank()) return fallback
@@ -275,7 +278,7 @@ class MolaGptChatService(
                         ?.jsonPrimitive
                         ?.contentOrNull,
             )
-        }.getOrNull()?.takeIf { it.isNotBlank() } ?: fallback
+        }.getOrElse { if (it is CancellationException) throw it else null }?.takeIf { it.isNotBlank() } ?: fallback
     }
 
     private fun buildBody(req: ChatRequest): ChatRequestBody = ChatRequestBody(
@@ -296,7 +299,7 @@ class MolaGptChatService(
         clientFeatures = mapOf("subagents" to 1),
     )
 
-    private fun resolveAutoRoute(apiUrl: String, body: ChatRequestBody, jwt: String): AutoRouteResult {
+    private suspend fun resolveAutoRoute(apiUrl: String, body: ChatRequestBody, jwt: String): AutoRouteResult {
         val url = MolaEndpoints.absolute(apiUrl)
         val bodyJson = http.json.encodeToString(ChatRequestBody.serializer(), body)
         val req = Request.Builder()
@@ -304,7 +307,7 @@ class MolaGptChatService(
             .header("Authorization", "Bearer $jwt")
             .post(bodyJson.toRequestBody(JSON_MEDIA))
             .build()
-        http.accountOkHttp.newCall(req).execute().use { resp ->
+        http.accountOkHttp.newCall(req).useCancellable { resp ->
             val text = resp.body?.string().orEmpty().trimStart('\uFEFF')
             if (!resp.isSuccessful) {
                 val root = runCatching { http.json.parseToJsonElement(text) as? JsonObject }.getOrNull()
@@ -448,36 +451,36 @@ class MolaGptChatService(
         waitForRun: Boolean = false,
     ): Boolean {
         val call = streamClient.newCall(request)
-        try {
-            call.execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    val raw = resp.body?.string().orEmpty()
-                    val root = runCatching { http.json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
-                    val business = parseMolaChatFailure(root?.get("mola_error"))
-                    if (business == null && resp.code == 401) throw MolaAuthExpiredException()
-                    if (resp.code == 404 && waitForRun) return false
-                    val failure = business ?: parseMolaStreamFailure(root, statusCode = resp.code)
-                        ?: providerChatFailure(molaServerErrorMessage(resp.code, raw), resp.code)
-                    if (failure.type == "request_already_accepted" && !waitForRun)
-                        throw MolaChatRejectedException(failure)
-                    emit(failure.copy(retryAfter = failure.retryAfter ?: resp.header("Retry-After")?.toIntOrNull()))
+        call.useCancellable { resp ->
+            if (!resp.isSuccessful) {
+                val raw = resp.body?.string().orEmpty()
+                val root = runCatching { http.json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+                val business = parseMolaChatFailure(root?.get("mola_error"))
+                if (business == null && resp.code == 401) throw MolaAuthExpiredException()
+                if (resp.code == 404 && waitForRun) return false
+                if (resp.code == 410 && root?.get("stopped") == JsonPrimitive(true)) {
+                    emit(StreamEvent.Failed("生成已停止", "stream_stopped"))
                     return true
                 }
-                val source = resp.body?.source() ?: throw MolaApiException(resp.code, "$operationName 响应为空")
-                var finished = false
-                sseFlow { source.readUtf8Line() }.takeWhile { payload ->
-                    currentCoroutineContext().ensureActive()
-                    if (!payload.isDone && payload.countsForResumeOffset()) offset.value++
-                    val events = parser.parse(payload)
-                    for (event in events) emit(event)
-                    val failed = events.any { it is StreamEvent.Failed }
-                    finished = finished || payload.isDone || failed || events.any { it is StreamEvent.Finish }
-                    !payload.isDone && !failed
-                }.collect { }
-                return finished
+                val failure = business ?: parseMolaStreamFailure(root, statusCode = resp.code)
+                    ?: providerChatFailure(molaServerErrorMessage(resp.code, raw), resp.code)
+                if (failure.type == "request_already_accepted" && !waitForRun)
+                    throw MolaChatRejectedException(failure)
+                emit(failure.copy(retryAfter = failure.retryAfter ?: resp.header("Retry-After")?.toIntOrNull()))
+                return true
             }
-        } finally {
-            runCatching { if (!call.isCanceled()) call.cancel() }
+            val source = resp.body?.source() ?: throw MolaApiException(resp.code, "$operationName 响应为空")
+            var finished = false
+            sseFlow { source.readUtf8Line() }.takeWhile { payload ->
+                currentCoroutineContext().ensureActive()
+                offset.value += payload.resumeLines
+                val events = parser.parse(payload)
+                for (event in events) emit(event)
+                val failed = events.any { it is StreamEvent.Failed }
+                finished = finished || payload.isDone || failed || events.any { it is StreamEvent.Finish }
+                !payload.isDone && !failed
+            }.collect { }
+            return finished
         }
     }
 
@@ -496,11 +499,6 @@ class MolaGptChatService(
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
     }
-
-    private fun SsePayload.countsForResumeOffset(): Boolean =
-        data.isNotBlank() &&
-            !data.contains("\"type\":\"session_init\"") &&
-            !data.contains("\"type\": \"session_init\"")
 
     private data class ResumeOffset(var value: Int = 0)
 }

@@ -42,6 +42,26 @@ class AuthApi(private val http: MolaHttp) {
         "https://chatgpt.wljay.cn" + path
     } ?: throw MolaApiException(null, "打开账户安全超时，请重试。")
 
+    /**
+     * Web API 密钥页的一次性登录交接。密钥管理要求完整登录会话，票据由服务端换取；
+     * 后端未部署该端点时调用方回退到裸页面 URL（网页自行引导登录），不视为错误。
+     */
+    suspend fun apiKeysLink(jwt: String): String = withTimeoutOrNull(20_000L) {
+        val response = http.accountClient.post(MolaEndpoints.absolute("api/auth/api_keys.php")) {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Authorization, "Bearer $jwt")
+            setBody(buildJsonObject { put("operation", kotlinx.serialization.json.JsonPrimitive("handoff")) })
+        }
+        if (response.status.value == 401) throw MolaAuthExpiredException()
+        if (!response.status.isSuccess()) {
+            throw MolaApiException(response.status.value, "暂时无法打开 API 密钥管理，请稍后重试。")
+        }
+        val path = http.json.parseToJsonElement(response.bodyAsText()).jsonObject["path"]?.jsonPrimitive?.contentOrNull
+        val prefix = "/v2/api/auth/api_keys.php?handoff="
+        if (path == null || !path.startsWith(prefix)) throw MolaApiException(null, "API 密钥入口无效。")
+        "https://chatgpt.wljay.cn" + path
+    } ?: throw MolaApiException(null, "打开 API 密钥管理超时，请重试。")
+
     suspend fun logout(jwt: String): Boolean {
         val resp = http.accountClient.post(MolaEndpoints.absolute(MolaEndpoints.LOGOUT)) {
             header(HttpHeaders.Authorization, "Bearer $jwt")

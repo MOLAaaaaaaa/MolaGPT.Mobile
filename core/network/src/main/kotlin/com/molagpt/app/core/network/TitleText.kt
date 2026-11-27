@@ -58,9 +58,7 @@ internal fun cleanGeneratedTitle(raw: String?): String? {
 }
 
 /** 推理模型可能把 `<think>` 块混进正文；标题只要结论。 */
-private fun stripThinkTags(raw: String): String =
-    raw.replace(Regex("(?s)<think(ing)?>.*?</think(ing)?>", RegexOption.IGNORE_CASE), " ")
-        .replace(Regex("(?s)<think(ing)?>.*", RegexOption.IGNORE_CASE), " ")
+private fun stripThinkTags(raw: String): String = InlineThinkSplitter.visibleText(raw)
 
 private fun looksLikeErrorPayload(text: String): Boolean =
     text.startsWith("{") || text.startsWith("[") ||

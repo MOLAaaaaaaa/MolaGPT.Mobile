@@ -133,7 +133,7 @@ fun ByokProvidersScreen(
                         provider = provider,
                         onClick = { onOpenDetail(provider.id) },
                         onToggle = { enabled ->
-                            viewModel.saveByokProvider(provider.copy(enabled = enabled))
+                            viewModel.setByokProviderEnabled(provider.id, enabled)
                         },
                     )
                 }

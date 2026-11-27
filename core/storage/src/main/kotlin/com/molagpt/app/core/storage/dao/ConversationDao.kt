@@ -4,6 +4,8 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
+import com.molagpt.app.core.storage.CloudChange
 import androidx.paging.PagingSource
 import com.molagpt.app.core.storage.entity.ConversationEntity
 import kotlinx.coroutines.flow.Flow
@@ -110,17 +112,20 @@ interface ConversationDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(entity: ConversationEntity): Long
 
+    @Update
+    suspend fun update(entity: ConversationEntity)
+
     @Query("DELETE FROM conversations WHERE sessionId = :sessionId")
     suspend fun deleteById(sessionId: String)
 
-    @Query("UPDATE conversations SET title = :title, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId AND " + VISIBLE_HISTORY)
+    @Query("UPDATE conversations SET title = :title, updatedAt = :now, syncChanges = syncChanges | CASE WHEN providerKind = 'MOLAGPT' THEN " + CloudChange.TITLE + " ELSE 0 END, localRevision = localRevision + 1 WHERE sessionId = :sessionId AND deletedAt IS NULL AND title IS NOT :title AND " + VISIBLE_HISTORY)
     suspend fun rename(sessionId: String, title: String, now: Long, includeOfficial: Boolean)
 
-    @Query("UPDATE conversations SET model = :model, providerId = :providerId, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId AND providerKind = :providerKind AND " + VISIBLE_HISTORY)
+    @Query("UPDATE conversations SET model = :model, providerId = :providerId, updatedAt = :now, syncChanges = syncChanges | CASE WHEN providerKind = 'MOLAGPT' AND model IS NOT :model THEN " + CloudChange.MODEL + " ELSE 0 END, localRevision = localRevision + 1 WHERE sessionId = :sessionId AND deletedAt IS NULL AND (model IS NOT :model OR providerId IS NOT :providerId) AND providerKind = :providerKind AND " + VISIBLE_HISTORY)
     suspend fun updateModel(sessionId: String, model: String?, providerId: String?, providerKind: String, now: Long, includeOfficial: Boolean)
 
     /** 绑定 / 切换会话角色（仅 BYOK）。 */
-    @Query("UPDATE conversations SET personaId = :personaId, updatedAt = :now, dirty = 1 WHERE sessionId = :sessionId AND providerKind = 'BYOK'")
+    @Query("UPDATE conversations SET personaId = :personaId, updatedAt = :now WHERE sessionId = :sessionId AND providerKind = 'BYOK'")
     suspend fun updatePersona(sessionId: String, personaId: String?, now: Long)
 
     /**
@@ -166,10 +171,10 @@ interface ConversationDao {
     )
     suspend fun sessionsPendingMemory(limit: Int, allowedPersonaIds: List<String>): List<String>
 
-    @Query("UPDATE conversations SET pinned = :pinned, dirty = 1 WHERE sessionId = :sessionId AND " + VISIBLE_HISTORY)
+    @Query("UPDATE conversations SET pinned = :pinned, syncChanges = syncChanges | CASE WHEN providerKind = 'MOLAGPT' THEN " + CloudChange.PIN + " ELSE 0 END, localRevision = localRevision + 1 WHERE sessionId = :sessionId AND deletedAt IS NULL AND pinned IS NOT :pinned AND " + VISIBLE_HISTORY)
     suspend fun setPinned(sessionId: String, pinned: Boolean, includeOfficial: Boolean)
 
-    @Query("UPDATE conversations SET favorite = :favorite, dirty = 1 WHERE sessionId = :sessionId AND " + VISIBLE_HISTORY)
+    @Query("UPDATE conversations SET favorite = :favorite WHERE sessionId = :sessionId AND deletedAt IS NULL AND " + VISIBLE_HISTORY)
     suspend fun setFavorite(sessionId: String, favorite: Boolean, includeOfficial: Boolean)
 
     @Query(
@@ -177,7 +182,8 @@ interface ConversationDao {
         UPDATE conversations
         SET updatedAt = :now,
             lastMessagePreview = :preview,
-            dirty = 1,
+            syncChanges = syncChanges | CASE WHEN providerKind = 'MOLAGPT' THEN """ + CloudChange.BODY + """ ELSE 0 END,
+            localRevision = localRevision + 1,
             messageCount = (SELECT COUNT(*) FROM messages WHERE messages.sessionId = :sessionId),
             visibleInList = CASE
                 WHEN placeholder = 1 OR (SELECT COUNT(*) FROM messages WHERE messages.sessionId = :sessionId) > 0 THEN 1
@@ -190,13 +196,11 @@ interface ConversationDao {
 
     // —— 云同步 ——
 
-    /** 未删除、有未推送改动、且已 materialize（非占位）的会话（增量 push 用）。 */
-    @Query("SELECT * FROM conversations WHERE dirty = 1 AND deletedAt IS NULL AND placeholder = 0 AND " + OFFICIAL)
+    @Query("SELECT * FROM conversations WHERE syncChanges != 0 AND deletedAt IS NULL AND " + OFFICIAL)
     suspend fun getDirty(): List<ConversationEntity>
 
-    /** 全部未删除、已 materialize 的会话（首次全量 push 用；占位会话只有元数据不参与推送）。 */
-    @Query("SELECT * FROM conversations WHERE deletedAt IS NULL AND placeholder = 0 AND " + OFFICIAL)
-    suspend fun getAllActive(): List<ConversationEntity>
+    @Query("SELECT * FROM conversations WHERE remoteVersion IS NOT NULL AND deletedAt IS NULL AND syncChanges = 0 AND " + OFFICIAL)
+    suspend fun getConfirmed(): List<ConversationEntity>
 
     /** 软删墓碑（待 push delete）。 */
     @Query("SELECT * FROM conversations WHERE deletedAt IS NOT NULL AND " + OFFICIAL)
@@ -211,25 +215,6 @@ interface ConversationDao {
     @Query("DELETE FROM conversations WHERE " + OFFICIAL)
     suspend fun clearOfficial()
 
-    /** push 成功后清脏标。 */
-    @Query("UPDATE conversations SET dirty = 0 WHERE sessionId = :sessionId AND updatedAt = :sentAt AND deletedAt IS NULL AND " + OFFICIAL)
-    suspend fun markSynced(sessionId: String, sentAt: Long)
-
-    /** 懒加载完成：消息已拉到本地，转为正式会话。 */
-    @Query(
-        """
-        UPDATE conversations
-        SET placeholder = 0,
-            messageCount = (SELECT COUNT(*) FROM messages WHERE messages.sessionId = :sessionId),
-            visibleInList = CASE
-                WHEN (SELECT COUNT(*) FROM messages WHERE messages.sessionId = :sessionId) > 0 THEN 1
-                ELSE 0
-            END
-        WHERE sessionId = :sessionId AND """ + OFFICIAL + """
-        """,
-    )
-    suspend fun markLoaded(sessionId: String)
-
     @Query(
         """
         UPDATE conversations
@@ -243,15 +228,11 @@ interface ConversationDao {
     )
     suspend fun refreshListVisibility(sessionId: String)
 
-    /** 同步拉取时只更新元数据（不动 dirty/placeholder/消息）。 */
-    @Query("UPDATE conversations SET title = :title, model = :model, updatedAt = :updatedAt WHERE sessionId = :sessionId AND dirty = 0 AND " + OFFICIAL)
-    suspend fun updateMetaFromSync(sessionId: String, title: String, model: String?, updatedAt: Long)
-
     /** 软删：打墓碑并标脏，等待向云端 push delete。 */
-    @Query("UPDATE conversations SET deletedAt = :now, dirty = 1 WHERE sessionId = :sessionId AND " + OFFICIAL)
+    @Query("UPDATE conversations SET deletedAt = :now, localRevision = localRevision + 1 WHERE sessionId = :sessionId AND deletedAt IS NULL AND " + OFFICIAL)
     suspend fun tombstone(sessionId: String, now: Long)
 
     /** 云端删除确认后的硬删（连带消息由仓库一并清理）。 */
-    @Query("DELETE FROM conversations WHERE sessionId = :sessionId AND deletedAt IS NOT NULL AND " + OFFICIAL)
-    suspend fun purge(sessionId: String): Int
+    @Query("DELETE FROM conversations WHERE sessionId = :sessionId AND deletedAt IS NOT NULL AND localRevision = :revision AND " + OFFICIAL)
+    suspend fun purge(sessionId: String, revision: Long): Int
 }

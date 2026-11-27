@@ -23,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
@@ -80,6 +81,7 @@ import kotlinx.coroutines.delay
 fun MolaAccountScreen(
     onOpenSupport: () -> Unit = {},
     onOpenAccountSecurity: () -> Unit = {},
+    onOpenApiKeys: () -> Unit = {},
     viewModel: SettingsViewModel,
     loggedIn: Boolean,
     username: String?,
@@ -138,6 +140,10 @@ fun MolaAccountScreen(
                     securityStatus = status?.securityStatus,
                     onClick = onOpenAccountSecurity,
                 )
+                // 密钥管理只在 Web；服务端未宣布 api_access 时连入口都不出现。
+                if (status?.apiAccessState != null) {
+                    ApiKeysEntryCard(onClick = onOpenApiKeys)
+                }
             }
 
             SectionTitle("配额用量")
@@ -676,6 +682,36 @@ private fun AccountSecurityEntryCard(securityStatus: String?, onClick: () -> Uni
                     text = securityStatus ?: "查看账户状态、安全限制与申诉记录",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (restricted) amberFg else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            ForwardChevron()
+        }
+    }
+}
+
+/** API 密钥入口卡：结构对齐账户与安全卡；管理动作都在 Web 页里，这里只负责带登录态跳过去。 */
+@Composable
+private fun ApiKeysEntryCard(onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(start = 16.dp, top = 13.dp, end = 16.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SettingsRowIcon(Icons.Outlined.Key)
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text("API 密钥", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = "创建与管理密钥，在浏览器中打开",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }

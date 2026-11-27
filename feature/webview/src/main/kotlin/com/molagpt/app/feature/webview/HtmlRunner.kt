@@ -399,9 +399,13 @@ private class SandboxClient(
         val host = uri.host?.lowercase() ?: return null
         if (host.endsWith(HtmlSandbox.HOST_SUFFIX)) return serveLocal(uri, host)
         val scheme = uri.scheme?.lowercase()
-        if (scheme != "http" && scheme != "https") return null
+        if (scheme == "http") {
+            main.post { state.blocked++ }
+            return plain(403, "Blocked")
+        }
+        if (scheme != "https") return null
 
-        if (!CanvasCdn.isAllowed(host) || request.method != "GET") {
+        if (!CanvasCdn.isAllowedUri(uri) || request.method != "GET") {
             main.post { state.blocked++ }
             return plain(403, "Blocked")
         }

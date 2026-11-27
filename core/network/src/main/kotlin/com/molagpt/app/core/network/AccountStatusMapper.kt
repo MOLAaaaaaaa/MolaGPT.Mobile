@@ -128,6 +128,8 @@ fun JsonObject.toAccountStatus(displayNameOf: (String) -> String? = { null }): A
         securityStatus = securityStatus,
         cloudSyncEnabled = (user?.get("settings") as? JsonObject)
             ?.get("cloud_sync_enabled").boolishOrNull(),
+        apiAccessState = (user?.get("api_access") as? JsonObject)
+            ?.get("state")?.prim()?.contentOrNull,
     )
 }
 

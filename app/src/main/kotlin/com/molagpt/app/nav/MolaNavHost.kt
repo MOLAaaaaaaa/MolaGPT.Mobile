@@ -480,6 +480,15 @@ fun MolaNavHost(
                         }
                     }
                 },
+                onOpenApiKeys = {
+                    navScope.launch {
+                        openApiKeys(container, securityContext) {
+                            if (navController.currentDestination?.route != Routes.REAUTHENTICATE) {
+                                navController.navigate(Routes.REAUTHENTICATE) { launchSingleTop = true }
+                            }
+                        }
+                    }
+                },
                 viewModel = vm,
                 loggedIn = account.loggedIn,
                 username = account.username,
@@ -1050,9 +1059,16 @@ private fun ChatHost(
     // 抽屉盖在聊天页之上，Snackbar 必须画在最外层才可见。
     val snackbar = remember { SnackbarHostState() }
 
+    // 至少成功取到过一次账号电脑列表：首页引导要等它，免得已配对的人先看到一闪。
+    var desktopsLoaded by remember { mutableStateOf(false) }
+    var modelMenuOpen by remember { mutableStateOf(false) }
+    var desktopModels by remember { mutableStateOf<DesktopModelsState?>(null) }
+    var desktopModelsJob by remember { mutableStateOf<Job?>(null) }
+
     // 登录态变化时换成当前账号的缓存列表；未登录则清空。
     LaunchedEffect(account.loggedIn, account.username) {
         desktopLoadError = null
+        desktopsLoaded = false
         container.desktopRemoteService.restoreDesktops()
     }
 
@@ -1064,24 +1080,33 @@ private fun ChatHost(
         }
     }
 
-    // 侧边栏打开期间保持电脑实时连接并刷新列表；关闭后断开，但列表保留，下次打开不必从空白等起。
-    LaunchedEffect(drawerOpen, account.loggedIn, account.username) {
-        if (!drawerOpen || !account.loggedIn || account.username.isNullOrBlank()) return@LaunchedEffect
+    // 侧边栏与首页模型菜单共用同一份远控电脑列表和连接生命周期：
+    // 任一面板打开时保持实时连接并随变更刷新；关闭时仅在首次未加载过列表时静默拉一次。
+    LaunchedEffect(drawerOpen, modelMenuOpen, account.loggedIn, account.username) {
+        if (!account.loggedIn || account.username.isNullOrBlank()) {
+            desktopsLoaded = false
+            return@LaunchedEffect
+        }
         val service = container.desktopRemoteService
+        suspend fun refresh(reportError: Boolean) {
+            try {
+                service.listDesktops()
+                desktopLoadError = null
+                desktopsLoaded = true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (reportError) desktopLoadError = error.message ?: "电脑列表加载失败"
+            }
+        }
+        if (!drawerOpen && !modelMenuOpen) {
+            if (!desktopsLoaded) refresh(reportError = false)
+            return@LaunchedEffect
+        }
         service.acquire()
         try {
-            suspend fun refresh() {
-                try {
-                    service.listDesktops()
-                    desktopLoadError = null
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Exception) {
-                    desktopLoadError = error.message ?: "电脑列表加载失败"
-                }
-            }
-            refresh()
-            service.listChanged.debounce(400).collect { refresh() }
+            refresh(reportError = drawerOpen)
+            service.listChanged.debounce(400).collect { refresh(reportError = drawerOpen) }
         } finally {
             service.release()
         }
@@ -1139,69 +1164,19 @@ private fun ChatHost(
         sessionVm.sessionItems.setDesktopSessions(desktopSidebarSessions)
     }
 
-    // 首页模型菜单「在电脑上运行」：登录后先取一次电脑列表，菜单首次打开就有；
-    // 菜单打开期间保持实时连接，在线状态与列表随之刷新。
-    var modelMenuOpen by remember { mutableStateOf(false) }
-    var menuDesktopInfos by remember { mutableStateOf<List<DesktopInfo>>(emptyList()) }
-    var menuPairedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
-    // 至少成功取到过一次列表：首页引导要等它，免得已配对的人先看到一闪。
-    var menuDesktopsLoaded by remember { mutableStateOf(false) }
-    var desktopModels by remember { mutableStateOf<DesktopModelsState?>(null) }
-    var desktopModelsJob by remember { mutableStateOf<Job?>(null) }
-    LaunchedEffect(modelMenuOpen, account.loggedIn, account.username, accountPairsVersion) {
-        if (!account.loggedIn || account.username.isNullOrBlank()) {
-            menuDesktopInfos = emptyList()
-            menuPairedIds = emptySet()
-            menuDesktopsLoaded = false
-            return@LaunchedEffect
-        }
-        val service = container.desktopRemoteService
-        suspend fun refresh() {
-            try {
-                val infos = service.listDesktops()
-                menuPairedIds = withContext(container.dispatchers.io) {
-                    infos.mapNotNullTo(HashSet()) { info -> info.machineId.takeIf(service::isPaired) }
-                }
-                menuDesktopInfos = infos
-                menuDesktopsLoaded = true
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                // 取不到就不显示这一节，不打扰选本机模型。
-            }
-        }
-        if (!modelMenuOpen) {
-            if (menuDesktopInfos.isEmpty()) {
-                refresh()
-            } else {
-                val infos = menuDesktopInfos
-                menuPairedIds = withContext(container.dispatchers.io) {
-                    infos.mapNotNullTo(HashSet()) { info -> info.machineId.takeIf(service::isPaired) }
-                }
-            }
-            return@LaunchedEffect
-        }
-        service.acquire()
-        try {
-            refresh()
-            service.listChanged.debounce(400).collect { refresh() }
-        } finally {
-            service.release()
-        }
-    }
     // 侧边栏或模型菜单打开期间连上配对码电脑，在线状态才准。
     val anonWanted = drawerOpen || modelMenuOpen
     DisposableEffect(anonWanted) {
         if (anonWanted) anonService.acquire()
         onDispose { if (anonWanted) anonService.release() }
     }
-    val desktopTargets = remember(menuDesktopInfos, menuPairedIds, onlineDesktopIds, desktopLink, anonInfos, anonOnlineIds) {
-        withoutAnonDuplicates(menuDesktopInfos, menuPairedIds, anonInfos).map { info ->
+    val desktopTargets = remember(desktopInfos, pairedDesktopIds, onlineDesktopIds, desktopLink, anonInfos, anonOnlineIds) {
+        withoutAnonDuplicates(desktopInfos, pairedDesktopIds, anonInfos).map { info ->
             DesktopRunTarget(
                 machineId = info.machineId,
                 name = info.machineName,
                 online = if (desktopLink == DesktopLinkState.Connected) info.machineId in onlineDesktopIds else info.online,
-                paired = info.machineId in menuPairedIds,
+                paired = info.machineId in pairedDesktopIds,
             )
         } + anonInfos.map { info ->
             DesktopRunTarget(info.machineId, info.machineName, online = info.machineId in anonOnlineIds, paired = true)
@@ -1266,13 +1241,13 @@ private fun ChatHost(
         desktopModels = DesktopModelsState(machineId, loading = cached == null, groups = cached.orEmpty())
         desktopModelsJob = scope.launch {
             desktopModels = try {
-                if (!anon && machineId !in menuPairedIds) {
+                if (!anon && machineId !in pairedDesktopIds) {
                     container.desktopRemoteService.pairWithAccount(
                         machineId = machineId,
                         deviceName = container.remoteDeviceName,
                         deviceId = container.remoteDeviceId,
                     )
-                    menuPairedIds = menuPairedIds + machineId
+                    pairedDesktopIds = pairedDesktopIds + machineId
                 }
                 DesktopModelsState(machineId, groups = service.modelGroups(machineId))
             } catch (error: CancellationException) {
@@ -1513,8 +1488,8 @@ private fun ChatHost(
                             draftKey = Ids.newSessionId(),
                         )
                     },
-                    showDesktopHint = account.loggedIn && menuDesktopsLoaded &&
-                        menuPairedIds.isEmpty() && anonInfos.isEmpty() && !settings.desktopHintDismissed,
+                    showDesktopHint = account.loggedIn && desktopsLoaded &&
+                        pairedDesktopIds.isEmpty() && anonInfos.isEmpty() && !settings.desktopHintDismissed,
                     onDismissDesktopHint = {
                         scope.launch { container.settingsStore.setDesktopHintDismissed(true) }
                     },
@@ -1772,4 +1747,36 @@ private suspend fun openAccountSecurity(
     } catch (error: Exception) {
         android.widget.Toast.makeText(context, "暂时无法打开账户安全，请稍后重试。", android.widget.Toast.LENGTH_SHORT).show()
     }
+}
+
+/**
+ * 打开 Web API 密钥管理。密钥管理要求完整登录会话，交接票据由服务端签发；
+ * 后端尚未部署交接端点时回退到裸页面——网页自己会引导登录，不算失败。
+ */
+private suspend fun openApiKeys(
+    container: com.molagpt.app.di.AppContainer,
+    context: android.content.Context,
+    onAuthExpired: () -> Unit,
+) {
+    val session = container.credentialStore.sessionTokens()
+    if (session == null) {
+        onAuthExpired()
+        return
+    }
+    val url = try {
+        val link = container.authApi.apiKeysLink(session.accessToken)
+        if (container.credentialStore.sessionTokens()?.generation != session.generation) {
+            android.widget.Toast.makeText(context, "登录账户已变化，请重试。", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        link
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: MolaAuthExpiredException) {
+        onAuthExpired()
+        return
+    } catch (_: Exception) {
+        "https://chatgpt.wljay.cn/v2/account/api-keys/"
+    }
+    openAccountSecurityTab(context, url)
 }

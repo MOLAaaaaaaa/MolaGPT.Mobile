@@ -32,7 +32,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -244,10 +243,10 @@ class ImageTaskManager(
                 reasoning = run.params.reasoning && canReason,
                 reasoningEffort = run.params.reasoningEffort,
             )
-            val result = blocking(gate) {
+            val result = gate.runCancellable(dispatchers.io) {
                 api.runWorkbench(provider, run.modelId, run.prompt, config, attachments, gate)
             }
-            val outputs = blocking(gate) { result.hits.mapNotNull { persistHit(run.taskId, it, gate) } }
+            val outputs = gate.runCancellable(dispatchers.io) { result.hits.mapNotNull { persistHit(run.taskId, it, gate) } }
             val failedCount = result.hits.size - outputs.size
             // 结果已经落盘，收尾的写库不能再被取消打断，否则这一版会永远停在「生成中」。
             withContext(NonCancellable) {
@@ -304,20 +303,6 @@ class ImageTaskManager(
             throw MolaApiException(400, "模型 ${run.modelId} 已不在该服务中")
         }
         return provider
-    }
-
-    /**
-     * 阻塞调用放到 IO 线程上跑；协程被取消时掐断连接，让阻塞线程立刻退出，
-     * 「停止」不用再等服务端把整张图返回。
-     */
-    private suspend fun <T> blocking(gate: ImageCallGate, block: () -> T): T = coroutineScope {
-        val work = async(dispatchers.io) { block() }
-        try {
-            work.await()
-        } catch (e: CancellationException) {
-            gate.cancel()
-            throw e
-        }
     }
 
     private fun persistRef(taskId: String, ref: PendingRef): ImageRefRecord = when (ref) {

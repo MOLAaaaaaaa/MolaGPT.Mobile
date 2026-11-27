@@ -19,24 +19,20 @@ class StreamForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        val kind = intent?.getStringExtra(EXTRA_KIND)?.let { runCatching { Kind.valueOf(it) }.getOrNull() } ?: Kind.REPLY
-        startForeground(NOTIFICATION_ID, buildNotification(kind))
+        request.started(this) { kind -> startForeground(NOTIFICATION_ID, buildNotification(kind)) }
         // 进程被杀后不自动重建：流已随进程消亡，恢复改由 App 启动时对账(check_stream_status)完成。
         // 若返回 START_STICKY，系统会以 null intent 重建服务、在无任务时留下僵尸「生成中」通知。
         return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onTimeout(startId: Int, fgsType: Int) = request.timedOut(this)
+
+    override fun onDestroy() {
+        request.destroyed(this)
+        super.onDestroy()
+    }
 
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -66,22 +62,11 @@ class StreamForegroundService : Service() {
     enum class Kind { REPLY, IMAGE }
 
     companion object {
-        private const val EXTRA_KIND = "kind"
         private const val CHANNEL_ID = "mola_stream_foreground"
         private const val NOTIFICATION_ID = 1001
-        private const val ACTION_STOP = "com.molagpt.app.action.STOP_STREAM_FOREGROUND"
+        private val request = ForegroundServiceRequest<Kind>(StreamForegroundService::class.java)
 
-        fun start(context: Context, kind: Kind = Kind.REPLY) {
-            ContextCompat.startForegroundService(
-                context,
-                Intent(context, StreamForegroundService::class.java).putExtra(EXTRA_KIND, kind.name),
-            )
-        }
-
-        fun stop(context: Context) {
-            context.startService(
-                Intent(context, StreamForegroundService::class.java).setAction(ACTION_STOP),
-            )
-        }
+        fun update(context: Context, kind: Kind?, appForeground: Boolean) =
+            request.update(context, kind, appForeground)
     }
 }

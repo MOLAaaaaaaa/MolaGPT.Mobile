@@ -9,6 +9,7 @@ import com.molagpt.app.core.model.RetryAttempt
 import com.molagpt.app.core.model.Role
 import com.molagpt.app.core.model.SourceReference
 import com.molagpt.app.core.model.ToolStatus
+import com.molagpt.app.core.network.InlineThinkSplitter
 import com.molagpt.app.core.network.WebToolArtifact
 import com.molagpt.app.core.network.WebToolArtifactSplitter
 import com.molagpt.app.core.storage.entity.ConversationEntity
@@ -44,7 +45,6 @@ import java.util.TimeZone
  */
 object SyncMapper {
     const val EPOCH_ISO = "1970-01-01T00:00:00.000Z"
-    private const val THINK_CLOSE = "</think>"
     private const val DS_CLOSE = "</DSanalysis>"
     private const val BLOCKQUOTE_CLOSE = "</blockquote>"
     private const val META_DISPLAY_CONTENT = "displayContent"
@@ -81,8 +81,17 @@ object SyncMapper {
 
     fun formatIso(ms: Long): String = isoFormat().format(Date(ms))
 
-    fun parseIso(s: String?): Long =
-        if (s.isNullOrBlank()) 0L else runCatching { isoFormat().parse(s)?.time ?: 0L }.getOrDefault(0L)
+    private val isoPattern = Regex("""(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})""")
+
+    fun parseIso(s: String?): Long {
+        val (date, fraction, offset) = s?.let(isoPattern::matchEntire)?.destructured ?: return 0L
+        val zone = if (offset == "Z") "+0000" else offset.replace(":", "")
+        val normalized = "$date.${fraction.take(3).padEnd(3, '0')}$zone"
+        return runCatching {
+            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).apply { isLenient = false }
+                .parse(normalized)?.time ?: 0L
+        }.getOrDefault(0L)
+    }
 
     // 会话本地 id(sess_) ↔ 服务端 conversation id(chat_)
     fun conversationIdOf(sessionId: String): String =
@@ -91,6 +100,10 @@ object SyncMapper {
     fun sessionIdOf(conversationId: String): String =
         if (conversationId.startsWith("chat_")) "sess_" + conversationId.removePrefix("chat_") else conversationId
 
+    private val conversationIdPattern = Regex("chat_[0-9]+_[a-zA-Z0-9]+|[a-fA-F0-9]{32}|[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}")
+
+    internal fun validConversationId(id: String): Boolean = conversationIdPattern.matches(id)
+
     /** 会话元数据 → 服务端 metadata 对象。 */
     fun conversationMetadata(c: ConversationEntity): JsonObject = buildJsonObject {
         put("id", conversationIdOf(c.sessionId))
@@ -98,6 +111,7 @@ object SyncMapper {
         put("time", formatIso(c.createdAt))
         put("updated_at", formatIso(c.updatedAt))
         put("model", c.model ?: "auto")
+        put("pinned", c.pinned)
     }
 
     /**
@@ -383,7 +397,6 @@ object SyncMapper {
         val fragments = mutableListOf<MessageFragment>()
         val visible = StringBuilder()
         val searchQueries = mutableListOf<String>()
-        var pos = 0
         var hasThinking = false
         val toolDecoder = WebToolArtifactSplitter()
 
@@ -406,54 +419,40 @@ object SyncMapper {
             visible.append(text)
         }
 
-        while (pos < content.length) {
-            val next = findNextCloudTimelineMarker(content, pos)
-            if (next < 0) {
-                appendVisible(content.substring(pos))
-                break
-            }
-
-            if (next > pos) {
-                appendVisible(content.substring(pos, next))
-            }
-
-            if (startsWithIgnoreCase(content, next, "<think")) {
-                val openEnd = content.indexOf('>', next)
-                if (openEnd < 0) {
-                    appendThinkingFragment(fragments, content.substring(next))
-                    hasThinking = true
-                    break
-                }
-                val close = indexOfIgnoreCase(content, THINK_CLOSE, openEnd + 1)
-                val body = if (close < 0) {
-                    content.substring(openEnd + 1)
-                } else {
-                    content.substring(openEnd + 1, close)
-                }
-                toolDecoder.feed(body).forEach { artifact ->
+        val splitter = InlineThinkSplitter()
+        for (segment in splitter.feed(content) + splitter.flush()) {
+            val text = segment.text
+            if (segment.thinking) {
+                hasThinking = true
+                toolDecoder.feed(text).forEach { artifact ->
                     when (artifact) {
                         is WebToolArtifact.Text -> appendThinkingFragment(fragments, artifact.text)
                         is WebToolArtifact.Tool -> appendTool(artifact)
                     }
                 }
-                hasThinking = true
-                pos = if (close < 0) content.length else close + THINK_CLOSE.length
                 continue
             }
-
-            val end = findToolMarkupEnd(content, next)
-            if (end < 0) {
-                appendVisible(content.substring(next, (next + 1).coerceAtMost(content.length)))
-                pos = next + 1
-                continue
+            var pos = 0
+            while (pos < text.length) {
+                val next = findNextCloudTimelineMarker(text, pos)
+                if (next < 0) {
+                    appendVisible(text.substring(pos))
+                    break
+                }
+                if (next > pos) appendVisible(text.substring(pos, next))
+                val end = findToolMarkupEnd(text, next)
+                if (end < 0) {
+                    appendVisible(text.substring(next, next + 1))
+                    pos = next + 1
+                    continue
+                }
+                val unit = text.substring(next, end)
+                if (containsIgnoreCase(unit, "tool-search-blockquote")) {
+                    extractSearchChips(unit).joinToString(" / ").takeIf { it.isNotBlank() }?.let(searchQueries::add)
+                }
+                toolDecoder.feed(unit).filterIsInstance<WebToolArtifact.Tool>().forEach(::appendTool)
+                pos = end
             }
-
-            val unit = content.substring(next, end)
-            if (containsIgnoreCase(unit, "tool-search-blockquote")) {
-                extractSearchChips(unit).joinToString(" / ").takeIf { it.isNotBlank() }?.let(searchQueries::add)
-            }
-            toolDecoder.feed(unit).filterIsInstance<WebToolArtifact.Tool>().forEach(::appendTool)
-            pos = end
         }
 
         return CloudTimelineParse(
@@ -575,34 +574,6 @@ object SyncMapper {
         }
     }
 
-    private fun splitThinkTags(content: String): PairText {
-        val visible = StringBuilder()
-        val thinking = StringBuilder()
-        var pos = 0
-        while (pos < content.length) {
-            val start = indexOfIgnoreCase(content, "<think", pos)
-            if (start < 0) {
-                visible.append(content, pos, content.length)
-                break
-            }
-            visible.append(content, pos, start)
-            val openEnd = content.indexOf('>', start)
-            if (openEnd < 0) {
-                appendThinking(thinking, content.substring(start))
-                break
-            }
-            val close = indexOfIgnoreCase(content, THINK_CLOSE, openEnd + 1)
-            if (close < 0) {
-                appendThinking(thinking, content.substring(openEnd + 1))
-                break
-            }
-            appendThinking(thinking, content.substring(openEnd + 1, close))
-            pos = close + THINK_CLOSE.length
-        }
-        return PairText(visible.toString(), thinking.toString())
-    }
-
-    private data class PairText(val visible: String, val thinking: String)
 
     private fun cleanVisibleText(input: String): String {
         var text = input
@@ -779,7 +750,6 @@ object SyncMapper {
 
     private fun findNextCloudTimelineMarker(source: String, start: Int): Int =
         minPositive(
-            indexOfIgnoreCase(source, "<think", start),
             indexOfIgnoreCase(source, "<steel-step", start),
             indexOfIgnoreCase(source, "<DSanalysis", start),
             indexOfNextToolStatusBlockquote(source, start),

@@ -16,7 +16,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.JsonObject
 
 /**
  * 上下文压缩的纯逻辑：估算上下文、选切点、把摘要套进请求、拼摘要输入。
@@ -82,10 +83,10 @@ internal object ContextPlanner {
         var tokens = ContextTokens.estimate(sendText(message)) + ContextTokens.MESSAGE_OVERHEAD
         if (message.role == Role.ASSISTANT) {
             // 协议快照只在同一模型下回放，回放时它取代正文。
-            replayedWire(message, providerId, modelId)?.let { wire ->
-                val estimated = if (!wire.contains("\"items\":") && wire.contains("\"wire_file\":")) {
-                    Json.parseToJsonElement(wire).jsonObject.getValue("estimated_tokens").jsonPrimitive.int
-                } else ContextTokens.estimate(wire)
+            replayedWire(message, providerId, modelId)?.let { (raw, root) ->
+                val estimated = if (root["wire_file"] is JsonPrimitive && root["items"] == null) {
+                    (root["estimated_tokens"] as? JsonPrimitive)?.intOrNull ?: ContextTokens.estimate(raw)
+                } else ContextTokens.estimate(raw)
                 tokens = maxOf(tokens, estimated)
             }
         }
@@ -404,16 +405,14 @@ internal object ContextPlanner {
             }
         }
 
-    private fun replayedWire(message: ChatMessage, providerId: String, modelId: String): String? {
-        val scope = "\"provider_id\":${JsonPrimitive(providerId)},\"model_id\":${JsonPrimitive(modelId)}"
-        return ChatMessageMetadataKeys.WIRE_HISTORY.firstNotNullOfOrNull { key ->
-            message.metadata[key]?.takeIf { it.regionContains(scope) }
+    private fun replayedWire(message: ChatMessage, providerId: String, modelId: String): Pair<String, JsonObject>? {
+        for (key in ChatMessageMetadataKeys.WIRE_HISTORY) {
+            val raw = message.metadata[key] ?: continue
+            val root = runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: continue
+            if (root["provider_id"] == JsonPrimitive(providerId) && root["model_id"] == JsonPrimitive(modelId)) return raw to root
         }
+        return null
     }
-
-    /** 快照头部固定是 version / wire_api / provider_id / model_id，只看开头即可。 */
-    private fun String.regionContains(needle: String): Boolean =
-        substring(0, minOf(length, 512)).contains(needle)
 
     private fun fragmentText(message: ChatMessage): String =
         message.fragments.mapNotNull { fragment ->

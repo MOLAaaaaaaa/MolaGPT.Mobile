@@ -26,9 +26,16 @@ class StreamParser(
     /** Responses 最终回答流可只接收 final_answer；通用解析默认保留全部文本。 */
     private val responseFinalAnswerOnly: Boolean = false,
     private val serverTurn: Boolean = false,
+    private val responsesProtocol: Boolean = false,
 ) {
     private val think = InlineThinkSplitter()
-    private val webArtifacts = WebToolArtifactSplitter()
+    private val webArtifacts = if (serverTurn) WebToolArtifactSplitter() else null
+    private data class ToolDelta(val id: String, var name: String? = null, val arguments: StringBuilder = StringBuilder())
+    private val toolsByIndex = HashMap<Int, ToolDelta>()
+    private val toolsById = HashMap<String, ToolDelta>()
+    var terminalReason: String? = null
+        private set
+    private var failed = false
     private val responseMessagePhases = HashMap<String, String>()
 
     /**
@@ -36,8 +43,7 @@ class StreamParser(
      *
      * 开了 `stream_options.include_usage` 之后，OpenAI 把 usage 放在 **finish_reason 之后**
      * 那个 `choices: []` 的独立 chunk 里——所以在 finish_reason 那一刻去读永远是空的。
-     * 这里把任意 chunk 上的 usage 记下来，由 [DONE] 触发的收尾 Finish 带出去
-     * （见 ByokChatService 的 SSE 循环：payload.isDone 时无条件再调一次 finishTail）。
+     * 结束帧携带已知 usage，较晚的统计帧单独发 UsageUpdate。
      */
     private var lastUsage: Usage? = null
     // Only hold a possible prefix of the fixed old provider notice on official turns.
@@ -46,7 +52,9 @@ class StreamParser(
     private fun feedVisibleText(text: String, events: MutableList<StreamEvent>) {
         val candidate = legacyQuotaCandidate
         if (candidate == null) {
-            webArtifacts.feed(text).forEach { appendArtifact(it, events) }
+            val decoder = webArtifacts
+            if (decoder == null) appendSegments(think.feed(text), events)
+            else decoder.feed(text).forEach { appendArtifact(it, events) }
             return
         }
         candidate.append(text)
@@ -54,7 +62,7 @@ class StreamParser(
         if (candidate.length <= LEGACY_SHARED_QUOTA_NOTICE.length + 64
             && (LEGACY_SHARED_QUOTA_NOTICE.startsWith(probe) || probe.trimEnd() == LEGACY_SHARED_QUOTA_NOTICE)) return
         legacyQuotaCandidate = null
-        webArtifacts.feed(candidate.toString()).forEach { appendArtifact(it, events) }
+        checkNotNull(webArtifacts).feed(candidate.toString()).forEach { appendArtifact(it, events) }
     }
 
     private fun flushLegacyQuota(events: MutableList<StreamEvent>): Boolean {
@@ -62,12 +70,13 @@ class StreamParser(
         legacyQuotaCandidate = null
         val text = candidate.toString()
         if (text.trim() == LEGACY_SHARED_QUOTA_NOTICE) return true
-        if (text.isNotEmpty()) webArtifacts.feed(text).forEach { appendArtifact(it, events) }
+        if (text.isNotEmpty()) checkNotNull(webArtifacts).feed(text).forEach { appendArtifact(it, events) }
         return false
     }
 
     fun parse(payload: SsePayload): List<StreamEvent> {
-        if (payload.isDone) return finishTail("stop")
+        if (failed) return emptyList()
+        if (payload.isDone) return if (responsesProtocol) flushTail() else complete("stop")
         val raw = payload.data
         if (raw.isBlank()) return emptyList()
         val root = runCatching { json.parseToJsonElement(raw) }.getOrNull() as? JsonObject
@@ -77,15 +86,16 @@ class StreamParser(
             providerChatFailure(raw) else parseMolaStreamFailure(root, payload.event)
         if (failure != null) {
             val legacy = flushLegacyQuota(events)
-            webArtifacts.flush().forEach { appendArtifact(it, events) }
-            val tail = think.flush()
-            if (tail.visible.isNotEmpty() || tail.thinking.isNotEmpty())
-                events.add(StreamEvent.Delta(text = tail.visible.ifEmpty { null }, thinking = tail.thinking.ifEmpty { null }))
+            events.addAll(flushTail())
             events.add(if (legacy && failure.type in listOf(null, "upstream_unavailable", "server_error", "shared_quota_exhausted"))
                 sharedQuotaFailure() else failure)
+            failed = true
             return events
         }
         if (root == null) return emptyList()
+        if (terminalReason != null) {
+            return parseUsage(root)?.let { listOf(StreamEvent.UsageUpdate(it)) }.orEmpty()
+        }
         (root["molagpt_subagents"] as? JsonObject)?.let { events.add(StreamEvent.Subagents(it)) }
 
         // —— 来源 / 引用 ——
@@ -98,7 +108,7 @@ class StreamParser(
         val delta = choice?.get("delta") as? JsonObject
 
         // —— 增量正文 / 推理 ——
-        var thinking = delta?.get("reasoning_content")?.prim()?.contentOrNull
+        val thinking = delta?.get("reasoning_content")?.prim()?.contentOrNull
             ?: delta?.get("reasoning")?.prim()?.contentOrNull
             ?: responseThinkingDelta(root, eventType)
         if (!thinking.isNullOrEmpty()) {
@@ -113,56 +123,72 @@ class StreamParser(
             onThinking = { if (it.isNotEmpty()) events.add(StreamEvent.Delta(thinking = it)) },
         )
 
-        // —— 工具调用（简化：标记运行中；完整合成属后续增强）——
-        (delta?.get("tool_calls") as? JsonArray)?.forEach { tc ->
-            val o = tc as? JsonObject ?: return@forEach
-            val fn = o["function"] as? JsonObject
-            val name = fn?.get("name")?.prim()?.contentOrNull ?: "tool"
-            val id = o["id"]?.prim()?.contentOrNull ?: name
-            val args = fn?.get("arguments")?.prim()?.contentOrNull
-            events.add(StreamEvent.Tool(id = id, name = name, status = ToolStatus.RUNNING, argsJson = args))
+        (delta?.get("tool_calls") as? JsonArray)?.forEachIndexed { position, value ->
+            val call = value as? JsonObject ?: return@forEachIndexed
+            val function = call["function"] as? JsonObject
+            val index = call["index"].prim()?.intOrNull
+            val wireId = call["id"].prim()?.contentOrNull
+            val slot = index ?: position.takeIf { wireId == null }
+            val tool = wireId?.let(toolsById::get) ?: slot?.let(toolsByIndex::get)
+                ?: ToolDelta(wireId ?: "call-index-$position")
+            slot?.let { toolsByIndex[it] = tool }
+            wireId?.let {
+                toolsById[it] = tool
+                // Some compatible servers omit index on the first frame but use it thereafter.
+                if (index == null) toolsByIndex.putIfAbsent(position, tool)
+            }
+            function?.get("name").prim()?.contentOrNull?.takeIf(String::isNotBlank)?.let { tool.name = it }
+            function?.get("arguments").prim()?.contentOrNull?.let(tool.arguments::append)
+            events.add(StreamEvent.Tool(tool.id, tool.name ?: "tool", ToolStatus.RUNNING,
+                argsJson = tool.arguments.takeIf { it.isNotEmpty() }?.toString()))
         }
 
         // —— 结束 ——
         val finish = choice?.get("finish_reason")?.prim()?.contentOrNull
-            ?: responseFinishReason(eventType)
-        if (!serverTurn && !finish.isNullOrEmpty()) {
-            finishTail(finish, parseUsage(root)).forEach(events::add)
-        }
+            ?: responseFinishReason(root, eventType)
+        if (!serverTurn && !finish.isNullOrEmpty()) events.addAll(complete(finish))
         return events
     }
 
-    /** 流自然结束（EOF / [DONE]）时调用，冲刷 splitter 残余并补一个 Finish。 */
-    fun finishTail(reason: String?, usage: Usage? = null): List<StreamEvent> {
+    fun flushTail(): List<StreamEvent> {
         val out = ArrayList<StreamEvent>(2)
         if (flushLegacyQuota(out)) {
+            failed = true
             out.add(sharedQuotaFailure())
-            return out
         }
-        webArtifacts.flush().forEach { artifact ->
-            appendArtifact(artifact, out)
-        }
-        val tail = think.flush()
-        if (tail.visible.isNotEmpty() || tail.thinking.isNotEmpty()) {
-            out.add(StreamEvent.Delta(text = tail.visible.ifEmpty { null }, thinking = tail.thinking.ifEmpty { null }))
-        }
-        out.add(StreamEvent.Finish(reason = reason, usage = usage ?: lastUsage))
+        webArtifacts?.flush()?.forEach { appendArtifact(it, out) }
+        appendSegments(think.flush(), out)
         return out
+    }
+
+    private fun complete(reason: String): List<StreamEvent> {
+        if (terminalReason != null || failed) return emptyList()
+        val out = flushTail().toMutableList()
+        if (failed) return out
+        val error = when (reason) {
+            "length", "incomplete" -> StreamEvent.Failed("回答已截断", "incomplete", "retry")
+            "content_filter", "error" -> StreamEvent.Failed("服务商未完成回答（$reason）", "incomplete")
+            else -> null
+        }
+        if (error != null) {
+            failed = true
+            out.add(error)
+        } else {
+            terminalReason = reason
+            out.add(StreamEvent.Finish(reason = reason, usage = lastUsage))
+        }
+        return out
+    }
+
+    private fun appendSegments(segments: List<InlineThinkSplitter.Segment>, events: MutableList<StreamEvent>) {
+        segments.forEach { segment ->
+            events.add(if (segment.thinking) StreamEvent.Delta(thinking = segment.text) else StreamEvent.Delta(text = segment.text))
+        }
     }
 
     private fun appendArtifact(artifact: WebToolArtifact, events: MutableList<StreamEvent>) {
         when (artifact) {
-            is WebToolArtifact.Text -> {
-                val split = think.feed(artifact.text)
-                if (split.visible.isNotEmpty() || split.thinking.isNotEmpty()) {
-                    events.add(
-                        StreamEvent.Delta(
-                            text = split.visible.ifEmpty { null },
-                            thinking = split.thinking.ifEmpty { null },
-                        ),
-                    )
-                }
-            }
+            is WebToolArtifact.Text -> appendSegments(think.feed(artifact.text), events)
             is WebToolArtifact.Tool -> {
                 events.add(
                     StreamEvent.Tool(
@@ -222,9 +248,12 @@ class StreamParser(
         }
     }
 
-    private fun responseFinishReason(eventType: String?): String? = when (eventType) {
+    private fun responseFinishReason(root: JsonObject, eventType: String?): String? = when (eventType) {
         "response.completed" -> "stop"
-        "response.incomplete" -> "incomplete"
+        "response.incomplete" -> {
+            val detail = (root["response"] as? JsonObject)?.get("incomplete_details") as? JsonObject
+            if (detail?.get("reason").prim()?.contentOrNull == "content_filter") "content_filter" else "incomplete"
+        }
         "response.failed" -> "error"
         else -> null
     }

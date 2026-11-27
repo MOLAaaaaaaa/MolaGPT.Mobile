@@ -2,6 +2,9 @@ package com.molagpt.app.core.network
 
 import com.molagpt.app.core.common.Logger
 import com.molagpt.app.core.model.ProviderModel
+import com.molagpt.app.core.model.ThinkingConfig
+import com.molagpt.app.core.model.ThinkingKinds
+import com.molagpt.app.core.model.ThinkingParamKind
 import com.molagpt.app.core.network.dto.ModelConfigResponse
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
@@ -98,6 +101,12 @@ class ModelApi(
                     supportsVision = entry.showImageUpload,
                     supportsThinking = entry.supportsThinking,
                     supportsReasoningEffort = entry.supportsReasoningEffort,
+                    thinkingConfig = if (entry.supportsReasoningEffort) ThinkingConfig(
+                        kind = ThinkingParamKind.OPENAI_REASONING_EFFORT,
+                        effortLevels = ThinkingKinds.normalizeEffortLevels(entry.reasoningEffortLevels).filter { it != "none" },
+                        defaultEffort = entry.defaultReasoningEffort ?: ThinkingKinds.HIGH,
+                        alwaysOn = !entry.supportsThinking,
+                    ) else null,
                     group = entry.group,
                     quotaBlocked = quota?.available == false || loginRequired,
                     quotaMessage = when {

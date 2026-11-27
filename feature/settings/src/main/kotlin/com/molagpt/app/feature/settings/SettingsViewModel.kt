@@ -163,89 +163,43 @@ class SettingsViewModel(
         "连接失败：${e.message ?: "未知错误"}"
     }
 
-    /** 拉取候选模型，同时刷新已添加模型的接口价格与推理能力。 */
     suspend fun fetchByokModels(provider: ByokProvider): List<com.molagpt.app.core.model.ProviderModel> =
         withContext(dispatchers.io) {
             val fetched = byokModelApi.fetchModels(provider)
-            applyByokPrices(provider.id, fetched.mapNotNull { m -> m.pricing?.let { m.id to it } }.toMap())
-            applyByokThinkingConfigs(provider.id, fetched)
-            applyByokContextWindows(provider.id, fetched)
-            applyByokImageFormats(provider.id, fetched)
+            val byId = fetched.associateBy { it.id }
+            byokProviders.update(provider.id) { current ->
+                if (!sameDiscoveryEndpoint(current, provider)) return@update current
+                current.copy(models = current.models.map { model ->
+                    val declared = byId[model.id] ?: return@map model
+                    val config = if (model.thinkingConfig?.manualOverride == true) model.thinkingConfig
+                    else declared.thinkingConfig?.copy(offIneffective = model.thinkingConfig?.offIneffective == true)
+                        ?: model.thinkingConfig
+                    val imageFormat = declared.imageFormat.takeIf {
+                        current.purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE && model.imageFormat == null
+                    }
+                    model.copy(
+                        pricing = com.molagpt.app.core.model.mergeModelPricing(model.pricing, declared.pricing),
+                        contextWindow = model.contextWindow ?: declared.contextWindow,
+                        thinkingConfig = config,
+                        supportsThinking = config?.let { it.kind != com.molagpt.app.core.model.ThinkingParamKind.NONE }
+                            ?: model.supportsThinking,
+                        supportsReasoningEffort = config?.let { ThinkingKinds.resolveEffortLevels(it, current.baseUrl).isNotEmpty() }
+                            ?: model.supportsReasoningEffort,
+                        imageFormat = imageFormat ?: model.imageFormat,
+                        apiUrl = if (imageFormat == null) model.apiUrl else declared.apiUrl,
+                        supportsImageEdit = if (current.isOpenRouter && imageFormat == com.molagpt.app.core.model.ByokImageFormat.OPENAI_IMAGES)
+                            declared.supportsImageEdit else model.supportsImageEdit,
+                    )
+                })
+            }
             fetched
         }
 
-    /**
-     * 把服务商声明的上下文窗口补到**已添加**的模型上。只补空缺：
-     * 用户手动填过、或从超长报错里得知的窗口比声明更可信。
-     */
-    private suspend fun applyByokContextWindows(
-        providerId: String,
-        fetched: List<com.molagpt.app.core.model.ProviderModel>,
-    ) {
-        val provider = byokProviders.get(providerId) ?: return
-        val declared = fetched.mapNotNull { m -> m.contextWindow?.let { m.id to it } }.toMap()
-        if (declared.isEmpty()) return
-        val models = provider.models.map { model ->
-            if (model.contextWindow != null) model else declared[model.id]?.let { model.copy(contextWindow = it) } ?: model
-        }
-        if (models != provider.models) byokProviders.upsert(provider.copy(models = models))
-    }
-
-    /**
-     * 把模型列表重新识别出的图像接口补到旧模型上。
-     * 保留明确的模型级接口；自动补全 OpenRouter 图像接口时同步其声明的编辑能力。
-     */
-    private suspend fun applyByokImageFormats(
-        providerId: String,
-        fetched: List<com.molagpt.app.core.model.ProviderModel>,
-    ) {
-        val provider = byokProviders.get(providerId) ?: return
-        if (provider.purpose != com.molagpt.app.core.model.ByokPurpose.IMAGE) return
-        val byId = fetched.associateBy { it.id }
-        val models = provider.models.map { model ->
-            val next = byId[model.id] ?: return@map model
-            if (model.imageFormat != null || next.imageFormat == null) return@map model
-            model.copy(
-                imageFormat = next.imageFormat,
-                apiUrl = next.apiUrl,
-                supportsImageEdit = if (provider.isOpenRouter && next.imageFormat == com.molagpt.app.core.model.ByokImageFormat.OPENAI_IMAGES) {
-                    next.supportsImageEdit
-                } else model.supportsImageEdit,
-            )
-        }
-        if (models != provider.models) byokProviders.upsert(provider.copy(models = models))
-    }
-
-    /**
-     * 把服务商能力表里的推理声明同步到**已添加**的模型上。
-     *
-     * 不做这步的话，能力表只惠及新加的模型：早先加的仍留着按模型名猜出来的档位，
-     * 服务商声明「强制推理」也传不进来，界面会继续给一个点了没用的「关」。
-     * 用户手动指定过的（[ThinkingConfig.manualOverride]）不动。
-     */
-    private suspend fun applyByokThinkingConfigs(
-        providerId: String,
-        fetched: List<com.molagpt.app.core.model.ProviderModel>,
-    ) {
-        val provider = byokProviders.get(providerId) ?: return
-        val byId = fetched.associateBy { it.id }
-        var changed = false
-        val models = provider.models.map { model ->
-            val current = model.thinkingConfig
-            if (current?.manualOverride == true) return@map model
-            val next = byId[model.id]?.thinkingConfig ?: return@map model
-            // 观测结论比服务商声明更硬：它来自真实回复，不是猜的。
-            val merged = next.copy(offIneffective = current?.offIneffective == true)
-            if (merged == current) return@map model
-            changed = true
-            model.copy(
-                thinkingConfig = merged,
-                supportsThinking = true,
-                supportsReasoningEffort = ThinkingKinds.resolveEffortLevels(merged, provider.baseUrl).isNotEmpty(),
-            )
-        }
-        if (changed) byokProviders.upsert(provider.copy(models = models))
-    }
+    private fun sameDiscoveryEndpoint(current: ByokProvider, requested: ByokProvider): Boolean =
+        current.baseUrl.trim().trimEnd('/') == requested.baseUrl.trim().trimEnd('/') &&
+            current.modelsPath.trimStart('/') == requested.modelsPath.trimStart('/') &&
+            current.type == requested.type && current.purpose == requested.purpose &&
+            current.apiKey == requested.apiKey && current.customHeaders == requested.customHeaders
 
     private val _pricingRefresh = MutableStateFlow(PricingRefreshState(cachedAt = modelsDevCatalog.cachedAt))
     val pricingRefresh: StateFlow<PricingRefreshState> = _pricingRefresh.asStateFlow()
@@ -308,14 +262,14 @@ class SettingsViewModel(
     }
 
     suspend fun applyByokPrices(providerId: String, prices: Map<String, com.molagpt.app.core.model.ModelPricing>): Int {
-        val current = byokProviders.get(providerId) ?: return 0
         var written = 0
-        val models = current.models.map { model ->
-            val pricing = com.molagpt.app.core.model.mergeModelPricing(model.pricing, prices[model.id])
-            if (pricing != model.pricing) written++
-            model.copy(pricing = pricing)
+        byokProviders.update(providerId) { current ->
+            current.copy(models = current.models.map { model ->
+                val pricing = com.molagpt.app.core.model.mergeModelPricing(model.pricing, prices[model.id])
+                if (pricing != model.pricing) written++
+                model.copy(pricing = pricing)
+            })
         }
-        if (models != current.models) byokProviders.upsert(current.copy(models = models))
         return written
     }
 
@@ -359,14 +313,18 @@ class SettingsViewModel(
         (first.source == "models.dev" || first.source?.startsWith("models.dev:") == true) &&
         first.copy(source = null) == second.copy(source = null)
 
-    /** 把用户选中的模型合并进 provider 落库（去重 by id）。 */
+    /** 合并用户选中的候选模型，保留现有模型的手动配置。 */
     fun addByokModels(provider: ByokProvider, models: List<com.molagpt.app.core.model.ProviderModel>) = viewModelScope.launch {
-        val current = byokProviders.get(provider.id) ?: return@launch
-        val merged = (models.associateBy { it.id } + current.models.associateBy { it.id })
-            .values
-            .sortedWith(compareByDescending<com.molagpt.app.core.model.ProviderModel> { it.supportsChat }.thenBy { it.id })
-        byokProviders.upsert(current.copy(models = merged))
+        mergeDiscoveredModels(provider, models)
         _byokStatus.value = "已添加 ${models.size} 个模型"
+    }
+
+    private suspend fun mergeDiscoveredModels(provider: ByokProvider, models: List<com.molagpt.app.core.model.ProviderModel>) {
+        byokProviders.update(provider.id) { current ->
+            if (!sameDiscoveryEndpoint(current, provider)) return@update current
+            val merged = (models.associateBy { it.id } + current.models.associateBy { it.id }).values
+            current.copy(models = merged.sortedWith(compareByDescending<com.molagpt.app.core.model.ProviderModel> { it.supportsChat }.thenBy { it.id }))
+        }
     }
 
     fun setVisionProxy(enabled: Boolean, modelKey: String?) = viewModelScope.launch {
@@ -485,8 +443,28 @@ class SettingsViewModel(
     fun byokPreset(id: String): ByokProvider? = byokProviders.preset(id)
 
     fun saveByokProvider(provider: ByokProvider) = viewModelScope.launch {
-        byokProviders.upsert(provider)
-        _byokStatus.value = "已保存 ${provider.name}"
+        try {
+            byokProviders.upsert(provider, preserveModels = true)
+            _byokStatus.value = "已保存 ${provider.name}"
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            _byokStatus.value = "无法保存服务配置"
+        }
+    }
+
+    fun setByokProviderEnabled(id: String, enabled: Boolean) = viewModelScope.launch {
+        byokProviders.update(id) { it.copy(enabled = enabled) }
+    }
+
+    fun saveByokModel(id: String, model: com.molagpt.app.core.model.ProviderModel) = viewModelScope.launch {
+        byokProviders.update(id) { current ->
+            current.copy(models = (current.models.filterNot { it.id == model.id } + model).sortedBy { it.id })
+        }
+    }
+
+    fun deleteByokModels(id: String, models: Set<String>) = viewModelScope.launch {
+        byokProviders.update(id) { it.copy(models = it.models.filterNot { model -> model.id in models }) }
     }
 
     fun deleteByokProvider(id: String) = viewModelScope.launch {
@@ -498,11 +476,7 @@ class SettingsViewModel(
         _byokStatus.value = "正在获取模型..."
         runCatching { fetchByokModels(provider) }
             .onSuccess { models ->
-                val current = byokProviders.get(provider.id) ?: return@onSuccess
-                val merged = (models.associateBy { it.id } + current.models.associateBy { it.id })
-                    .values
-                    .sortedWith(compareByDescending<com.molagpt.app.core.model.ProviderModel> { it.supportsChat }.thenBy { it.id })
-                byokProviders.upsert(current.copy(models = merged))
+                mergeDiscoveredModels(provider, models)
                 _byokStatus.value = if (models.isEmpty()) "未获取到可用模型" else "已添加 ${models.size} 个模型"
             }
             .onFailure { e ->

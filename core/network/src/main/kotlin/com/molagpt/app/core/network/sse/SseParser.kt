@@ -4,7 +4,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
 /** 一个 SSE 事件载荷。 */
-data class SsePayload(val event: String?, val data: String) {
+data class SsePayload(
+    val event: String?,
+    val data: String,
+    /** Number of legacy replay data lines in this fully delivered event. */
+    val resumeLines: Int = 0,
+) {
     val isDone: Boolean get() = data.trim() == "[DONE]"
 }
 
@@ -16,16 +21,20 @@ data class SsePayload(val event: String?, val data: String) {
 fun sseFlow(readLine: suspend () -> String?): Flow<SsePayload> = flow {
     val data = StringBuilder()
     var event: String? = null
+    var dataLines = 0
+    var resumeLines = 0
     while (true) {
         val line = readLine() ?: break
         if (line.isEmpty()) {
-            if (data.isNotEmpty() || event != null) {
-                val payload = SsePayload(event, data.toString())
+            if (dataLines != 0) {
+                val payload = SsePayload(event, data.toString(), resumeLines)
                 emit(payload)
                 if (payload.isDone) return@flow
-                data.setLength(0)
-                event = null
             }
+            data.setLength(0)
+            dataLines = 0
+            resumeLines = 0
+            event = null
             continue
         }
         if (line[0] == ':') continue // 注释/心跳
@@ -42,11 +51,15 @@ fun sseFlow(readLine: suspend () -> String?): Flow<SsePayload> = flow {
         }
         when (field) {
             "data" -> {
-                if (data.isNotEmpty()) data.append('\n')
+                if (dataLines++ > 0) data.append('\n')
+                // stream_resume.php counts cached data lines, independent of JSON parsing.
+                if (':' in line && !line.contains("data: [DONE]") && !line.contains("\"type\":\"session_init\"")) {
+                    resumeLines++
+                }
                 data.append(value)
             }
             "event" -> event = value
         }
     }
-    if (data.isNotEmpty() || event != null) emit(SsePayload(event, data.toString()))
+    // EOF discards events without their separating blank line.
 }

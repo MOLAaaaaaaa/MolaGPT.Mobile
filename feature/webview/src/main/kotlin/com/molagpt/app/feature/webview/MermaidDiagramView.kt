@@ -207,8 +207,9 @@ private class MermaidSandboxClient(
         val host = uri.host?.lowercase() ?: return null
         if (host == MermaidSandbox.HOST) return serveLocal(uri)
         val scheme = uri.scheme?.lowercase()
-        if (scheme != "http" && scheme != "https") return null
-        if (!CanvasCdn.isAllowed(host) || request.method != "GET") {
+        if (scheme == "http") return emptyResponse(403, "Blocked")
+        if (scheme != "https") return null
+        if (!CanvasCdn.isAllowedUri(uri) || request.method != "GET") {
             return emptyResponse(403, "Blocked")
         }
         val response = runBlocking { CanvasCdn.fetch(context, uri) }

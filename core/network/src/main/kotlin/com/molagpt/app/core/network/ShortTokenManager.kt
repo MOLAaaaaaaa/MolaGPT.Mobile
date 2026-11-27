@@ -9,6 +9,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -102,7 +103,7 @@ class ShortTokenManager(
             throw MolaApiException(resp.status.value, "获取令牌失败：HTTP ${resp.status.value}")
         }
         val body = runCatching { resp.body<AuthTokenResponse>() }
-            .getOrElse { throw MolaApiException(null, "令牌响应解析失败") }
+            .getOrElse { if (it is CancellationException) throw it else throw MolaApiException(null, "令牌响应解析失败") }
         body.error?.let { throw MolaApiException(null, "鉴权失败：$it") }
         val token = body.token.takeIf { it.isNotBlank() }
             ?: throw MolaApiException(null, "服务端未返回令牌")
@@ -142,7 +143,7 @@ class ShortTokenManager(
             throw MolaApiException(resp.status.value, "获取验证挑战失败：HTTP ${resp.status.value}")
         }
         return runCatching { resp.body<AltchaChallenge>() }
-            .getOrElse { throw MolaApiException(null, "验证挑战解析失败") }
+            .getOrElse { if (it is CancellationException) throw it else throw MolaApiException(null, "验证挑战解析失败") }
     }
 
     private companion object {

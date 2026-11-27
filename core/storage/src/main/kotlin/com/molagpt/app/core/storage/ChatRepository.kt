@@ -62,18 +62,39 @@ class ChatRepository(
     private val streamTaskDao = database.streamTaskDao()
     private val includeOfficial get() = identity.value.canReadOfficial
 
-    private suspend fun <T> withSession(sessionId: String, expected: HistoryIdentity? = null, block: suspend () -> T): T? =
+    private suspend fun <T> withSession(
+        sessionId: String,
+        expected: HistoryIdentity? = null,
+        requireCurrentBody: Boolean = false,
+        bodyVersion: Long? = null,
+        block: suspend () -> T,
+    ): T? =
         database.withTransaction {
             val scope = identity.value
             val row = conversationDao.getById(sessionId, scope.canReadOfficial) ?: return@withTransaction null
-            if (row.providerKind == ProviderKind.MOLAGPT.name && expected != null && expected != scope) null else block()
+            val official = row.providerKind == ProviderKind.MOLAGPT.name
+            if (official && expected != null && expected != scope) return@withTransaction null
+            if (official && requireCurrentBody &&
+                (row.needsCloudBody || row.bodyVersion != bodyVersion || streamTaskDao.hasOfficialTask(sessionId))
+            ) return@withTransaction null
+            block().also {
+                if (official && identity.value != scope) throw CancellationException("History session changed")
+            }
         }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun observeMessages(sessionId: String): Flow<List<ChatMessage>> =
         identity.flatMapLatest { messageDao.observeBySession(sessionId, it.canReadOfficial) }.map { rows -> rows.map { it.toDomain() } }
 
-    suspend fun persistUserMessage(message: ChatMessage, replacingFrom: Long? = null, expected: HistoryIdentity = identity.value) = withSession(message.sessionId, expected) {
+    suspend fun persistUserMessage(
+        message: ChatMessage,
+        replacingMessageId: String? = null,
+        expected: HistoryIdentity = identity.value,
+        bodyVersion: Long? = null,
+    ) = withSession(message.sessionId, expected, requireCurrentBody = true, bodyVersion = bodyVersion) {
+        val replacingFrom = replacingMessageId?.let {
+            messageDao.createdAtOf(message.sessionId, it) ?: return@withSession null
+        }
         val entity = message.toEntity(wireHistoryStore)
         if (replacingFrom == null) {
             messageDao.upsert(entity)
@@ -146,11 +167,13 @@ class ChatRepository(
     }
 
     /** regenerate / edit 的本地裁剪：删掉指定时间点及之后的消息，随后由 ViewModel 重新发起。 */
-    suspend fun deleteMessagesFrom(sessionId: String, fromCreatedAt: Long, expected: HistoryIdentity) =
-        withSession(sessionId, expected) {
+    suspend fun deleteMessagesFrom(sessionId: String, messageId: String, expected: HistoryIdentity, bodyVersion: Long?): Boolean =
+        withSession(sessionId, expected, requireCurrentBody = true, bodyVersion = bodyVersion) {
+            val fromCreatedAt = messageDao.createdAtOf(sessionId, messageId) ?: return@withSession false
             messageDao.deleteFrom(sessionId, fromCreatedAt)
-            conversationDao.refreshListVisibility(sessionId)
-        }
+            conversationDao.touch(sessionId, System.currentTimeMillis(), null)
+            true
+        } ?: false
 
     /**
      * 编辑重发前：把当前整条时间线打包成一个历史分支。
@@ -179,8 +202,9 @@ class ChatRepository(
         delta: Int,
         persistBack: Boolean = false,
         expected: HistoryIdentity = identity.value,
+        bodyVersion: Long? = null,
     ): Boolean =
-        withSession(sessionId, expected) {
+        withSession(sessionId, expected, requireCurrentBody = true, bodyVersion = bodyVersion) {
             val all = messageDao.getAllBySession(sessionId, includeOfficial)
             val timelineNow = all.filterNot { it.role.equals(Role.SYSTEM.name, ignoreCase = true) }
             // 锚点按「非 system 时间线中的下标」定位：各版本共享前缀，故该下标跨版本稳定；
@@ -208,7 +232,7 @@ class ChatRepository(
                 }
             }
             messageDao.replaceAll(sessionId, rebound)
-            conversationDao.refreshListVisibility(sessionId)
+            conversationDao.touch(sessionId, System.currentTimeMillis(), rebound.lastOrNull()?.rawText?.take(60))
             true
         } ?: false
 
@@ -222,8 +246,10 @@ class ChatRepository(
         priorAttempts: List<RetryAttempt> = emptyList(),
         scope: HistoryIdentity = identity.value,
     ): Flow<ChatMessage> = flow {
-        if (request.providerKind == ProviderKind.MOLAGPT && scope != identity.value) return@flow
-        if (conversationDao.getById(request.sessionId, scope.canReadOfficial)?.providerKind != request.providerKind.name) return@flow
+        val official = request.providerKind == ProviderKind.MOLAGPT
+        if (conversationDao.getById(request.sessionId, scope.canReadOfficial)?.providerKind != request.providerKind.name ||
+            (official && (scope != identity.value || !streamTaskDao.owns(request.sessionId, request.streamSessionId)))
+        ) return@flow
         val start = System.currentTimeMillis()
         var msg = ChatMessage(
             messageId = assistantMessageId,
@@ -239,7 +265,6 @@ class ChatRepository(
                 "modelDisplayName" to (request.modelDisplayName ?: request.modelId),
             ),
         )
-        emit(msg)
         var firstTokenAt: Long? = null
         var pricing: com.molagpt.app.core.model.ModelPricing? = null
         val usage = AtomicReference<Usage?>(null)
@@ -247,6 +272,7 @@ class ChatRepository(
         var checkpointId: String? = null
         var slimTurns = 0
         try {
+            emit(msg)
             if (request.providerKind == ProviderKind.BYOK) pricing = pricingResolver(request.providerId, request.modelId)
             // 压缩进度不写进这条回答：对话页从压缩器读，显示在回答上方。
             val compactor = contextCompactor.takeIf { request.providerKind == ProviderKind.BYOK }
@@ -323,7 +349,9 @@ class ChatRepository(
                 slimTurns = recovered.slimTurns
                 usage.set(null)
             }
-            if (msg.status == MessageStatus.STREAMING) msg = msg.copy(status = MessageStatus.COMPLETE)
+            if (msg.status == MessageStatus.STREAMING) {
+                msg = applyCommand(msg, DeltaCommand.Fail(com.molagpt.app.core.model.StreamEvent.Failed("连接已结束，回答未完成。")))
+            }
             // 后处理必须赶在版本快照之前：晚一步，存进 retryAttempts 的就是没改写过的原文，
             // 切回这一版时替换会凭空消失。
             msg = withContext(NonCancellable) { applyPostProcessing(msg) }
@@ -332,6 +360,12 @@ class ChatRepository(
             // 重生成：把本次答案追加为新版本，让 in-flight 帧立即带上版本信息(切换栏才会显示)。
             if (priorAttempts.isNotEmpty()) msg = msg.withAttempts(priorAttempts)
             emit(msg)
+        } catch (error: CancellationException) {
+            if (msg.status != MessageStatus.ERROR) msg = msg.copy(status = MessageStatus.STOPPED)
+            throw error
+        } catch (error: Exception) {
+            msg = msg.copy(status = MessageStatus.ERROR)
+            throw error
         } finally {
             // 用户停止或流中出错时上面的分支没跑到：半截文本同样要落成用户看到的样子。
             if (!processed) msg = withContext(NonCancellable) { applyPostProcessing(msg) }
@@ -348,30 +382,57 @@ class ChatRepository(
                 finalMsg = finalMsg.withAttempts(priorAttempts)
             }
             withContext(NonCancellable + dispatchers.io) {
-                withSession(request.sessionId, scope) {
-                    messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
-                    conversationDao.touch(request.sessionId, System.currentTimeMillis(), finalMsg.rawText?.take(60))
-                }
+                saveFinalMessage(finalMsg, scope, request.streamSessionId.takeIf { official })
             }
         }
     }.flowOn(dispatchers.io)
 
     /** 持久化单条消息（版本切换后落库）。 */
-    suspend fun updateMessage(message: ChatMessage, expected: HistoryIdentity = identity.value) = withSession(message.sessionId, expected) {
+    suspend fun updateMessage(
+        message: ChatMessage, expected: HistoryIdentity = identity.value, bodyVersion: Long? = null,
+    ): Boolean = withSession(message.sessionId, expected, requireCurrentBody = true, bodyVersion = bodyVersion) {
+        if (messageDao.createdAtOf(message.sessionId, message.messageId) == null) return@withSession false
         messageDao.upsert(message.toEntity(wireHistoryStore))
-        conversationDao.refreshListVisibility(message.sessionId)
-    }
+        conversationDao.touch(message.sessionId, System.currentTimeMillis(), message.rawText?.take(60))
+        true
+    } ?: false
 
     // —— 进程死亡恢复：在途任务持久化 + 续接 ——
 
-    suspend fun persistStreamTask(record: StreamTaskRecord, expected: HistoryIdentity) =
-        withSession(record.sessionId, expected) { streamTaskDao.upsert(record.toEntity()) }
+    suspend fun persistStreamTask(record: StreamTaskRecord, expected: HistoryIdentity, bodyVersion: Long?): Boolean =
+        withSession(record.sessionId, expected, requireCurrentBody = true, bodyVersion = bodyVersion) {
+            if (record.providerKind != ProviderKind.MOLAGPT || !expected.canReadOfficial) return@withSession false
+            streamTaskDao.upsert(record.toEntity())
+            true
+        } ?: false
 
-    suspend fun removeStreamTask(sessionId: String, expected: HistoryIdentity) =
-        withSession(sessionId, expected) { streamTaskDao.delete(sessionId) }
+    suspend fun removeStreamTask(sessionId: String, streamSessionId: String, expected: HistoryIdentity) =
+        database.withTransaction {
+            if (identity.value == expected) streamTaskDao.delete(sessionId, streamSessionId)
+        }
 
-    suspend fun loadStreamTasks(): List<StreamTaskRecord> =
-        withContext(dispatchers.io) { streamTaskDao.getAll(includeOfficial).map { it.toRecord() } }
+    suspend fun loadStreamTasks(expected: HistoryIdentity = identity.value): List<StreamTaskRecord> =
+        database.withTransaction {
+            if (expected != identity.value) return@withTransaction emptyList()
+            streamTaskDao.getAll(expected.canReadOfficial).mapNotNull { record ->
+                // Older builds could leave a task behind after saving its final message.
+                if (record.providerKind == ProviderKind.MOLAGPT.name &&
+                    messageDao.createdAtOf(record.sessionId, record.assistantMessageId) != null
+                ) {
+                    streamTaskDao.delete(record.sessionId, record.streamSessionId)
+                    null
+                } else record.toRecord()
+            }
+        }
+
+    private suspend fun saveFinalMessage(message: ChatMessage, expected: HistoryIdentity, streamSessionId: String?) {
+        withSession(message.sessionId, expected) {
+            if (streamSessionId != null && !streamTaskDao.owns(message.sessionId, streamSessionId)) return@withSession
+            messageDao.upsert(message.toEntity(wireHistoryStore))
+            conversationDao.touch(message.sessionId, System.currentTimeMillis(), message.rawText?.take(60))
+            if (streamSessionId != null) streamTaskDao.delete(message.sessionId, streamSessionId)
+        }
+    }
 
     /**
      * 续接一个被中断的助手回复：用 [ChatService.resumeStream] 从 offset=0 回放服务端缓存。
@@ -387,7 +448,9 @@ class ChatRepository(
         modelDisplayName: String?,
         scope: HistoryIdentity,
     ): Flow<ChatMessage> = flow {
-        if (scope != identity.value || conversationDao.getById(sessionId, scope.canReadOfficial)?.providerKind != ProviderKind.MOLAGPT.name) return@flow
+        if (scope != identity.value || conversationDao.getById(sessionId, scope.canReadOfficial)?.providerKind != ProviderKind.MOLAGPT.name ||
+            !streamTaskDao.owns(sessionId, streamSessionId)
+        ) return@flow
         val start = System.currentTimeMillis()
         var msg = ChatMessage(
             messageId = assistantMessageId,
@@ -403,17 +466,25 @@ class ChatRepository(
                 "modelDisplayName" to (modelDisplayName ?: model ?: ""),
             ),
         )
-        emit(msg)
         var processed = false
         try {
+            emit(msg)
             chatService.resumeStream(apiUrl, streamSessionId, 0).flowOn(HistoryRequest { scope == identity.value }).webTypingPaced().collect { event ->
                 controller.toCommands(event).forEach { cmd -> msg = applyCommand(msg, cmd) }
                 emit(msg.copy(updatedAt = System.currentTimeMillis()))
             }
-            if (msg.status == MessageStatus.STREAMING) msg = msg.copy(status = MessageStatus.COMPLETE)
+            if (msg.status == MessageStatus.STREAMING) {
+                msg = applyCommand(msg, DeltaCommand.Fail(com.molagpt.app.core.model.StreamEvent.Failed("连接已结束，回答未完成。")))
+            }
             msg = withContext(NonCancellable) { applyPostProcessing(msg) }
             processed = true
             emit(msg)
+        } catch (error: CancellationException) {
+            if (msg.status != MessageStatus.ERROR) msg = msg.copy(status = MessageStatus.STOPPED)
+            throw error
+        } catch (error: Exception) {
+            msg = msg.copy(status = MessageStatus.ERROR)
+            throw error
         } finally {
             if (!processed) msg = withContext(NonCancellable) { applyPostProcessing(msg) }
             val finalMsg = msg.copy(
@@ -424,10 +495,7 @@ class ChatRepository(
                 metadata = msg.metadata - setOf("pending", "pendingRecovery"),
             )
             withContext(NonCancellable + dispatchers.io) {
-                withSession(sessionId, scope) {
-                    messageDao.upsert(finalMsg.toEntity(wireHistoryStore))
-                    conversationDao.touch(sessionId, System.currentTimeMillis(), finalMsg.rawText?.take(60))
-                }
+                saveFinalMessage(finalMsg, scope, streamSessionId)
             }
         }
     }.flowOn(dispatchers.io)
@@ -557,6 +625,7 @@ class ChatRepository(
                 meta = meta + (wireHistoryStore?.storeMetadata(msg.sessionId, next) ?: next)
             }
             is DeltaCommand.Complete -> {
+                if (status == MessageStatus.ERROR || status == MessageStatus.STOPPED) return msg
                 status = MessageStatus.COMPLETE
                 if (ServerSubagents.KEY in meta) {
                     val batches = ServerSubagents.finish(ServerSubagents.read(meta))
@@ -572,9 +641,9 @@ class ChatRepository(
                 }
             }
             is DeltaCommand.Fail -> {
-                status = MessageStatus.ERROR
-                collapseThinking(frags)
                 val error = cmd.error
+                status = if (error.type == "stream_stopped") MessageStatus.STOPPED else MessageStatus.ERROR
+                collapseThinking(frags)
                 // Only remove the exact duplicated provider notice after a confirmed shared-quota error.
                 if (error.type == "shared_quota_exhausted") {
                     val last = frags.lastOrNull() as? MessageFragment.Text

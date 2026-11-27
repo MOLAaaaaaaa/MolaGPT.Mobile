@@ -225,7 +225,7 @@ class AnonRemoteService(
         val room = normalizeRoom(rawCode) ?: throw AnonRemoteException("bad_code", "请输入 8 位配对码")
         val join = postJson("anon_pair.php", buildJsonObject { put("op", "join"); put("room", room) }) { request, _ ->
             // join 无需签名：房间码本身就是限流主体。
-            jsonHttp.newCall(request.build()).execute().use { parseBody(it) }
+            jsonHttp.newCall(request.build()).useCancellable { parseBody(it) }
         }
         val deviceId = join.optString("deviceId") ?: throw AnonRemoteException("no_room", "房间不存在或已关闭")
         val roomId = AnonCrypto.unb64u(join.optString("roomId") ?: "") ?: throw AnonRemoteException("no_room", "房间不存在或已关闭")
@@ -368,7 +368,7 @@ class AnonRemoteService(
             runCatching {
                 postJson("anon_grant.php", buildJsonObject { put("op", "remove_self") }) { request, bytes ->
                     signedHeaders(request, "anon_grant.php", "grant", deviceId, record.pairId, bytes)
-                    jsonHttp.newCall(request.build()).execute().use { parseBody(it) }
+                    jsonHttp.newCall(request.build()).useCancellable { parseBody(it) }
                 }
             }
         }
@@ -398,16 +398,16 @@ class AnonRemoteService(
         val reply = runCatching {
             postJson("anon_directory.php", buildJsonObject { put("op", "get") }) { request, bytes ->
                 signedHeaders(request, "anon_directory.php", "grant", deviceId, record.pairId, bytes)
-                jsonHttp.newCall(request.build()).execute().use { parseBody(it) }
+                jsonHttp.newCall(request.build()).useCancellable { parseBody(it) }
             }
-        }.getOrNull() ?: return@withContext null
+        }.getOrElse { if (it is CancellationException) throw it else null } ?: return@withContext null
         val payload = reply.optObj("payload") ?: return@withContext null
         val nonce = AnonCrypto.unb64u(payload.optString("nonce") ?: "") ?: return@withContext null
         val ct = AnonCrypto.unb64u(payload.optString("ct") ?: "") ?: return@withContext null
         val tag = AnonCrypto.unb64u(payload.optString("tag") ?: "") ?: return@withContext null
         val plain = runCatching {
             AnonCrypto.open(directoryKey, nonce, ByteArray(0), ct, tag)
-        }.getOrNull() ?: return@withContext null
+        }.getOrElse { if (it is CancellationException) throw it else null } ?: return@withContext null
         val root = http.json.parseToJsonElement(plain.toString(Charsets.UTF_8)).asObject() ?: return@withContext null
         val updatedAt = reply.optLong("updatedAt") ?: 0
         // 电脑有对话在忙或待审批时每 3 分钟重传目录；比这旧一倍还没更新，就当它已不在。
@@ -454,7 +454,7 @@ class AnonRemoteService(
     private suspend fun postJson(
         file: String,
         body: JsonObject,
-        send: (Request.Builder, ByteArray) -> JsonObject,
+        send: suspend (Request.Builder, ByteArray) -> JsonObject,
     ): JsonObject = withContext(dispatchers.io) {
         val bytes = http.json.encodeToString(JsonObject.serializer(), body).toByteArray(Charsets.UTF_8)
         val request = Request.Builder()
@@ -514,6 +514,7 @@ class AnonRemoteService(
                 var attempt = 0
                 while (!closing) {
                     val opened = runCatching { connect() }.onFailure {
+                        if (it is CancellationException) throw it
                         Logger.w(TAG, "anon connect ${record.deviceId}: ${it.message}")
                     }.getOrDefault(false)
                     if (opened) {
@@ -698,7 +699,7 @@ class AnonRemoteService(
         private suspend fun fetchTicket(): String {
             val reply = postJson("anon_ticket.php", JsonObject(emptyMap())) { request, bytes ->
                 signedHeaders(request, "anon_ticket.php", "grant", deviceId, record.pairId, bytes)
-                jsonHttp.newCall(request.build()).execute().use { parseBody(it) }
+                jsonHttp.newCall(request.build()).useCancellable { parseBody(it) }
             }
             return reply.optString("ticket") ?: throw AnonRemoteException("bad_reply", "票据响应无效")
         }

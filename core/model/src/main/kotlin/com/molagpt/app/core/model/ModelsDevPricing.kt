@@ -1,6 +1,5 @@
 package com.molagpt.app.core.model
 
-import java.net.URI
 import kotlinx.serialization.json.*
 
 data class ModelsDevProvider(val key: String, val name: String, val models: Map<String, ModelPricing>)
@@ -40,11 +39,10 @@ object ModelsDevPricing {
         return PricingMatch(agreed, conflicts, unmatched)
     }
 
-    fun guessProviderKey(baseUrl: String): String? = runCatching {
-        URI(baseUrl).host?.lowercase()?.split('.')?.firstOrNull {
+    fun guessProviderKey(baseUrl: String): String? =
+        HostUrl.parseHttpHost(baseUrl)?.split('.')?.firstOrNull {
             it !in setOf("www", "api", "com", "org", "net", "ai", "io", "cn", "co")
         }
-    }.getOrNull()
 }
 
 fun readEndpointPricing(item: JsonObject): ModelPricing? {

@@ -134,8 +134,8 @@ object ThinkingKinds {
      * 其他未知或不支持思考的 Gemini 型号返回 null。
      */
     fun geminiConfigFor(modelId: String): ThinkingConfig? {
-        val model = modelId.lowercase().substringAfterLast('/')
-        if (model.contains("-non-reasoning")) return null
+        val model = (ModelCapabilityCatalog.find(modelId)?.canonicalId ?: modelId).lowercase().substringAfterLast('/')
+        if (modelId.contains("-non-reasoning", ignoreCase = true) || ModelCapabilityCatalog.find(modelId)?.reasoning == false) return null
         fun levelConfig(
             levels: List<String>,
             default: String,
@@ -148,11 +148,13 @@ object ThinkingKinds {
         )
 
         return when {
-            model.startsWith("gemini-4-argon") ->
+            model.startsWith("gemini-4-neon") || model.startsWith("gemini-4-hydrogen") ->
+                levelConfig(listOf(LOW, MEDIUM, HIGH, XHIGH), HIGH)
+            model.startsWith("gemini-4-argon") || model.startsWith("gemini-4-carbon") ->
                 levelConfig(listOf(LOW, MEDIUM, HIGH), MEDIUM)
-            model.startsWith("gemini-3.8-flash") ->
+            model.startsWith("gemini-3.8-flash") || model == "gemini-flash-latest" ->
                 levelConfig(listOf(LOW, MEDIUM, HIGH), MEDIUM)
-            model.startsWith("gemini-3.6-flash") ->
+            model.startsWith("gemini-3.6-flash") || model == "gemini-flash-lite-latest" ->
                 levelConfig(listOf(MINIMAL, LOW, MEDIUM, HIGH), MEDIUM)
             model.startsWith("gemini-3.1-flash-lite-image") ->
                 levelConfig(listOf(MINIMAL, HIGH), MINIMAL)
@@ -183,45 +185,56 @@ object ThinkingKinds {
             Regex("kimi-k[4-9](?:[.\\-]|$)").containsMatchIn(leaf)
     }
 
-    /**
-     * 据模型 ID 推断 kind（纯名称匹配）。
-     *
-     * 覆盖范围须 ⊇ [looksLikeByokReasoningModel]（network 模块）认得的推理模型集——
-     * 凡那边判为推理模型的，这里都不能返回 NONE，否则该模型的推理 UI 会显示但请求体不带推理参数。
-     * 没有专属参数格式的推理模型（glm/minimax/hunyuan/magistral 等）统一兜到 OPENAI_REASONING_EFFORT（标准 reasoning_effort）。
-     */
-    fun inferFromModelId(id: String): ThinkingParamKind {
-        val lower = id.lowercase()
-        if (lower.contains("-non-reasoning")) return ThinkingParamKind.NONE
-        val leaf = lower.substringAfterLast('/')
-        // Anthropic Claude（含 OpenRouter 的 anthropic/claude-* 路径）
-        if (lower.contains("claude") || lower.contains("sonnet") ||
-            lower.contains("opus") || lower.contains("haiku")
-        ) return ThinkingParamKind.CLAUDE_ADAPTIVE
-        // DeepSeek
-        if (lower.contains("deepseek")) return ThinkingParamKind.DEEPSEEK_THINKING
-        // Kimi K3+：顶层 reasoning_effort（常开）；K2.x 仍为仅开关。
-        if (isKimiK3(id)) return ThinkingParamKind.OPENAI_REASONING_EFFORT
-        if (lower.contains("kimi") || lower.contains("moonshot")) return ThinkingParamKind.KIMI
-        // Qwen 思考版：仅 qwen3 / qwq（qwen-max/plus/turbo 等非思考版不发 enable_thinking）。
-        if (lower.contains("qwen3") || lower.contains("qwq")) return ThinkingParamKind.QWEN_THINKING_BUDGET
-        // Gemini 3/4 使用档位；其余型号保留原有预算方言。
-        if (lower.contains("gemini")) return geminiConfigFor(id)?.kind ?: ThinkingParamKind.GEMINI
-        // 其余推理模型 → 标准 reasoning_effort（与 looksLikeByokReasoningModel 保持一致）。
-        if (leaf.startsWith("o1") || leaf.startsWith("o3") || leaf.startsWith("o4") ||
-            leaf.startsWith("gpt-5") || lower.contains("gpt-oss") ||
-            lower.contains("reasoning") || lower.contains("reasoner") ||
-            lower.contains("thinking") || lower.contains("think") ||
-            Regex("-(?:r|R)\\d+").containsMatchIn(leaf) ||
-            lower.contains("grok-4") || lower.contains("grok-3-mini") ||
-            lower.contains("hunyuan-t1") || lower.contains("glm-zero-preview") ||
-            lower.contains("glm-5") || Regex("glm-4\\.\\d").containsMatchIn(lower) ||
-            Regex("minimax-m[23]").containsMatchIn(lower) || lower.contains("mimo-v2-flash") ||
-            lower.contains("magistral") || lower.contains("seed-oss") ||
-            lower.contains("gemma-4") || lower.contains("pangu-pro-moe")
-        ) return ThinkingParamKind.OPENAI_REASONING_EFFORT
-        return ThinkingParamKind.NONE
+    /** 百炼新版 Qwen 使用强度档位，旧版继续使用思考预算。 */
+    fun qwenEffortConfig(modelId: String, baseUrl: String): ThinkingConfig? {
+        if (isAggregatingGateway(baseUrl)) return null
+        val model = (ModelCapabilityCatalog.find(modelId)?.canonicalId ?: modelId).lowercase().substringAfterLast('/')
+        if (modelId.contains("-non-reasoning", ignoreCase = true)) return null
+        val levels = when {
+            model == "qwen4-max" || model.startsWith("qwen4-max-") -> listOf(LOW, HIGH, XHIGH)
+            model == "qwen3.8-flash" || model.startsWith("qwen3.8-flash-") ||
+                model == "qwen3.8-max" || model.startsWith("qwen3.8-max-") ||
+                model == "qwen3.8-omni-flash" || model.startsWith("qwen3.8-omni-flash-") ||
+                model == "qwen3.8-2.4t-a95b" || model.startsWith("qwen3.8-2.4t-a95b-") ||
+                model == "qwen3.8-27b" || model.startsWith("qwen3.8-27b-") -> listOf(LOW, MEDIUM, XHIGH)
+            else -> return null
+        }
+        return ThinkingConfig(
+            kind = ThinkingParamKind.OPENAI_REASONING_EFFORT,
+            effortLevels = levels,
+            defaultEffort = if (model.startsWith("qwen4")) HIGH else XHIGH,
+            detectSource = ThinkingDetectSource.HEURISTIC,
+        )
     }
+
+    /** Offline catalog first, conservative family fallback for ids not yet in the snapshot. */
+    fun inferFromModelId(id: String): ThinkingParamKind {
+        val raw = id.trim().lowercase()
+        if (raw.contains("-non-reasoning")) return ThinkingParamKind.NONE
+        val known = ModelCapabilityCatalog.find(id)
+        if (known?.reasoning == false) return ThinkingParamKind.NONE
+        val leaf = (known?.canonicalId ?: raw).substringAfterLast('/')
+        val reasoning = known?.reasoning == true ||
+            Regex("^(?:o[134](?:-|$)|gpt-[56](?:[.\\-]|$)|gpt-oss|deepseek-(?:v(?:3\\.\\d|[4-9])|flash|reasoner|r1|chat)|kimi-k(?:2-thinking|2\\.[5-9]|[3-9])|qwen[34](?:[.\\-]|$)|qwq|gemini-(?:2\\.5|[34])|claude-(?:3-7|3\\.7|(?:sonnet|opus|haiku|fable|mythos)-[45])|grok-(?:3-mini|4)|glm-(?:5|4\\.\\d)|minimax-m[23]|mimo-v2|hunyuan-t1|magistral|seed-oss|gemma-4|pangu-pro-moe)").containsMatchIn(leaf) ||
+            Regex("(?:^|[-_])(?:reasoning|reasoner|thinking)(?:[-_]|$)").containsMatchIn(leaf)
+        if (!reasoning) return ThinkingParamKind.NONE
+        return when {
+            leaf.startsWith("claude-") -> {
+                if (known?.nativeEfforts?.isNotEmpty() == true ||
+                    Regex("claude-(?:sonnet|opus|haiku|fable|mythos)-(?:[5-9]|4-[6-9])").containsMatchIn(leaf))
+                    ThinkingParamKind.CLAUDE_ADAPTIVE else ThinkingParamKind.CLAUDE_BUDGET
+            }
+            leaf.startsWith("deepseek-") -> ThinkingParamKind.DEEPSEEK_THINKING
+            isKimiK3(leaf) -> ThinkingParamKind.OPENAI_REASONING_EFFORT
+            leaf.startsWith("kimi-") || leaf.startsWith("moonshot-") -> ThinkingParamKind.KIMI
+            qwenEffortConfig(leaf, "") != null -> ThinkingParamKind.OPENAI_REASONING_EFFORT
+            leaf.startsWith("qwen") || leaf.startsWith("qwq") -> ThinkingParamKind.QWEN_THINKING_BUDGET
+            leaf.startsWith("gemini-") -> geminiConfigFor(id)?.kind ?: ThinkingParamKind.GEMINI
+            else -> ThinkingParamKind.OPENAI_REASONING_EFFORT
+        }
+    }
+
+    fun isReasoningModel(id: String): Boolean = inferFromModelId(id) != ThinkingParamKind.NONE
 
     /** 据 baseUrl host 推断 kind（模型 ID 启发式漏掉时的兜底）。null 表示无已知兜底。 */
     fun hostInferredKind(baseUrl: String): ThinkingParamKind? =
@@ -243,9 +256,8 @@ object ThinkingKinds {
      * 服务商声明强制（[ThinkingConfig.alwaysOn]）、方言表无关闭手段、观测到关了也没用。
      */
     fun isAlwaysOn(config: ThinkingConfig, baseUrl: String): Boolean =
-        config.alwaysOn ||
-            config.offIneffective ||
-            offFor(baseUrl, config.kind) == ReasoningOff.UNSUPPORTED
+        config.kind != ThinkingParamKind.NONE &&
+            (config.alwaysOn || config.offIneffective || offFor(baseUrl, config.kind) == ReasoningOff.UNSUPPORTED)
 
     /**
      * 符号档位 → token 预算（用于 budget 类 kind）。
@@ -269,7 +281,7 @@ object ThinkingKinds {
         if (capability == null) return this
         val levels = normalizeEffortLevels(capability.supportedEfforts).filter { it != "none" }
         val next = copy(
-            alwaysOn = alwaysOn || capability.mandatory,
+            alwaysOn = capability.mandatory,
             effortLevels = levels.ifEmpty { effortLevels },
             defaultEffort = capability.defaultEffort?.trim()?.lowercase()?.takeIf { it.isNotEmpty() && it != "none" }
                 ?: defaultEffort,
@@ -283,16 +295,6 @@ object ThinkingKinds {
         alwaysOn: Boolean = false,
         detectSource: ThinkingDetectSource? = null,
     ): ThinkingConfig {
-        if (alwaysOn && kind == ThinkingParamKind.OPENAI_REASONING_EFFORT) {
-            // K3 模板：覆盖档位与默认。
-            return ThinkingConfig(
-                kind = kind,
-                effortLevels = listOf(LOW, HIGH, MAX),
-                defaultEffort = MAX,
-                alwaysOn = true,
-                detectSource = detectSource,
-            )
-        }
         return ThinkingConfig(
             kind = kind,
             effortLevels = effortLevelsFor(kind),
@@ -312,65 +314,50 @@ object ThinkingKinds {
         supportedParams: Set<String>? = null,
         capability: ReasoningCapability? = null,
     ): ThinkingConfig? {
-        // 能力表显式声明：OpenRouter supported_parameters 含 reasoning / include_reasoning。
-        if (supportedParams != null) {
-            val capable = supportedParams.any {
-                it.equals("reasoning", ignoreCase = true) ||
-                    it.equals("include_reasoning", ignoreCase = true) ||
-                    it.equals("reasoning_effort", ignoreCase = true)
-            }
-            if (!capable) return null
-            // 聚合网关：统一 effort；K3 仍标 alwaysOn。
-            if (isAggregatingGateway(baseUrl)) {
-                val base = if (isKimiK3(modelId)) {
-                    KIMI_K3_CONFIG.copy(detectSource = ThinkingDetectSource.CAPABILITY)
-                } else {
-                    configFor(
-                        ThinkingParamKind.OPENAI_REASONING_EFFORT,
-                        detectSource = ThinkingDetectSource.CAPABILITY,
-                    )
-                }
-                return base.applyCapability(capability)
-            }
+        val declared = supportedParams?.any {
+            it.equals("reasoning", ignoreCase = true) ||
+                it.equals("include_reasoning", ignoreCase = true) ||
+                it.equals("reasoning_effort", ignoreCase = true)
+        }
+        if (declared == false) return null
+        if (declared == null && ModelCapabilityCatalog.find(modelId)?.reasoning == false) return null
+        if (declared == null || supportedParams?.any { it.equals("reasoning_effort", ignoreCase = true) } == true) {
+            qwenEffortConfig(modelId, baseUrl)?.let { return it.applyCapability(capability) }
         }
 
-        if (isKimiK3(modelId)) {
-            val source = if (hostInferredKind(baseUrl) != null) ThinkingDetectSource.HOST
-            else ThinkingDetectSource.HEURISTIC
-            return KIMI_K3_CONFIG.copy(detectSource = source)
-        }
-
+        val inferred = inferFromModelId(modelId)
         if (isAggregatingGateway(baseUrl)) {
-            // 无能力表时：名字像推理才给 OR effort。来源标「服务商(HOST)」而非「能力表(CAPABILITY)」，
-            // 避免在没读到 supported_parameters 时对用户谎称是「权威识别」。
-            val native = inferFromModelId(modelId)
-            if (native == ThinkingParamKind.NONE) return null
+            if (declared != true && inferred == ThinkingParamKind.NONE) return null
+            // Native limits are not necessarily the gateway's limits. Trust its capability table.
             return configFor(
                 ThinkingParamKind.OPENAI_REASONING_EFFORT,
-                detectSource = ThinkingDetectSource.HOST, // OR host 本身即权威兜底
-            )
+                detectSource = if (declared == true) ThinkingDetectSource.CAPABILITY else ThinkingDetectSource.HEURISTIC,
+            ).applyCapability(capability)
         }
-
-        val byId = inferFromModelId(modelId)
-        if (byId != ThinkingParamKind.NONE) {
-            val source = ThinkingDetectSource.HEURISTIC
-            // 若 host 也能确认同一家族，升级为 HOST。
-            val byHost = hostInferredKind(baseUrl)
-            val upgraded = if (byHost != null && behaviorOf(byHost) == behaviorOf(byId)) {
-                ThinkingDetectSource.HOST
-            } else {
-                source
-            }
-            val native = if (byId == ThinkingParamKind.GEMINI || byId == ThinkingParamKind.GEMINI_LEVEL) {
-                geminiConfigFor(modelId)
-            } else {
-                null
-            }
-            return (native ?: configFor(byId)).copy(detectSource = upgraded)
+        if (inferred == ThinkingParamKind.NONE && declared != true) return null
+        val kind = inferred.takeIf { it != ThinkingParamKind.NONE }
+            ?: hostInferredKind(baseUrl) ?: ThinkingParamKind.OPENAI_REASONING_EFFORT
+        val native = if (kind == ThinkingParamKind.GEMINI || kind == ThinkingParamKind.GEMINI_LEVEL)
+            geminiConfigFor(modelId) else null
+        val known = ModelCapabilityCatalog.find(modelId)
+        val leaf = (known?.canonicalId ?: modelId.lowercase()).substringAfterLast('/')
+        val levels = known?.nativeEfforts.orEmpty().filterNot { it == "none" }
+        val openAiNative = HostUrl.parseHttpHost(baseUrl) == "api.openai.com" &&
+            known?.canonicalId?.startsWith("openai/") == true
+        val mandatory = isKimiK3(leaf) ||
+            (openAiNative && levels.isNotEmpty() && "none" !in known!!.nativeEfforts) ||
+            (leaf.startsWith("claude-fable-") || leaf.startsWith("claude-mythos-") ||
+                leaf.startsWith("claude-opus-5-5") || leaf.startsWith("claude-sonnet-5-5"))
+        val source = if (declared == true) ThinkingDetectSource.CAPABILITY else ThinkingDetectSource.HEURISTIC
+        val result = native ?: if (isKimiK3(leaf)) KIMI_K3_CONFIG else configFor(kind, mandatory, source)
+        val selected = if (levels.isNotEmpty() &&
+            kind in setOf(ThinkingParamKind.OPENAI_REASONING_EFFORT, ThinkingParamKind.CLAUDE_ADAPTIVE,
+                ThinkingParamKind.DEEPSEEK_THINKING, ThinkingParamKind.GEMINI_LEVEL)) {
+            result.copy(effortLevels = levels)
+        } else result
+        return selected.copy(detectSource = source).applyCapability(capability).let {
+            it.copy(defaultEffort = resolveDefaultEffort(it, baseUrl))
         }
-
-        val byHost = hostInferredKind(baseUrl) ?: return null
-        return configFor(byHost, detectSource = ThinkingDetectSource.HOST)
     }
 
     /**
@@ -379,7 +366,8 @@ object ThinkingKinds {
      * 服务商方言表声明的档位 → 参数形状的通用档位。
      */
     fun resolveEffortLevels(config: ThinkingConfig, baseUrl: String = ""): List<String> {
-        val custom = normalizeEffortLevels(config.effortLevels)
+        if (config.kind == ThinkingParamKind.NONE) return emptyList()
+        val custom = normalizeEffortLevels(config.effortLevels).filterNot { it == "none" }
         val levels = custom.ifEmpty {
             ReasoningDialects.forBaseUrl(baseUrl).effortLevels
                 ?: effortLevelsFor(wireKind(config.kind, baseUrl))
@@ -406,6 +394,11 @@ object ThinkingKinds {
         if (preferred.isNotEmpty() && preferred in levels) return preferred
         val dialect = defaultEffortFor(config.kind)
         return if (dialect in levels) dialect else levels.first()
+    }
+
+    fun resolveEffort(config: ThinkingConfig, requested: String?, baseUrl: String = ""): String {
+        val effort = requested?.trim()?.lowercase()
+        return effort?.takeIf { it in resolveEffortLevels(config, baseUrl) } ?: resolveDefaultEffort(config, baseUrl)
     }
 
     // ---- 行为类别 / 展示辅助 ----
@@ -466,6 +459,20 @@ object ThinkingKinds {
         if (isAggregatingGateway(baseUrl)) return ThinkingParamKind.OPENAI_REASONING_EFFORT
         return kind
     }
+
+    fun supportsExplicitNone(modelId: String, baseUrl: String): Boolean {
+        val host = HostUrl.parseHttpHost(baseUrl)
+        val known = ModelCapabilityCatalog.find(modelId)
+        if (host == "api.openai.com") {
+            return known?.canonicalId?.startsWith("openai/") == true && "none" in known.nativeEfforts
+        }
+        if (host == "api.deepseek.com") {
+            return known?.canonicalId?.startsWith("deepseek/deepseek-v4") == true ||
+                modelId.equals("deepseek-flash", ignoreCase = true)
+        }
+        return qwenEffortConfig(modelId, baseUrl) != null
+    }
+
 
     /** UI 是否应按预算语义展示（映射 token）。聚合网关折算后为 false。 */
     fun showAsBudget(config: ThinkingConfig, baseUrl: String): Boolean =

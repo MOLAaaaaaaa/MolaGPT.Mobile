@@ -23,6 +23,8 @@ data class AccountStatus(
     /** 服务端 `user.settings.cloud_sync_enabled`；null=未知/未返回。 */
     val cloudSyncEnabled: Boolean? = null,
     val securityStatus: String? = null,
+    /** 服务端 `user.api_access.state`；null = 账户未开放用户 API，入口保持隐藏而不是猜。 */
+    val apiAccessState: String? = null,
 ) {
     val isRegistered: Boolean get() = userType.equals("registered", ignoreCase = true)
 

@@ -30,6 +30,17 @@ class WireHistoryStore(private val filesDir: File) {
         return stored
     }
 
+    internal fun copyMetadata(sessionId: String, metadataJson: String): String {
+        val metadata = MessageJson.decodeMeta(metadataJson)
+        val hydrated = metadata.mapValues { (key, value) ->
+            val uri = if (key in ChatMessageMetadataKeys.WIRE_HISTORY) {
+                (Json.parseToJsonElement(value) as? JsonObject)?.get("wire_file")?.jsonPrimitive?.contentOrNull
+            } else null
+            if (uri != null) WireHistorySource.readFile(uri) else value
+        }
+        return MessageJson.encodeMeta(storeMetadata(sessionId, hydrated))
+    }
+
     fun deleteSession(sessionId: String) {
         val dir = File(root, sessionId)
         if (dir.name != sessionId || dir.canonicalFile != File(root.canonicalFile, sessionId) ||

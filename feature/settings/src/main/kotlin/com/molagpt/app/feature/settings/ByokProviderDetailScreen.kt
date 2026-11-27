@@ -159,7 +159,7 @@ fun ByokProviderDetailScreen(
         if (targetId.isEmpty() || provider == null) return@LaunchedEffect
         val model = provider.models.firstOrNull { it.id == targetId } ?: return@LaunchedEffect
         tab = 1
-        editingModel = ModelDraft.from(model)
+        editingModel = ModelDraft.from(model, provider.baseUrl)
         consumedInitialEdit = true
     }
     // 离开「模型」Tab 时退出多选，避免配置页仍露出删除 FAB。
@@ -300,7 +300,7 @@ fun ByokProviderDetailScreen(
                             }
                         },
                         onAddModel = { editingModel = ModelDraft() },
-                        onEditModel = { editingModel = ModelDraft.from(it) },
+                        onEditModel = { editingModel = ModelDraft.from(it, provider.baseUrl) },
                     )
                 }
                 Box(Modifier.padding(bottom = 16.dp))
@@ -342,9 +342,7 @@ fun ByokProviderDetailScreen(
                         val ids = selectedModelIds
                         showBatchDeleteConfirm = false
                         val base = saveDraftRef.value ?: provider
-                        viewModel.saveByokProvider(
-                            base.copy(models = base.models.filterNot { it.id in ids }),
-                        )
+                        viewModel.deleteByokModels(base.id, ids)
                         saveDraftRef.value = null
                         selectingModels = false
                         selectedModelIds = emptySet()
@@ -369,6 +367,7 @@ fun ByokProviderDetailScreen(
         val isImageProvider = base.purpose == com.molagpt.app.core.model.ByokPurpose.IMAGE
         ModelEditSheet(
             draft = draft,
+            provider = base,
             isImageProvider = isImageProvider,
             providerBaseUrl = base.baseUrl,
             providerType = base.type,
@@ -376,17 +375,16 @@ fun ByokProviderDetailScreen(
             onFetchPrices = viewModel::fetchModelPriceCandidates,
             onDismiss = { editingModel = null },
             onSave = { saved ->
-                val base = (saveDraftRef.value ?: provider!!)
-                val model = saved.toModel(base)
-                val merged = base.models.filterNot { it.id == model.id } + model
-                viewModel.saveByokProvider(base.copy(models = merged.sortedBy { it.id }))
+                val target = saveDraftRef.value ?: provider
+                val model = saved.toModel(target)
+                viewModel.saveByokModel(target.id, model)
                 saveDraftRef.value = null
                 editingModel = null
             },
             onDelete = if (draft.isExisting) {
                 {
-                    val base = (saveDraftRef.value ?: provider!!)
-                    viewModel.saveByokProvider(base.copy(models = base.models.filterNot { it.id == draft.modelId }))
+                    val target = saveDraftRef.value ?: provider
+                    viewModel.deleteByokModels(target.id, setOf(draft.modelId))
                     saveDraftRef.value = null
                     editingModel = null
                 }
@@ -974,6 +972,7 @@ private fun AbilityTag(label: String) {
 @Composable
 private fun ModelEditSheet(
     draft: ModelDraft,
+    provider: ByokProvider,
     onDismiss: () -> Unit,
     onSave: (ModelDraft) -> Unit,
     onDelete: (() -> Unit)?,
@@ -1007,12 +1006,19 @@ private fun ModelEditSheet(
     }
     var effortLevels by remember {
         mutableStateOf(
-            draft.effortLevels.ifEmpty { ThinkingKinds.effortLevelsFor(draft.thinkingKind) },
+            draft.effortLevels.ifEmpty {
+                ThinkingKinds.resolveEffortLevels(ThinkingConfig(kind = draft.thinkingKind), providerBaseUrl)
+            },
         )
     }
     var defaultEffort by remember {
         mutableStateOf(
-            draft.defaultEffort.ifBlank { ThinkingKinds.defaultEffortFor(draft.thinkingKind) },
+            draft.defaultEffort.ifBlank {
+                ThinkingKinds.resolveDefaultEffort(
+                    ThinkingConfig(kind = draft.thinkingKind, effortLevels = effortLevels),
+                    providerBaseUrl,
+                )
+            },
         )
     }
     var customEffortInput by remember { mutableStateOf("") }
@@ -1048,22 +1054,15 @@ private fun ModelEditSheet(
         )
 
     fun applyAutoDetect() {
-        val auto = ThinkingKinds.autoConfigFor(modelId, providerBaseUrl, supportedParams = null)
-            ?: ThinkingKinds.configFor(
-                ThinkingKinds.inferFromModelId(modelId).takeIf { it != ThinkingParamKind.NONE }
-                    ?: ThinkingKinds.hostInferredKind(providerBaseUrl)
-                    ?: ThinkingParamKind.OPENAI_REASONING_EFFORT,
-                alwaysOn = ThinkingKinds.isKimiK3(modelId),
-                detectSource = ThinkingDetectSource.HEURISTIC,
-            )
+        val auto = provider.detectThinkingConfig(modelId.trim())
         thinkingKind = auto.kind
         alwaysOn = auto.alwaysOn
         detectSource = auto.detectSource
         manualOverride = false
         // 重新识别等于放弃旧结论，观测标记一并清掉，让它有机会再试一次关闭。
         offIneffective = false
-        effortLevels = ThinkingKinds.resolveEffortLevels(auto, providerBaseUrl)
-        defaultEffort = ThinkingKinds.resolveDefaultEffort(auto, providerBaseUrl)
+        effortLevels = auto.effortLevels
+        defaultEffort = auto.defaultEffort
         thinking = auto.kind != ThinkingParamKind.NONE
         manualOpen = !ThinkingKinds.isHighConfidence(auto.detectSource)
     }
@@ -1079,14 +1078,13 @@ private fun ModelEditSheet(
             return
         }
         val kind = ThinkingKinds.kindForBehavior(behavior, preferred = thinkingKind)
-        thinkingKind = kind
-        alwaysOn = ThinkingKinds.isKimiK3(modelId) && behavior == ThinkingBehavior.EFFORT
+        val defaults = provider.defaultThinkingConfigFor(modelId.trim(), kind)
+        thinkingKind = defaults.kind
+        alwaysOn = defaults.alwaysOn
         detectSource = ThinkingDetectSource.OVERRIDE
         manualOverride = true
-        effortLevels = if (alwaysOn) listOf("low", "high", "max") else ThinkingKinds.effortLevelsFor(kind)
-        defaultEffort = if (alwaysOn) "max" else ThinkingKinds.defaultEffortFor(kind).let { d ->
-            if (d in effortLevels) d else effortLevels.firstOrNull().orEmpty()
-        }
+        effortLevels = defaults.effortLevels
+        defaultEffort = defaults.defaultEffort
     }
 
     ModalBottomSheet(
@@ -1233,7 +1231,12 @@ private fun ModelEditSheet(
                 ) {
                     SelectPill("推理", selected = thinking, onClick = {
                         thinking = !thinking
-                        if (thinking && thinkingKind == ThinkingParamKind.NONE) applyAutoDetect()
+                        if (thinking && thinkingKind == ThinkingParamKind.NONE) {
+                            applyAutoDetect()
+                        } else if (!thinking) {
+                            manualOverride = true
+                            detectSource = ThinkingDetectSource.OVERRIDE
+                        }
                     })
                     SelectPill("工具", selected = tools, onClick = { tools = !tools })
                     SelectPill("视觉", selected = vision, onClick = { vision = !vision })
@@ -1312,15 +1315,9 @@ private fun ModelEditSheet(
                             )
                             TextButton(
                                 onClick = {
-                                    if (alwaysOn) {
-                                        effortLevels = listOf("low", "high", "max")
-                                        defaultEffort = "max"
-                                    } else {
-                                        effortLevels = ThinkingKinds.effortLevelsFor(thinkingKind)
-                                        defaultEffort = ThinkingKinds.defaultEffortFor(thinkingKind).let { d ->
-                                            if (d in effortLevels) d else effortLevels.firstOrNull().orEmpty()
-                                        }
-                                    }
+                                    val defaults = provider.defaultThinkingConfigFor(modelId.trim(), thinkingKind)
+                                    effortLevels = defaults.effortLevels
+                                    defaultEffort = defaults.defaultEffort
                                 },
                             ) { Text("重置") }
                         }
@@ -2111,41 +2108,57 @@ private data class ModelDraft(
     val contextWindow: Int? = null,
     val isExisting: Boolean = false,
 ) {
-    fun toModel(provider: ByokProvider): ProviderModel = ProviderModel(
-        id = modelId,
-        displayName = displayName.ifBlank { modelId },
-        apiUrl = if (isImage && (provider.type == ByokProviderType.GEMINI || (imageFormat ?: provider.imageFormat) == ByokImageFormat.OPENAI_IMAGES)) provider.imagePath else provider.chatPath,
-        supportsVision = vision,
-        supportsThinking = thinking,
-        supportsReasoningEffort = thinking && ThinkingKinds.effortLevelsFor(thinkingKind).isNotEmpty(),
-        supportsToolCalling = tools,
-        supportsImageGeneration = isImage,
-        supportsImageEdit = isImage && imageEdit,
-        imageFormat = imageFormat.takeIf { isImage && provider.type == ByokProviderType.OPENAI_COMPAT },
-        supportsChat = !isImage,
-        providerId = provider.id,
-        providerName = provider.name,
-        providerKind = ProviderKind.BYOK,
-        thinkingConfig = if (!isImage && thinking) {
-            val cfg = ThinkingConfig(
-                kind = thinkingKind,
-                effortLevels = ThinkingKinds.normalizeEffortLevels(effortLevels)
-                    .ifEmpty { ThinkingKinds.effortLevelsFor(thinkingKind) },
-                defaultEffort = defaultEffort,
-                alwaysOn = alwaysOn || ThinkingKinds.isKimiK3(modelId),
-                detectSource = detectSource,
-                manualOverride = manualOverride,
-                offIneffective = offIneffective,
-            )
-            cfg.copy(defaultEffort = ThinkingKinds.resolveDefaultEffort(cfg))
-        } else null,
-        pricing = pricing,
-        customBody = customBody.filter { it.key.isNotBlank() },
-        contextWindow = contextWindow.takeIf { !isImage },
-    )
+    fun toModel(provider: ByokProvider): ProviderModel {
+        val resolvedThinkingConfig = when {
+            isImage -> null
+            thinking -> {
+                val base = ThinkingConfig(
+                    kind = thinkingKind,
+                    effortLevels = ThinkingKinds.normalizeEffortLevels(effortLevels),
+                    defaultEffort = defaultEffort,
+                    alwaysOn = alwaysOn,
+                    detectSource = detectSource,
+                    manualOverride = manualOverride,
+                    offIneffective = offIneffective,
+                )
+                val levels = ThinkingKinds.resolveEffortLevels(base, provider.baseUrl)
+                base.copy(
+                    effortLevels = levels,
+                    defaultEffort = ThinkingKinds.resolveDefaultEffort(base.copy(effortLevels = levels), provider.baseUrl),
+                )
+            }
+            manualOverride || detectSource == ThinkingDetectSource.OVERRIDE ->
+                ThinkingKinds.NONE_CONFIG.copy(
+                    detectSource = ThinkingDetectSource.OVERRIDE,
+                    manualOverride = true,
+                )
+            else -> null
+        }
+        return ProviderModel(
+            id = modelId,
+            displayName = displayName.ifBlank { modelId },
+            apiUrl = if (isImage && (provider.type == ByokProviderType.GEMINI || (imageFormat ?: provider.imageFormat) == ByokImageFormat.OPENAI_IMAGES)) provider.imagePath else provider.chatPath,
+            supportsVision = vision,
+            supportsThinking = !isImage && thinking && resolvedThinkingConfig?.kind != ThinkingParamKind.NONE,
+            supportsReasoningEffort = !isImage && thinking && resolvedThinkingConfig != null &&
+                ThinkingKinds.resolveEffortLevels(resolvedThinkingConfig, provider.baseUrl).isNotEmpty(),
+            supportsToolCalling = tools,
+            supportsImageGeneration = isImage,
+            supportsImageEdit = isImage && imageEdit,
+            imageFormat = imageFormat.takeIf { isImage && provider.type == ByokProviderType.OPENAI_COMPAT },
+            supportsChat = !isImage,
+            providerId = provider.id,
+            providerName = provider.name,
+            providerKind = ProviderKind.BYOK,
+            thinkingConfig = resolvedThinkingConfig,
+            pricing = pricing,
+            customBody = customBody.filter { it.key.isNotBlank() },
+            contextWindow = contextWindow.takeIf { !isImage },
+        )
+    }
 
     companion object {
-        fun from(model: ProviderModel): ModelDraft {
+        fun from(model: ProviderModel, providerBaseUrl: String = ""): ModelDraft {
             val tcfg = model.thinkingConfig
             return ModelDraft(
                 modelId = model.id,
@@ -2156,9 +2169,9 @@ private data class ModelDraft(
                 vision = model.supportsVision,
                 thinking = model.supportsThinking || model.supportsReasoningEffort,
                 thinkingKind = tcfg?.kind ?: ThinkingParamKind.NONE,
-                effortLevels = tcfg?.let { ThinkingKinds.resolveEffortLevels(it) }.orEmpty(),
-                defaultEffort = tcfg?.let { ThinkingKinds.resolveDefaultEffort(it) }.orEmpty(),
-                alwaysOn = tcfg?.alwaysOn == true || ThinkingKinds.isKimiK3(model.id),
+                effortLevels = tcfg?.let { ThinkingKinds.resolveEffortLevels(it, providerBaseUrl) }.orEmpty(),
+                defaultEffort = tcfg?.let { ThinkingKinds.resolveDefaultEffort(it, providerBaseUrl) }.orEmpty(),
+                alwaysOn = tcfg?.alwaysOn == true,
                 detectSource = tcfg?.detectSource,
                 manualOverride = tcfg?.manualOverride == true,
                 offIneffective = tcfg?.offIneffective == true,

@@ -52,6 +52,8 @@ data class ModelConfigEntry(
     val apiUrl: String? = null,
     val supportsThinking: Boolean = false,
     val supportsReasoningEffort: Boolean = false,
+    val reasoningEffortLevels: List<String> = emptyList(),
+    val defaultReasoningEffort: String? = null,
     val showImageUpload: Boolean = false,
     @SerialName("show_in_frontend") val showInFrontend: Boolean = true,
     val group: String? = null,

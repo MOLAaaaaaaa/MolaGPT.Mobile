@@ -13,13 +13,18 @@ import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Dns
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okio.BufferedSource
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.net.Inet4Address
 import java.security.MessageDigest
+import java.util.Collections
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -27,14 +32,10 @@ internal class CdnResponse(val body: ByteArray, val contentType: String)
 
 /**
  * 替网页去 CDN 取库。三个理由让它经过我们而不是由浏览器直连（同桌面端 CdnProxy）：
- *  - 可达：jsDelivr、unpkg 在国内慢到不可用（桌面端实测 1MB 的 echarts 从 jsDelivr 12 秒没下完，
- *    npmmirror 0.5 秒）。每个请求同时向原地址和提供同样包路径的镜像发出，谁先完整返回用谁——
- *    海外用户什么也不损失，国内用户拿到镜像。
- *  - 缓存：成功的内容落盘，上周生成的页面离线也能打开。
- *  - 唯一关口：白名单只在这里和 CSP 里。
- *
- * 镜像选大型、可追责的运营方。刻意不用 BootCDN / Staticfile：它们卷入了 2024 年 polyfill.io
- * 供应链事件。
+ *  - 可达：jsDelivr、unpkg 在国内慢到不可用。每个请求同时向原地址和提供同样包路径的镜像发出，
+ *    谁先完整返回用谁——海外用户什么也不损失，国内用户拿到镜像。
+ *  - 缓存：成功的内容原子落盘并受真实字节预算约束，上周生成的页面离线也能打开。
+ *  - 唯一关口：仅允许 HTTPS + 白名单主机，逐跳校验重定向。
  */
 internal object CanvasCdn {
     /**
@@ -48,18 +49,19 @@ internal object CanvasCdn {
         "fonts.googleapis.com", "fonts.gstatic.com",
     )
 
-    private const val MAX_BODY = 24L * 1024 * 1024
-    // 手机存储比桌面紧，预算取桌面端 256MB 的四分之一；放在 cache 目录，系统需要时可以清掉。
-    private const val CACHE_BUDGET = 64L * 1024 * 1024
+    internal const val MAX_BODY = 24L * 1024 * 1024
+    internal const val CACHE_BUDGET = 64L * 1024 * 1024
+    private const val MAX_TYPE_BYTES = 1024L
+    private const val MAX_REDIRECTS = 5
     private const val RACE_TIMEOUT_MS = 40_000L
 
-    private val trimmed = AtomicBoolean(false)
+    private val cacheGate = Any()
+    private val initialTrimmed = AtomicBoolean(false)
+    private var bytesWrittenSinceTrim = 0L
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            // IPv4 优先。npmmirror 的解析结果 IPv6 在前，IPv6 不通的网络（部分 Wi-Fi、模拟器）上
-            // OkHttp 4 会先在 IPv6 上等满连接超时才换 IPv4：实测镜像 0.5 秒的下载拖到十几秒，
-            // 反被最慢的 jsDelivr 抢先。只有 IPv6 地址的网络不受影响，排序不丢地址。
+            // IPv4 优先：避免部分网络 IPv6 超时拖垮镜像竞速。
             .dns(object : Dns {
                 override fun lookup(hostname: String) =
                     Dns.SYSTEM.lookup(hostname).sortedBy { if (it is Inet4Address) 0 else 1 }
@@ -67,39 +69,136 @@ internal object CanvasCdn {
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .callTimeout(40, TimeUnit.SECONDS)
-            .followRedirects(true)
+            // 关闭自动重定向，改为逐跳校验 HTTPS 与白名单主机。
+            .followRedirects(false)
+            .followSslRedirects(false)
             .build()
     }
 
     fun isAllowed(host: String): Boolean = host.lowercase() in allowedHosts
 
+    fun isAllowedUrl(url: HttpUrl): Boolean =
+        url.isHttps &&
+            isAllowed(url.host) &&
+            url.port == 443 &&
+            url.username.isEmpty() &&
+            url.password.isEmpty()
+
+    fun isAllowedUri(uri: Uri): Boolean {
+        if (!uri.scheme.equals("https", ignoreCase = true)) return false
+        val host = uri.host?.lowercase() ?: return false
+        if (!isAllowed(host)) return false
+        if (!uri.userInfo.isNullOrEmpty()) return false
+        return uri.port == -1 || uri.port == 443
+    }
+
     suspend fun fetch(context: Context, uri: Uri): CdnResponse? = withContext(Dispatchers.IO) {
+        if (!isAllowedUri(uri)) return@withContext null
         val dir = File(context.cacheDir, "canvas-cdn")
         val key = hash(uri.toString())
-        read(dir, key)?.let { return@withContext it }
+        readCacheFile(dir, key, MAX_BODY)?.let { return@withContext it }
 
-        val calls = candidates(uri).mapNotNull(::newCall)
+        val urls = candidates(uri).mapNotNull { it.toHttpUrlOrNull()?.takeIf(::isAllowedUrl) }
+        if (urls.isEmpty()) return@withContext null
+        val activeCalls = Collections.synchronizedSet(mutableSetOf<Call>())
         try {
             val winner = withTimeoutOrNull(RACE_TIMEOUT_MS) {
                 coroutineScope {
-                    val results = Channel<CdnResponse?>(calls.size)
-                    calls.forEach { call -> launch { results.send(read(call)) } }
-                    repeat(calls.size) {
+                    val results = Channel<CdnResponse?>(urls.size)
+                    urls.forEach { url ->
+                        launch {
+                            results.send(
+                                fetchWithRedirects(
+                                    httpClient = client,
+                                    startUrl = url,
+                                    urlAllowed = ::isAllowedUrl,
+                                    maxBody = MAX_BODY,
+                                    activeCalls = activeCalls,
+                                ),
+                            )
+                        }
+                    }
+                    repeat(urls.size) {
                         val result = results.receive()
-                        // 先到先用。输家要当场取消：已经拿到响应头的那个正阻塞在读正文上，
-                        // 不取消的话这里要等它慢慢读完（国内的 jsDelivr 一读就是十几秒）才返回。
                         if (result != null) {
-                            calls.forEach { it.cancel() }
+                            cancelAll(activeCalls)
                             return@coroutineScope result
                         }
                     }
                     null
                 }
             }
-            winner?.also { write(dir, key, it) }
+            winner?.also { writeCacheFile(dir, key, it, CACHE_BUDGET) }
         } finally {
-            calls.forEach { it.cancel() }
+            cancelAll(activeCalls)
         }
+    }
+
+    private fun cancelAll(calls: MutableSet<Call>) {
+        val snapshot = synchronized(calls) { calls.toList() }
+        snapshot.forEach { runCatching { it.cancel() } }
+    }
+
+    internal suspend fun fetchWithRedirects(
+        httpClient: OkHttpClient,
+        startUrl: HttpUrl,
+        urlAllowed: (HttpUrl) -> Boolean,
+        maxBody: Long = MAX_BODY,
+        activeCalls: MutableSet<Call> = Collections.synchronizedSet(mutableSetOf()),
+    ): CdnResponse? {
+        if (!urlAllowed(startUrl)) return null
+        var currentUrl = startUrl
+        repeat(MAX_REDIRECTS + 1) { hop ->
+            val request = Request.Builder()
+                .url(currentUrl)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android) MolaGPT-Canvas/1.0")
+                .build()
+            val call = httpClient.newCall(request)
+            activeCalls.add(call)
+            try {
+                call.await().use { response ->
+                    val code = response.code
+                    if (code in REDIRECT_CODES) {
+                        if (hop >= MAX_REDIRECTS) return null
+                        val location = response.header("Location")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+                        val nextUrl = currentUrl.resolve(location) ?: return null
+                        if (!urlAllowed(nextUrl)) return null
+                        currentUrl = nextUrl
+                        return@use
+                    }
+                    if (code != 200) return null
+                    val body = response.body ?: return null
+                    val declared = body.contentLength()
+                    if (declared > maxBody) return null
+                    val bytes = readBoundedBytes(body.source(), maxBody) ?: return null
+                    val type = body.contentType()?.toString()?.takeIf { it.isNotBlank() } ?: guessType(currentUrl.toString())
+                    return CdnResponse(bytes, type)
+                }
+            } catch (_: IOException) {
+                return null
+            } finally {
+                activeCalls.remove(call)
+            }
+        }
+        return null
+    }
+
+    /**
+     * 严格有界读取：无论 Content-Length 是否已知，只要实际流超出 [maxBytes] 立即停止读取并返回 null。
+     */
+    internal fun readBoundedBytes(source: BufferedSource, maxBytes: Long): ByteArray? {
+        if (maxBytes < 0L) return null
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        var total = 0L
+        while (true) {
+            val read = source.read(buffer, 0, buffer.size)
+            if (read == -1) break
+            total += read
+            if (total > maxBytes) return null
+            out.write(buffer, 0, read)
+        }
+        return out.toByteArray()
     }
 
     /**
@@ -119,7 +218,6 @@ internal object CanvasCdn {
                 out += "https://registry.npmmirror.com/${npm.first}/${npm.second}/files/${npm.third}$query"
                 out += "https://unpkg.com/${npm.first}@${npm.second}/${npm.third}$query"
             } else if ('+' !in path) {
-                // 裸包地址：unpkg 挑选浏览器构建的方式和 jsDelivr 对几乎所有库都一致。
                 out += "https://unpkg.com/" + path.removePrefix("/npm/") + query
             }
         } else if (host == "unpkg.com") {
@@ -147,37 +245,10 @@ internal object CanvasCdn {
         return Triple(name, version, file)
     }
 
-    private fun newCall(url: String): Call? = runCatching {
-        client.newCall(
-            Request.Builder()
-                .url(url)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android) MolaGPT-Canvas/1.0")
-                .build(),
-        )
-    }.getOrNull()
-
-    private suspend fun read(call: Call): CdnResponse? {
-        val url = call.request().url.toString()
-        return try {
-            call.await().use { response ->
-                if (response.code != 200) return null
-                val body = response.body ?: return null
-                if (body.contentLength() > MAX_BODY) return null
-                val bytes = body.bytes()
-                if (bytes.size > MAX_BODY) return null
-                val type = body.contentType()?.toString()?.takeIf { it.isNotBlank() } ?: guessType(url)
-                CdnResponse(bytes, type)
-            }
-        } catch (_: IOException) {
-            null
-        }
-    }
-
     private suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation: CancellableContinuation<Response> ->
         continuation.invokeOnCancellation { runCatching { cancel() } }
         enqueue(object : Callback {
             override fun onResponse(call: Call, response: Response) {
-                // 已被取消（别的镜像先到了）时把响应关掉，不留连接。
                 continuation.resume(response) { response.close() }
             }
             override fun onFailure(call: Call, e: IOException) {
@@ -201,41 +272,109 @@ internal object CanvasCdn {
 
     // ---- 磁盘缓存 ----
 
-    private fun read(dir: File, key: String): CdnResponse? = runCatching {
-        val body = File(dir, "$key.bin")
-        val type = File(dir, "$key.type")
-        if (!body.exists() || !type.exists()) return null
-        body.setLastModified(System.currentTimeMillis())
-        CdnResponse(body.readBytes(), type.readText())
-    }.getOrNull()
-
-    private fun write(dir: File, key: String, response: CdnResponse) {
+    internal fun readCacheFile(dir: File, key: String, maxBody: Long = MAX_BODY): CdnResponse? = synchronized(cacheGate) {
         runCatching {
-            dir.mkdirs()
             val body = File(dir, "$key.bin")
-            val temp = File(dir, "$key.tmp")
-            temp.writeBytes(response.body)
-            if (!temp.renameTo(body)) {
+            val type = File(dir, "$key.type")
+            if (!body.isFile || !type.isFile) return@runCatching null
+            val bodyLen = body.length()
+            val typeLen = type.length()
+            if (bodyLen < 0L || bodyLen > maxBody || typeLen <= 0L || typeLen > MAX_TYPE_BYTES) {
                 body.delete()
-                temp.renameTo(body)
+                type.delete()
+                return@runCatching null
             }
-            File(dir, "$key.type").writeText(response.contentType)
-            if (trimmed.compareAndSet(false, true)) trim(dir)
+            val bytes = readBoundedFile(body, maxBody) ?: run {
+                body.delete()
+                type.delete()
+                return@runCatching null
+            }
+            val contentType = readBoundedFile(type, MAX_TYPE_BYTES)?.toString(Charsets.UTF_8)?.trim()
+            if (contentType.isNullOrEmpty()) return@runCatching null
+            body.setLastModified(System.currentTimeMillis())
+            CdnResponse(bytes, contentType)
+        }.getOrNull()
+    }
+
+    private fun readBoundedFile(file: File, maxBytes: Long): ByteArray? =
+        file.inputStream().use { input ->
+            val out = ByteArrayOutputStream(minOf(file.length(), maxBytes).coerceAtLeast(0L).toInt())
+            val buffer = ByteArray(8192)
+            var total = 0L
+            while (true) {
+                val read = input.read(buffer)
+                if (read == -1) break
+                total += read
+                if (total > maxBytes) return null
+                out.write(buffer, 0, read)
+            }
+            out.toByteArray()
+        }
+
+    internal fun writeCacheFile(dir: File, key: String, response: CdnResponse, budgetBytes: Long = CACHE_BUDGET) {
+        if (response.body.size.toLong() > MAX_BODY) return
+        val typeBytes = response.contentType.toByteArray(Charsets.UTF_8)
+        if (typeBytes.isEmpty() || typeBytes.size.toLong() > MAX_TYPE_BYTES) return
+        synchronized(cacheGate) {
+            runCatching {
+                dir.mkdirs()
+                val bodyTarget = File(dir, "$key.bin")
+                val typeTarget = File(dir, "$key.type")
+                writeAtomically(dir, "$key-body-", bodyTarget, response.body)
+                writeAtomically(dir, "$key-type-", typeTarget, typeBytes)
+                bytesWrittenSinceTrim += response.body.size + typeBytes.size
+                if (initialTrimmed.compareAndSet(false, true) ||
+                    bytesWrittenSinceTrim >= (budgetBytes / 4).coerceAtLeast(1L) ||
+                    response.body.size.toLong() > budgetBytes / 2
+                ) {
+                    trimCacheDir(dir, budgetBytes)
+                    bytesWrittenSinceTrim = 0L
+                }
+            }
         }
     }
 
-    /** 每次运行只做一次：超出预算时按最近使用时间删掉最旧的。 */
-    private fun trim(dir: File) {
-        val files = dir.listFiles { f -> f.name.endsWith(".bin") }?.sortedByDescending { it.lastModified() } ?: return
-        var total = 0L
-        for (file in files) {
-            total += file.length()
-            if (total <= CACHE_BUDGET) continue
-            file.delete()
-            File(dir, file.name.removeSuffix(".bin") + ".type").delete()
+    private fun writeAtomically(dir: File, prefix: String, target: File, bytes: ByteArray) {
+        val temp = File.createTempFile(prefix, ".tmp", dir)
+        try {
+            temp.writeBytes(bytes)
+            if (!temp.renameTo(target)) {
+                target.delete()
+                if (!temp.renameTo(target)) {
+                    throw IOException("Failed to commit cache file ${target.name}")
+                }
+            }
+        } catch (error: Throwable) {
+            temp.delete()
+            throw error
         }
+    }
+
+    /** 按真实磁盘字节预算裁剪：统计 `.bin` 与 `.type` 总大小，并清理孤儿 `.tmp` 文件。 */
+    internal fun trimCacheDir(dir: File, budgetBytes: Long = CACHE_BUDGET) {
+        val all = dir.listFiles() ?: return
+        all.filter { it.name.endsWith(".tmp") }.forEach { it.delete() }
+        val entries = all.filter { it.isFile && it.name.endsWith(".bin") }
+            .sortedByDescending { it.lastModified() }
+        var total = 0L
+        val keepTypes = HashSet<String>(entries.size)
+        for (body in entries) {
+            val typeFile = File(dir, body.name.removeSuffix(".bin") + ".type")
+            val entryBytes = body.length() + if (typeFile.isFile) typeFile.length() else 0L
+            if (!typeFile.isFile || total + entryBytes > budgetBytes) {
+                body.delete()
+                typeFile.delete()
+            } else {
+                total += entryBytes
+                keepTypes.add(typeFile.name)
+            }
+        }
+        // 清理没有对应 .bin 的孤儿 .type 文件。
+        all.filter { it.isFile && it.name.endsWith(".type") && it.name !in keepTypes }.forEach { it.delete() }
     }
 
     private fun hash(value: String): String =
         MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") { "%02x".format(it) }.take(32)
+
+    private val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
 }

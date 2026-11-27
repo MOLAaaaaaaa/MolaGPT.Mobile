@@ -4,6 +4,10 @@ import com.molagpt.app.core.model.ByokImageFormat
 import com.molagpt.app.core.model.ByokProvider
 import com.molagpt.app.core.model.ByokProviderType
 import com.molagpt.app.core.model.ImageGenerationConfig
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
@@ -34,20 +38,23 @@ import kotlin.math.ln
 import kotlin.math.sqrt
 
 class ByokImageApi(private val http: MolaHttp) {
+    private val toolImageHttp = http.streamOkHttp.newBuilder().callTimeout(600, TimeUnit.SECONDS).build()
+
     fun generate(
         provider: ByokProvider,
         modelId: String,
         prompt: String,
         size: String,
         imageConfig: ImageGenerationConfig? = null,
+        gate: ImageCallGate,
     ): ByokImageResult = when (provider.type) {
-        ByokProviderType.GEMINI -> generateGemini(provider, modelId, prompt, imageConfig)
+        ByokProviderType.GEMINI -> generateGemini(provider, modelId, prompt, imageConfig, gate)
         ByokProviderType.ANTHROPIC -> throw MolaApiException(400, "${provider.name} 暂未配置图像生成端点")
         ByokProviderType.OPENAI_COMPAT, ByokProviderType.OPENAI_RESPONSE -> when (provider.imageFormatFor(modelId)) {
-            ByokImageFormat.OPENAI_CHAT_IMAGE -> generateViaChatCompletions(provider, modelId, prompt, size, imageConfig)
+            ByokImageFormat.OPENAI_CHAT_IMAGE -> generateViaChatCompletions(provider, modelId, prompt, size, imageConfig, gate)
             ByokImageFormat.OPENAI_IMAGES -> {
                 val result = runOpenAiImageGenerations(
-                    provider, modelId, prompt, ByokImageWorkbenchConfig(size = size.ifBlank { "1024x1024" }), gate = null,
+                    provider, modelId, prompt, ByokImageWorkbenchConfig(size = size.ifBlank { "1024x1024" }), gate = gate,
                     imageConfig = imageConfig,
                 )
                 ByokImageResult(url = result.hits.firstOrNull()?.url, raw = result.raw.take(4000))
@@ -295,7 +302,7 @@ class ByokImageApi(private val http: MolaHttp) {
             .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
-        val client = http.okHttp.newBuilder()
+        val client = http.streamOkHttp.newBuilder()
             .callTimeout(timeoutSeconds.coerceIn(10, 3600).toLong(), TimeUnit.SECONDS)
             .build()
         client.newCall(req).also { gate?.register(it) }.execute().use { resp ->
@@ -313,7 +320,7 @@ class ByokImageApi(private val http: MolaHttp) {
             .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
             .post(body)
             .build()
-        val client = http.okHttp.newBuilder()
+        val client = http.streamOkHttp.newBuilder()
             .callTimeout(timeoutSeconds.coerceIn(10, 3600).toLong(), TimeUnit.SECONDS)
             .build()
         client.newCall(req).also { gate?.register(it) }.execute().use { resp ->
@@ -462,14 +469,17 @@ class ByokImageApi(private val http: MolaHttp) {
     }
 
     private fun imagesDialect(provider: ByokProvider, modelId: String): ImagesDialect {
-        val host = runCatching { URI(provider.baseUrl.trim()).host.orEmpty() }.getOrDefault("").lowercase()
+        val host = provider.host
         val id = modelId.substringAfterLast('/').lowercase()
         return when {
             provider.isOpenRouter -> ImagesDialect.OPENROUTER
-            host.endsWith("siliconflow.cn") || host.endsWith("siliconflow.com") -> ImagesDialect.SILICONFLOW
+            com.molagpt.app.core.model.HostUrl.matchesDomain(host, "siliconflow.cn") ||
+                com.molagpt.app.core.model.HostUrl.matchesDomain(host, "siliconflow.com") -> ImagesDialect.SILICONFLOW
             host == "api.x.ai" || id.startsWith("grok-imagine") || id.startsWith("grok-2-image") -> ImagesDialect.XAI
-            host.endsWith("bigmodel.cn") || id.startsWith("cogview") || id.startsWith("glm-image") -> ImagesDialect.ZHIPU
-            host.endsWith("volces.com") || id.contains("seedream") -> ImagesDialect.SEEDREAM
+            com.molagpt.app.core.model.HostUrl.matchesDomain(host, "bigmodel.cn") ||
+                id.startsWith("cogview") || id.startsWith("glm-image") -> ImagesDialect.ZHIPU
+            com.molagpt.app.core.model.HostUrl.matchesDomain(host, "volces.com") ||
+                id.contains("seedream") -> ImagesDialect.SEEDREAM
             id.startsWith("qwen-image") || id.startsWith("wan2") || id.startsWith("wanx") -> ImagesDialect.REFS_IN_BODY
             else -> ImagesDialect.OPENAI
         }
@@ -662,6 +672,7 @@ class ByokImageApi(private val http: MolaHttp) {
         prompt: String,
         size: String,
         imageConfig: ImageGenerationConfig?,
+        gate: ImageCallGate,
     ): ByokImageResult {
         val body = buildJsonObject {
             put("model", modelId)
@@ -699,7 +710,7 @@ class ByokImageApi(private val http: MolaHttp) {
             .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
-        http.okHttp.newCall(req).execute().use { resp ->
+        toolImageHttp.newCall(req).also(gate::register).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 throw MolaApiException(resp.code, serverResponseError("图像生成失败", resp.code, text))
@@ -713,6 +724,7 @@ class ByokImageApi(private val http: MolaHttp) {
         modelId: String,
         prompt: String,
         imageConfig: ImageGenerationConfig?,
+        gate: ImageCallGate,
     ): ByokImageResult {
         if (modelId.substringAfterLast('/').startsWith("imagen-", ignoreCase = true)) {
             throw MolaApiException(400, "Imagen 已停止服务，请选择 Gemini 图像模型")
@@ -750,7 +762,7 @@ class ByokImageApi(private val http: MolaHttp) {
             .apply { provider.applyAuthHeaders { name, value -> header(name, value) } }
             .post(http.json.encodeToString(JsonObject.serializer(), body).toRequestBody(JSON_MEDIA))
             .build()
-        http.okHttp.newCall(req).execute().use { resp ->
+        toolImageHttp.newCall(req).also(gate::register).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 throw MolaApiException(resp.code, serverResponseError("图像生成失败", resp.code, text))
@@ -1092,6 +1104,16 @@ class ImageCallGate {
     @Volatile
     var cancelled: Boolean = false
         private set
+
+    suspend fun <T> runCancellable(dispatcher: CoroutineDispatcher, block: () -> T): T = coroutineScope {
+        val work = async(dispatcher) { block() }
+        try {
+            work.await()
+        } catch (error: CancellationException) {
+            cancel()
+            throw error
+        }
+    }
 
     fun register(call: okhttp3.Call) {
         calls += call

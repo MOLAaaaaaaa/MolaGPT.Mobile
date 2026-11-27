@@ -1,6 +1,7 @@
 package com.molagpt.app.feature.chat
 
 import com.molagpt.app.core.common.chunkedTimeWindow
+import com.molagpt.app.core.common.Logger
 import com.molagpt.app.core.model.ChatMessage
 import com.molagpt.app.core.model.ChatRequest
 import com.molagpt.app.core.model.MessageFragment
@@ -12,7 +13,14 @@ import com.molagpt.app.core.storage.ChatRepository
 import com.molagpt.app.core.storage.HistoryIdentity
 import com.molagpt.app.core.storage.StreamTaskRecord
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,10 +28,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onCompletion
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -61,6 +65,7 @@ class BackgroundStreamManager(
      * 这里只是「回合结束」信号——是否真的发请求由整理器按窗口阈值决定。
      */
     private val memoryConsolidator: suspend (sessionId: String) -> Unit = {},
+    private val onOfficialSettled: (String) -> Unit = {},
 ) {
     /** 一次生成正常完成（COMPLETE）的事件，供完成通知消费。 */
     data class Completion(
@@ -70,32 +75,39 @@ class BackgroundStreamManager(
         val officialSession: HistoryIdentity?,
     )
 
-    private data class Task(
-        val sessionId: String,
-        val streamSessionId: String,
-        val providerKind: ProviderKind,
-        val job: Job,
+    private class Task(
+        val record: StreamTaskRecord,
         val identity: HistoryIdentity,
-        /** 本轮结束后是否自动起标题（仅首轮为 true；重试/重生成不改已有标题）。 */
-        val generateTitle: Boolean = false,
-    )
+        val generateTitle: Boolean,
+    ) {
+        lateinit var owner: Job
+        var worker: Job? = null
+        var stopRequested = false
+        val official get() = record.providerKind == ProviderKind.MOLAGPT
+    }
 
     private val states = ConcurrentHashMap<String, MutableStateFlow<BackgroundStreamState>>()
-    private val tasks = ConcurrentHashMap<String, Task>()
+    private val settledAt = mutableMapOf<String, Long>()
+    private val gate = Any()
+    private val tasks = mutableMapOf<String, Task>()
+    private var signingOut: HistoryIdentity? = null
     private val _activeCount = MutableStateFlow(0)
     val activeCount: StateFlow<Int> = _activeCount.asStateFlow()
 
     private val _completions = MutableSharedFlow<Completion>(extraBufferCapacity = 32)
     val completions: SharedFlow<Completion> = _completions.asSharedFlow()
 
-    fun observe(sessionId: String): StateFlow<BackgroundStreamState> = stateFor(sessionId)
+    fun observe(sessionId: String): StateFlow<BackgroundStreamState> = synchronized(gate) {
+        pruneIdleStatesLocked(excludeSessionId = sessionId)
+        stateFor(sessionId)
+    }
 
-    fun isStreaming(sessionId: String): Boolean = tasks[sessionId]?.job?.isActive == true
+    fun isStreaming(sessionId: String): Boolean = synchronized(gate) { sessionId in tasks }
 
-    fun currentMessage(sessionId: String): ChatMessage? = stateFor(sessionId).value.inFlight
+    fun currentMessage(sessionId: String): ChatMessage? = states[sessionId]?.value?.inFlight
 
     fun updateInFlight(sessionId: String, message: ChatMessage) {
-        stateFor(sessionId).update { state ->
+        states[sessionId]?.update { state ->
             if (state.inFlight?.messageId == message.messageId) state.copy(inFlight = message) else state
         }
     }
@@ -106,12 +118,17 @@ class BackgroundStreamManager(
      * 编辑分支切换会整体换掉时间线并重建消息 id，而 UI 合并 in-flight 是按 messageId 去重的：
      * 残留的旧帧匹配不上任何一条历史，就会作为多余的一条挂在末尾。生成中不清（此时它是唯一数据源）。
      */
-    fun clearCompletedInFlight(sessionId: String) {
-        if (isStreaming(sessionId)) return
-        stateFor(sessionId).update { state ->
-            if (state.inFlight == null) state else state.copy(inFlight = null)
+    fun clearCompletedInFlight(sessionId: String) = synchronized(gate) {
+        if (sessionId in tasks) return@synchronized
+        val flow = states[sessionId] ?: return@synchronized
+        flow.update { it.copy(inFlight = null) }
+        if (flow.subscriptionCount.value == 0 && flow.value.error == null) {
+            states.remove(sessionId)
+            settledAt.remove(sessionId)
         }
     }
+
+    internal fun trackedStateCount(): Int = states.size
 
     fun start(
         request: ChatRequest,
@@ -120,211 +137,229 @@ class BackgroundStreamManager(
         priorAttempts: List<RetryAttempt> = emptyList(),
         generateTitleOnFinish: Boolean = false,
         expected: HistoryIdentity = chatRepository.identity.value,
-    ) {
-        if (request.providerKind == ProviderKind.MOLAGPT && (!expected.canReadOfficial || expected != chatRepository.identity.value)) return
-        // 取代同会话上一条流：本地取消旧 job（不走 stop() 的异步 removeStreamTask，避免与下面的 persist 竞争）。
-        val previous = tasks.remove(request.sessionId)
-        previous?.job?.cancel()
-        val previousStreamId = previous?.streamSessionId
-
-        val state = stateFor(request.sessionId)
-        state.update { it.copy(error = null, streamSessionId = request.streamSessionId, active = true, official = request.providerKind == ProviderKind.MOLAGPT) }
-        val apiUrl = apiUrlResolver(request.providerId, request.modelId)
-
-        // 先停旧服务端流、再持久化新任务，二者在同一协程里顺序执行，避免 remove/persist 乱序。
-        scope.launch {
-            if (
-                previousStreamId != null &&
-                previousStreamId != request.streamSessionId &&
-                previous.providerKind == ProviderKind.MOLAGPT
-            ) {
-                runCatching { chatRepository.stop(request.sessionId, previousStreamId, previous.identity) }
-            }
-            chatRepository.persistStreamTask(
-                StreamTaskRecord(
-                    sessionId = request.sessionId,
-                    streamSessionId = request.streamSessionId,
-                    conversationId = request.conversationId,
-                    assistantMessageId = assistantMessageId,
-                    modelId = request.modelId,
-                    modelDisplayName = request.modelDisplayName,
-                    providerId = request.providerId,
-                    providerKind = request.providerKind,
-                    apiUrl = apiUrl,
-                    createdAt = System.currentTimeMillis(),
-                ),
-                expected,
-            )
-        }
-
-        val job = chatRepository.streamAssistant(request, assistantMessageId, priorAttempts, expected)
-            .chunkedTimeWindow(
-                windowMillis = { StreamRenderPacing.windowMillis(throttleMs) },
-                emitImmediately = {
-                    StreamRenderPacing.windowMillis(throttleMs) <= DIRECT_RENDER_WINDOW_MS ||
-                        it.hasRunningTool()
-                },
-            )
-            .onEach { batch ->
-                batch.lastOrNull()?.let { msg ->
-                    state.value = BackgroundStreamState(
-                        inFlight = msg,
-                        error = null,
-                        streamSessionId = request.streamSessionId,
-                        active = true,
-                        official = request.providerKind == ProviderKind.MOLAGPT,
-                    )
-                }
-            }
-            .catch { e -> markError(request.sessionId, e) }
-            .onCompletion {
-                finishTask(request.sessionId, request.streamSessionId, request.conversationId, request.modelDisplayName)
-            }
-            .launchIn(scope)
-
-        tasks[request.sessionId] = Task(
+        bodyVersion: Long? = null,
+    ): Boolean {
+        val record = StreamTaskRecord(
             sessionId = request.sessionId,
             streamSessionId = request.streamSessionId,
+            conversationId = request.conversationId,
+            assistantMessageId = assistantMessageId,
+            modelId = request.modelId,
+            modelDisplayName = request.modelDisplayName,
+            providerId = request.providerId,
             providerKind = request.providerKind,
-            job = job,
-            identity = expected,
-            generateTitle = generateTitleOnFinish,
+            apiUrl = apiUrlResolver(request.providerId, request.modelId),
+            createdAt = System.currentTimeMillis(),
         )
-        publishActiveCount()
+        return launchTask(record, expected, throttleMs, generateTitleOnFinish) {
+            if (request.providerKind == ProviderKind.MOLAGPT && !chatRepository.persistStreamTask(record, expected, bodyVersion)) {
+                error("当前对话已更新，请重试")
+            }
+            chatRepository.streamAssistant(request, assistantMessageId, priorAttempts, expected)
+        }
     }
 
-    /** 启动对账：续接一个进程死亡前未完成的任务（resume from offset=0，覆盖已完成/进行中两种）。 */
     fun resume(record: StreamTaskRecord, expected: HistoryIdentity) {
-        if (!expected.canReadOfficial || expected != chatRepository.identity.value) return
-        if (isStreaming(record.sessionId)) return
-        val state = stateFor(record.sessionId)
-        state.update { it.copy(error = null, streamSessionId = record.streamSessionId, active = true, official = true) }
-
-        val job = chatRepository.resumeAssistant(
-            assistantMessageId = record.assistantMessageId,
-            sessionId = record.sessionId,
-            apiUrl = record.apiUrl,
-            streamSessionId = record.streamSessionId,
-            model = record.modelId,
-            modelDisplayName = record.modelDisplayName,
-            scope = expected,
-        )
-            .chunkedTimeWindow(
-                windowMillis = { StreamRenderPacing.windowMillis(defaultThrottleMs) },
-                emitImmediately = {
-                    StreamRenderPacing.windowMillis(defaultThrottleMs) <= DIRECT_RENDER_WINDOW_MS ||
-                        it.hasRunningTool()
-                },
+        if (record.providerKind != ProviderKind.MOLAGPT) return
+        launchTask(record, expected, defaultThrottleMs, false) {
+            chatRepository.resumeAssistant(
+                assistantMessageId = record.assistantMessageId,
+                sessionId = record.sessionId,
+                apiUrl = record.apiUrl,
+                streamSessionId = record.streamSessionId,
+                model = record.modelId,
+                modelDisplayName = record.modelDisplayName,
+                scope = expected,
             )
-            .onEach { batch ->
-                batch.lastOrNull()?.let { msg ->
-                    state.value = BackgroundStreamState(
-                        inFlight = msg,
-                        error = null,
-                        streamSessionId = record.streamSessionId,
-                        active = true,
-                        official = true,
-                    )
+        }
+    }
+
+    private fun launchTask(
+        record: StreamTaskRecord,
+        expected: HistoryIdentity,
+        throttleMs: Long,
+        generateTitle: Boolean,
+        openStream: suspend () -> Flow<ChatMessage>,
+    ): Boolean {
+        val id = record.sessionId
+        val task = Task(record, expected, generateTitle)
+        synchronized(gate) {
+            if (id in tasks || task.official &&
+                (!expected.canReadOfficial || expected != chatRepository.identity.value || signingOut == expected)
+            ) return false
+            val state = stateFor(id)
+            task.owner = scope.launch(start = CoroutineStart.LAZY) {
+                coroutineScope {
+                    var receivedFrame = false
+                    val worker = launch(start = CoroutineStart.LAZY) {
+                        try {
+                            openStream().chunkedTimeWindow(
+                                windowMillis = { StreamRenderPacing.windowMillis(throttleMs) },
+                                emitImmediately = {
+                                    StreamRenderPacing.windowMillis(throttleMs) <= DIRECT_RENDER_WINDOW_MS ||
+                                        it.hasRunningTool()
+                                },
+                            ).collect { batch ->
+                                val message = batch.lastOrNull() ?: return@collect
+                                receivedFrame = true
+                                synchronized(gate) {
+                                    if (tasks[id] === task && !task.stopRequested &&
+                                        (!task.official || expected == chatRepository.identity.value)
+                                    ) state.update { it.copy(inFlight = message) }
+                                }
+                            }
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            synchronized(gate) {
+                                if (tasks[id] === task && !task.stopRequested) {
+                                    state.update { it.copy(
+                                        error = error.message ?: "出错了",
+                                        inFlight = it.inFlight?.copy(status = MessageStatus.ERROR, metadata = it.inFlight.metadata - "pending"),
+                                    ) }
+                                }
+                            }
+                        }
+                    }
+                    synchronized(gate) {
+                        task.worker = worker
+                        if (task.stopRequested) worker.cancel() else worker.start()
+                    }
+                    try {
+                        worker.join()
+                    } finally {
+                        withContext(NonCancellable) {
+                            if (task.official && expected == chatRepository.identity.value) {
+                                val stopped = synchronized(gate) { task.stopRequested }
+                                if (stopped) {
+                                    try {
+                                        withTimeoutOrNull(5_000) { chatRepository.stop(id, record.streamSessionId, expected) }
+                                    } catch (error: Exception) {
+                                        Logger.w("BackgroundStream", "停止服务端任务失败", error)
+                                    }
+                                }
+                                if (!receivedFrame && state.value.error == null) {
+                                    try {
+                                        chatRepository.removeStreamTask(id, record.streamSessionId, expected)
+                                    } catch (error: Exception) {
+                                        Logger.w("BackgroundStream", "清理未启动的流任务失败", error)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            .catch { e -> markError(record.sessionId, e) }
-            .onCompletion {
-                finishTask(record.sessionId, record.streamSessionId, record.conversationId, record.modelDisplayName)
-            }
-            .launchIn(scope)
-
-        tasks[record.sessionId] = Task(record.sessionId, record.streamSessionId, ProviderKind.MOLAGPT, job, expected)
-        publishActiveCount()
+            tasks[id] = task
+            settledAt.remove(id)
+            state.value = BackgroundStreamState(streamSessionId = record.streamSessionId, active = true, official = task.official)
+            _activeCount.value = tasks.size
+            task.owner.invokeOnCompletion { cause -> finishTask(task, cause) }
+        }
+        task.owner.start()
+        return true
     }
 
     fun stop(sessionId: String) {
-        val task = tasks.remove(sessionId) ?: return
-        publishActiveCount()
-        markStopped(sessionId)
-        task.job.cancel()
-        scope.launch {
-            if (task.providerKind == ProviderKind.MOLAGPT) {
-                chatRepository.stop(sessionId, task.streamSessionId, task.identity)
+        synchronized(gate) {
+            val task = tasks[sessionId] ?: return
+            task.stopRequested = true
+            task.worker?.cancel()
+        }
+    }
+
+    fun cancelOfficialTasks(expected: HistoryIdentity): List<Job> {
+        val owners = synchronized(gate) {
+            signingOut = expected
+            tasks.values.filter { it.official && it.identity == expected }.map { it.owner }
+        }
+        owners.forEach { it.cancel() }
+        return owners
+    }
+
+    fun cancelStaleOfficialTasks(current: HistoryIdentity): List<Job> {
+        val owners = synchronized(gate) {
+            tasks.values.filter { it.official && it.identity != current }.map { it.owner }
+        }
+        owners.forEach { it.cancel() }
+        return owners
+    }
+
+    fun forgetHistory(ids: List<String>) = synchronized(gate) {
+        (ids + states.filterValues { it.value.official }.keys).forEach {
+            settledAt.remove(it)
+            states.remove(it)?.value = BackgroundStreamState()
+        }
+    }
+
+    private fun finishTask(task: Task, cause: Throwable?) {
+        val record = task.record
+        val id = record.sessionId
+        val completed = synchronized(gate) {
+            if (tasks[id] !== task) return
+            val state = stateFor(id)
+            val current = !task.official || task.identity == chatRepository.identity.value
+            val stopped = task.stopRequested || cause is CancellationException
+            state.update {
+                if (!current) BackgroundStreamState()
+                else it.copy(
+                    active = false,
+                    inFlight = it.inFlight?.let { message ->
+                        if (stopped && message.status != MessageStatus.ERROR) {
+                            message.copy(status = MessageStatus.STOPPED, metadata = message.metadata - setOf("pending", "pendingRecovery"))
+                        } else message
+                    },
+                )
             }
-            chatRepository.removeStreamTask(sessionId, task.identity)
+            tasks.remove(id)
+            _activeCount.value = tasks.size
+            settledAt[id] = System.nanoTime()
+            pruneIdleStatesLocked(excludeSessionId = id)
+            current && !stopped && cause == null && state.value.inFlight?.status == MessageStatus.COMPLETE
         }
+        val official = task.identity.takeIf { task.official }
+        if (official != null && official == chatRepository.identity.value) onOfficialSettled(id)
+        if (!completed) return
+        _completions.tryEmit(Completion(id, record.conversationId, record.modelDisplayName, official))
+        if (task.generateTitle) scope.launch { runCatching { titleGenerator(id, task.identity) } }
+        if (!task.official) scope.launch { runCatching { memoryConsolidator(id) } }
     }
 
-    fun cancelOfficialTasks(expected: HistoryIdentity? = null): List<Job> = tasks.values.mapNotNull { task ->
-        if (task.providerKind != ProviderKind.MOLAGPT || (expected != null && task.identity != expected) ||
-            !tasks.remove(task.sessionId, task)) return@mapNotNull null
-        task.job.cancel()
-        states.remove(task.sessionId)?.value = BackgroundStreamState()
-        publishActiveCount()
-        task.job
-    }
-
-    fun forgetHistory(ids: List<String>) {
-        (ids + states.filterValues { it.value.official }.keys).forEach { states.remove(it)?.value = BackgroundStreamState() }
-    }
-
-    private fun finishTask(
-        sessionId: String,
-        streamSessionId: String,
-        conversationId: String,
-        modelDisplayName: String?,
-    ) {
-        // 仅当本 job 仍是该会话的当前任务时才收尾——否则它已被新一轮 start 取代，不可误删新任务记录。
-        val current = tasks[sessionId]
-        if (current?.streamSessionId != streamSessionId) return
-        if (!tasks.remove(sessionId, current)) return
-        publishActiveCount()
-        stateFor(sessionId).update { it.copy(active = false) }
-        scope.launch { chatRepository.removeStreamTask(sessionId, current.identity) }
-        val official = current.identity.takeIf { current.providerKind == ProviderKind.MOLAGPT }
-        if (official != null && official != chatRepository.identity.value) return
-        if (stateFor(sessionId).value.inFlight?.status == MessageStatus.COMPLETE) {
-            _completions.tryEmit(Completion(sessionId, conversationId, modelDisplayName, official))
-            // 标题失败不该影响正常收尾，也不该冒泡到 UI——内部已自行回退占位标题。
-            if (current.generateTitle) scope.launch { runCatching { titleGenerator(sessionId, current.identity) } }
-            // 只对 BYOK 触发：MolaGPT 会话的记忆由服务端 Tracks 维护。
-            // 停止与失败的回答走不到这里，因此「被打断的回答不学习」是天然成立的。
-            if (current.providerKind == ProviderKind.BYOK) {
-                scope.launch { runCatching { memoryConsolidator(sessionId) } }
+    /**
+     * 惰性回收已落库且无任何观察者的流状态，避免长会话浏览后 inFlight 无限驻留。
+     * 仍在观察中的会话保留 inFlight 供 Room Flow 无闪烁交接；无观察者的空状态直接移除，
+     * 有已完成内容的无观察者状态最多保留 [MAX_IDLE_SETTLED_STATES] 条最新记录。
+     */
+    private fun pruneIdleStatesLocked(excludeSessionId: String? = null) {
+        val settledUnsubscribed = ArrayList<Pair<String, Long>>()
+        val iterator = states.entries.iterator()
+        while (iterator.hasNext()) {
+            val (key, flow) = iterator.next()
+            if (key == excludeSessionId || key in tasks || flow.subscriptionCount.value > 0) continue
+            val value = flow.value
+            if (value.inFlight == null && value.error == null) {
+                iterator.remove()
+                settledAt.remove(key)
+            } else {
+                settledUnsubscribed.add(key to (settledAt[key] ?: 0L))
             }
         }
-    }
-
-    private fun markError(sessionId: String, e: Throwable) {
-        // 抛出型错误（如 401 透传）必须把 in-flight 退出流式态，否则
-        // isStreaming = active || inFlight.isStreaming 会卡在 true、输入框永久禁用。
-        stateFor(sessionId).update { st ->
-            st.copy(
-                error = e.message ?: "出错了",
-                active = false,
-                inFlight = st.inFlight?.let { m ->
-                    m.copy(status = MessageStatus.ERROR, metadata = m.metadata - "pending")
-                },
-            )
+        if (settledUnsubscribed.size > MAX_IDLE_SETTLED_STATES) {
+            settledUnsubscribed.sortBy { it.second }
+            val excess = settledUnsubscribed.size - MAX_IDLE_SETTLED_STATES
+            for (i in 0 until excess) {
+                val key = settledUnsubscribed[i].first
+                states.remove(key)
+                settledAt.remove(key)
+            }
         }
-    }
-
-    private fun markStopped(sessionId: String) {
-        stateFor(sessionId).update { state ->
-            val current = state.inFlight ?: return@update state.copy(active = false)
-            state.copy(
-                inFlight = current.copy(
-                    status = MessageStatus.STOPPED,
-                    updatedAt = System.currentTimeMillis(),
-                    metadata = current.metadata - "pending",
-                ),
-                active = false,
-            )
-        }
-    }
-
-    private fun publishActiveCount() {
-        _activeCount.value = tasks.size
     }
 
     private fun stateFor(sessionId: String): MutableStateFlow<BackgroundStreamState> =
         states.getOrPut(sessionId) { MutableStateFlow(BackgroundStreamState()) }
 }
+
+private const val MAX_IDLE_SETTLED_STATES = 4
 
 private fun ChatMessage.hasRunningTool(): Boolean = fragments.any { fragment ->
     fragment is MessageFragment.ToolCall && fragment.status == ToolStatus.RUNNING

@@ -157,7 +157,7 @@ class DesktopRemoteService(
             .header("Authorization", "Bearer $jwt")
             .get()
             .build()
-        val body = jsonHttp.newCall(request).execute().use { response ->
+        val body = jsonHttp.newCall(request).useCancellable { response ->
             if (!response.isSuccessful) throw DesktopRemoteException("http", "无法读取电脑列表（HTTP ${response.code}）")
             response.body!!.string()
         }
@@ -228,7 +228,7 @@ class DesktopRemoteService(
             .header("Authorization", "Bearer $jwt")
             .delete()
             .build()
-        runCatching { jsonHttp.newCall(request).execute().close() }
+        runCatching { jsonHttp.newCall(request).useCancellable { } }
     }
 
     fun isPaired(machineId: String): Boolean = pairs.load(machineId) != null
@@ -294,6 +294,7 @@ class DesktopRemoteService(
             if (socket == null) {
                 _link.value = DesktopLinkState.Connecting
                 val opened = runCatching { connect() }.onFailure {
+                    if (it is kotlinx.coroutines.CancellationException) throw it
                     Logger.w(TAG, "connect failed: ${it.message}")
                 }.getOrDefault(false)
                 if (!opened) {
@@ -318,7 +319,7 @@ class DesktopRemoteService(
             .get()
             .build()
         val ticket = withContext(dispatchers.io) {
-            jsonHttp.newCall(ticketRequest).execute().use { response ->
+            jsonHttp.newCall(ticketRequest).useCancellable { response ->
                 if (!response.isSuccessful) return@withContext null
                 (http.json.parseToJsonElement(response.body!!.string()) as? JsonObject)?.string("ticket")
             }

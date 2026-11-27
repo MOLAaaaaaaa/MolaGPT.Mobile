@@ -55,6 +55,7 @@ data class ChatUiState(
     val error: String? = null,
     val authExpired: Boolean = false,
     val isLoadingHistory: Boolean = false,
+    val needsCloudBody: Boolean = false,
 )
 
 /** Composer 编辑用户消息的会话态；[revision] 变化时输入框重新预填 [text]。 */

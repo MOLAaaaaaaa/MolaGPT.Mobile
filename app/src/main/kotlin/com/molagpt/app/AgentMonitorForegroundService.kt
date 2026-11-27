@@ -21,20 +21,23 @@ class AgentMonitorForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(intent?.getStringExtra(EXTRA_SESSION_ID)),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            } else {
-                0
-            },
-        )
+        request.started(this) { sessionId ->
+            ServiceCompat.startForeground(
+                this, NOTIFICATION_ID, buildNotification(sessionId),
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0,
+            )
+        }
         return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onTimeout(startId: Int, fgsType: Int) = request.timedOut(this)
+
+    override fun onDestroy() {
+        request.destroyed(this)
+        super.onDestroy()
+    }
 
     private fun buildNotification(sessionId: String?) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_stat_molagpt)
@@ -72,21 +75,9 @@ class AgentMonitorForegroundService : Service() {
     companion object {
         private const val CHANNEL_ID = "mola_agent_monitor"
         private const val NOTIFICATION_ID = 0x41A60010
-        private const val ACTION_START = "com.molagpt.app.agent.monitor.START"
-        private const val EXTRA_SESSION_ID = "agent_monitor_session_id"
+        private val request = ForegroundServiceRequest<String>(AgentMonitorForegroundService::class.java)
 
-        fun start(context: Context, sessionId: String?): Boolean =
-            runCatching {
-                ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, AgentMonitorForegroundService::class.java)
-                        .setAction(ACTION_START)
-                        .putExtra(EXTRA_SESSION_ID, sessionId),
-                )
-            }.isSuccess
-
-        fun stop(context: Context) {
-            runCatching { context.stopService(Intent(context, AgentMonitorForegroundService::class.java)) }
-        }
+        fun update(context: Context, sessionId: String?, appForeground: Boolean) =
+            request.update(context, sessionId, appForeground)
     }
 }

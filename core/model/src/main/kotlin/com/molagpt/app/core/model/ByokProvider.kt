@@ -28,18 +28,97 @@ data class ByokProvider(
         models.firstOrNull { it.id == modelId }?.imageFormat ?: imageFormat
 
     val isOfficialOpenAiResponses: Boolean
-        get() = type == ByokProviderType.OPENAI_RESPONSE && runCatching {
-            val url = java.net.URI(baseUrl.trimEnd('/') + "/" + chatPath.trimStart('/'))
-            url.scheme.equals("https", ignoreCase = true) &&
-                url.host.equals("api.openai.com", ignoreCase = true) && (url.port == -1 || url.port == 443) &&
-                (url.rawPath == "/v1/responses" || url.rawPath == "/v1/responses/")
-        }.getOrDefault(false)
+        get() = type == ByokProviderType.OPENAI_RESPONSE && HostUrl.isOfficialOpenAiResponses(baseUrl, chatPath)
+
+    val host: String?
+        get() = HostUrl.parseHttpHost(baseUrl)
 
     val isOpenRouter: Boolean
-        get() {
-            val host = runCatching { java.net.URI(baseUrl.trim()).host.orEmpty() }.getOrDefault("").lowercase()
-            return host == "openrouter.ai" || host.endsWith(".openrouter.ai")
+        get() = HostUrl.matchesDomain(host, "openrouter.ai")
+
+    val usesNativeGemini: Boolean
+        get() = type == ByokProviderType.GEMINI || host == "generativelanguage.googleapis.com"
+
+    private fun knownNativeThinkingConfig(modelId: String): ThinkingConfig? =
+        ThinkingKinds.autoConfigFor(modelId, baseUrl)
+
+    fun thinkingConfigFor(
+        modelId: String,
+        declared: ThinkingConfig? = models.firstOrNull { it.id == modelId }?.thinkingConfig,
+        legacySupportsThinking: Boolean = false,
+    ): ThinkingConfig? {
+        val authoritative = declared?.manualOverride == true || declared?.detectSource in
+            listOf(ThinkingDetectSource.OVERRIDE, ThinkingDetectSource.CAPABILITY)
+        val config = when {
+            authoritative -> declared
+            declared?.detectSource in listOf(ThinkingDetectSource.HEURISTIC, ThinkingDetectSource.HOST) &&
+                ModelCapabilityCatalog.find(modelId) != null ->
+                (knownNativeThinkingConfig(modelId) ?: ThinkingKinds.NONE_CONFIG)
+                    .copy(offIneffective = declared?.offIneffective == true)
+            declared?.kind == ThinkingParamKind.NONE -> declared
+            else -> {
+                val known = knownNativeThinkingConfig(modelId)
+                if (known != null && (declared == null || declared.kind != known.kind ||
+                        declared.effortLevels.isEmpty())
+                ) {
+                    known.copy(offIneffective = declared?.offIneffective == true)
+                } else {
+                    declared ?: if (ThinkingKinds.isReasoningModel(modelId) || legacySupportsThinking) {
+                        ThinkingKinds.autoConfigFor(modelId, baseUrl)
+                            ?: ThinkingKinds.configFor(ThinkingParamKind.OPENAI_REASONING_EFFORT)
+                                .takeIf { legacySupportsThinking && ModelCapabilityCatalog.find(modelId)?.reasoning != false }
+                    } else {
+                        null
+                    }
+                }
+            }
+        } ?: return null
+        if (config.kind == ThinkingParamKind.NONE) return config
+        val levels = ThinkingKinds.resolveEffortLevels(config, baseUrl)
+        return config.copy(
+            effortLevels = levels,
+            defaultEffort = ThinkingKinds.resolveDefaultEffort(config, baseUrl),
+        )
+    }
+
+    /** 模型编辑页「自动识别」统一入口：优先原生已知型号与方言，未知模型仍给出可编辑兜底。 */
+    fun detectThinkingConfig(modelId: String): ThinkingConfig {
+        val detected = knownNativeThinkingConfig(modelId)
+            ?: ThinkingKinds.NONE_CONFIG.takeIf { ModelCapabilityCatalog.find(modelId)?.reasoning == false }
+            ?: ThinkingKinds.configFor(
+                ThinkingKinds.inferFromModelId(modelId).takeIf { it != ThinkingParamKind.NONE }
+                    ?: ThinkingKinds.hostInferredKind(baseUrl)
+                    ?: ThinkingParamKind.OPENAI_REASONING_EFFORT,
+                alwaysOn = ThinkingKinds.isKimiK3(modelId),
+                detectSource = ThinkingDetectSource.HEURISTIC,
+            )
+        val levels = ThinkingKinds.resolveEffortLevels(detected, baseUrl)
+        return detected.copy(
+            effortLevels = levels,
+            defaultEffort = ThinkingKinds.resolveDefaultEffort(detected, baseUrl),
+        )
+    }
+
+    /** 模型编辑页切换行为类别或「重置档位」时计算合法默认档位，不因 alwaysOn 错套 Kimi K3 模板。 */
+    fun defaultThinkingConfigFor(modelId: String, kind: ThinkingParamKind): ThinkingConfig {
+        if (kind == ThinkingParamKind.NONE) {
+            return ThinkingKinds.NONE_CONFIG.copy(
+                detectSource = ThinkingDetectSource.OVERRIDE,
+                manualOverride = true,
+            )
         }
+        val known = knownNativeThinkingConfig(modelId)?.takeIf { it.kind == kind }
+        val base = known ?: ThinkingConfig(
+            kind = kind,
+            alwaysOn = ThinkingKinds.isKimiK3(modelId) && kind == ThinkingParamKind.OPENAI_REASONING_EFFORT,
+        )
+        val levels = ThinkingKinds.resolveEffortLevels(base, baseUrl)
+        return base.copy(
+            effortLevels = levels,
+            defaultEffort = ThinkingKinds.resolveDefaultEffort(base, baseUrl),
+        )
+    }
+
 }
 
 /** 用户自定义 HTTP 请求头。 */

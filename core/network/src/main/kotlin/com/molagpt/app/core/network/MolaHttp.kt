@@ -12,9 +12,9 @@ import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
 /**
- * 集中构建网络栈。**Ktor 与 OkHttp 共用同一个 [okHttp] 客户端**（单连接池）：
+ * 集中构建网络栈。普通请求和 SSE 使用同一个连接池：
  * - 简单 JSON 调用（登录/状态/模型/标题/停止）走 Ktor（[client]，带 ContentNegotiation）；
- * - SSE 流式热路径直接用 [okHttp] 的 BufferedSource 逐行读，最稳定，规避 Ktor 3.0 IO API 变动。
+ * - SSE 流式热路径直接用 [streamOkHttp] 的 BufferedSource 逐行读。
  *
  * 固定 UA 由 OkHttp 拦截器统一注入——登录与后续请求共用，杜绝 JWT-UA 校验 401。
  */
@@ -37,9 +37,8 @@ class MolaHttp(
         .cookieJar(MolaDeviceCookieJar(loadDeviceCookie, saveDeviceCookie))
         .retryOnConnectionFailure(true)
         .connectTimeout(30, TimeUnit.SECONDS)
-        // SSE：读/整体超时不限制，靠协程取消 + 服务端 stop_stream 收尾。
-        .readTimeout(0, TimeUnit.SECONDS)
-        .callTimeout(0, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .callTimeout(120, TimeUnit.SECONDS)
         .addInterceptor { chain ->
             chain.proceed(
                 chain.request().newBuilder()
@@ -47,6 +46,11 @@ class MolaHttp(
                     .build(),
             )
         }
+        .build()
+
+    val streamOkHttp: OkHttpClient = okHttp.newBuilder()
+        .readTimeout(0, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.SECONDS)
         .build()
 
     val accountOkHttp: OkHttpClient = okHttp.newBuilder()

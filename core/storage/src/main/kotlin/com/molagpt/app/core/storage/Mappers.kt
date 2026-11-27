@@ -35,7 +35,6 @@ import com.molagpt.app.core.storage.entity.MessageEntity
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import java.net.URI
 
 internal fun MessageEntity.toDomain(): ChatMessage {
     val meta = MessageJson.decodeMeta(metadataJson)
@@ -120,6 +119,8 @@ internal fun ConversationEntity.toDomain(): Conversation = Conversation(
     byokMemoryEnabled = byokMemoryEnabled,
     byokConversationRecallEnabled = byokConversationRecallEnabled,
     byokMemoryWatermarkAt = byokMemoryWatermarkAt,
+    needsCloudBody = needsCloudBody,
+    bodyVersion = bodyVersion,
 )
 
 internal fun Conversation.toEntity(): ConversationEntity = ConversationEntity(
@@ -135,8 +136,6 @@ internal fun Conversation.toEntity(): ConversationEntity = ConversationEntity(
     lastMessagePreview = lastMessagePreview,
     messageCount = 0,
     visibleInList = false,
-    // 经领域模型写入的都是本地改动，标脏待 push；云端拉取的会话由 SyncEngine 直接构造实体（dirty=false）。
-    dirty = true,
     deletedAt = null,
     placeholder = false,
     personaId = personaId,
@@ -270,7 +269,7 @@ internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvi
     val customHeaders = runCatching {
         json.decodeFromString<List<CustomHeader>>(customHeadersJson)
     }.getOrDefault(emptyList())
-    return ByokProvider(
+    val provider = ByokProvider(
         id = id,
         name = name,
         type = type,
@@ -283,48 +282,23 @@ internal fun ByokProviderEntity.toDomain(json: Json, apiKey: String?): ByokProvi
         imageFormat = if (geminiChatImage) ByokImageFormat.OPENAI_CHAT_IMAGE else imageFormat,
         imageEditPath = imageEditPath,
         enabled = enabled,
-        models = models.map {
-            val model = it.copy(providerId = id, providerName = name, providerKind = ProviderKind.BYOK)
-            val current = model.thinkingConfig
-            val detected = if (
-                (type == ByokProviderType.GEMINI ||
-                    URI(baseUrl).host.equals("generativelanguage.googleapis.com", ignoreCase = true)) &&
-                    !ThinkingKinds.isAggregatingGateway(baseUrl) &&
-                    !(current?.kind == ThinkingParamKind.NONE && current.manualOverride)
-            ) {
-                ThinkingKinds.geminiConfigFor(model.id)?.takeIf { it.kind == ThinkingParamKind.GEMINI_LEVEL }
-            } else {
-                null
-            }
-            if (detected == null) return@map model
-
-            val levels = current?.effortLevels
-                ?.let(ThinkingKinds::normalizeEffortLevels)
-                ?.filter { it in detected.effortLevels }
-                .orEmpty()
-                .ifEmpty { detected.effortLevels }
-            val preferredDefault = current
-                ?.takeIf { it.manualOverride || it.kind == ThinkingParamKind.GEMINI_LEVEL }
-                ?.defaultEffort
-                ?.trim()
-                ?.lowercase()
-            val defaultEffort = preferredDefault?.takeIf { it in levels }
-                ?: detected.defaultEffort.takeIf { it in levels }
-                ?: levels.first()
-            model.copy(
-                supportsThinking = true,
-                supportsReasoningEffort = levels.isNotEmpty(),
-                thinkingConfig = detected.copy(
-                    effortLevels = levels,
-                    defaultEffort = defaultEffort,
-                    detectSource = current?.detectSource ?: detected.detectSource,
-                    manualOverride = current?.manualOverride == true,
-                    offIneffective = current?.offIneffective == true,
-                ),
-            )
-        },
+        models = models,
         customHeaders = customHeaders,
     )
+    return provider.copy(models = models.map { model ->
+        val config = provider.thinkingConfigFor(
+            modelId = model.id,
+            declared = model.thinkingConfig,
+            legacySupportsThinking = model.supportsThinking && model.thinkingConfig == null,
+        )
+        model.copy(
+            providerId = id, providerName = name, providerKind = ProviderKind.BYOK,
+            thinkingConfig = config,
+            supportsThinking = config?.let { it.kind != ThinkingParamKind.NONE } ?: model.supportsThinking,
+            supportsReasoningEffort = config?.let { it.kind != ThinkingParamKind.NONE && it.effortLevels.isNotEmpty() }
+                ?: model.supportsReasoningEffort,
+        )
+    })
 }
 
 internal fun ByokProvider.toEntity(json: Json, sortOrder: Int = 0): ByokProviderEntity = ByokProviderEntity(

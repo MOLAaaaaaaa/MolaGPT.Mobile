@@ -35,6 +35,8 @@ data class Conversation(
      * 「这一段处理到哪儿了」是会话的属性，不是每条消息各自的状态。
      */
     val byokMemoryWatermarkAt: Long = 0L,
+    val needsCloudBody: Boolean = false,
+    val bodyVersion: Long? = null,
 )
 
 /** 侧边栏会话来源筛选。电脑 Work 会话不存入本地会话表，由侧边栏单独合并。 */

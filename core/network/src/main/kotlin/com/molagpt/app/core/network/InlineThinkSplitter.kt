@@ -1,60 +1,133 @@
 package com.molagpt.app.core.network
 
-/**
- * 把内联 `<think>...</think>` 从正文里拆出来当推理显示。
- * 部分模型会把推理混在 delta.content 里，而非走独立 reasoning_content 通道。
- *
- * 状态跨 SSE chunk 持续：用 [carry] 缓冲可能被切断的标签（如某 chunk 以 "<thi" 结尾）。
- * 每个流单独 new 一个实例。
- */
+/** Separates inline reasoning without consuming tag literals in Markdown or comments. */
 class InlineThinkSplitter {
-    private val open = "<think>"
-    private val close = "</think>"
-    private var inThink = false
-    private val carry = StringBuilder()
+    data class Segment(val text: String, val thinking: Boolean)
 
-    data class Split(val visible: String, val thinking: String)
+    private var thinking = false
+    private var pending = ""
+    private var comment = false
+    private var inlineTicks = 0
+    private var fence = ' '
+    private var fenceSize = 0
+    private var indent = 0
+    private var escaped = false
 
-    fun feed(text: String): Split {
-        carry.append(text)
-        val vis = StringBuilder()
-        val think = StringBuilder()
-        while (true) {
-            val s = carry.toString()
-            val tag = if (inThink) close else open
-            val idx = s.indexOf(tag)
-            if (idx >= 0) {
-                val before = s.substring(0, idx)
-                if (inThink) think.append(before) else vis.append(before)
-                carry.setLength(0)
-                carry.append(s.substring(idx + tag.length))
-                inThink = !inThink
-            } else {
-                // 无完整标签：保留可能是“半个标签”的尾部，其余冲刷。
-                val keep = longestSuffixPrefix(s, tag)
-                val flushLen = s.length - keep
-                val flushPart = s.substring(0, flushLen)
-                if (inThink) think.append(flushPart) else vis.append(flushPart)
-                carry.setLength(0)
-                carry.append(s.substring(flushLen))
-                break
+    fun feed(text: String): List<Segment> = scan(pending + text, eof = false)
+    fun flush(): List<Segment> = scan(pending, eof = true)
+
+    private fun scan(text: String, eof: Boolean): List<Segment> {
+        val segments = ArrayList<Segment>()
+        val output = StringBuilder()
+        fun emit() {
+            if (output.isNotEmpty()) {
+                segments.add(Segment(output.toString(), thinking))
+                output.setLength(0)
             }
         }
-        return Split(vis.toString(), think.toString())
-    }
-
-    fun flush(): Split {
-        val s = carry.toString()
-        carry.setLength(0)
-        return if (inThink) Split("", s) else Split(s, "")
-    }
-
-    /** s 的最长后缀，且该后缀是 tag 的前缀（用于跨 chunk 的半标签保留）。 */
-    private fun longestSuffixPrefix(s: String, tag: String): Int {
-        val max = minOf(s.length, tag.length - 1)
-        for (len in max downTo 1) {
-            if (s.regionMatches(s.length - len, tag, 0, len)) return len
+        fun copy(from: Int, to: Int) {
+            output.append(text, from, to)
+            for (i in from until to) {
+                val c = text[i]
+                indent = when {
+                    c == '\n' || c == '\r' -> 0
+                    c == ' ' && indent >= 0 -> indent + 1
+                    else -> -1
+                }
+                escaped = c == '\\' && !escaped
+            }
         }
-        return 0
+        fun partial(at: Int, token: String): Boolean =
+            !eof && text.length - at < token.length &&
+                text.regionMatches(at, token, 0, text.length - at, ignoreCase = true)
+
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (comment) {
+                if (partial(i, "-->")) break
+                if (text.startsWith("-->", i)) {
+                    copy(i, i + 3)
+                    i += 3
+                    comment = false
+                    continue
+                }
+            } else if ((c == BACKTICK || c == '~') && (!escaped || fenceSize > 0 || inlineTicks > 0)) {
+                var end = i + 1
+                while (end < text.length && text[end] == c) end++
+                if (end == text.length && !eof) break
+                val count = end - i
+                val atMargin = indent in 0..3
+                if (fenceSize > 0) {
+                    if (atMargin && c == fence && count >= fenceSize) {
+                        var after = end
+                        while (after < text.length && text[after] in " \t") after++
+                        if (after == text.length && !eof) break
+                        if (after == text.length || text[after] in "\r\n") fenceSize = 0
+                    }
+                } else if (inlineTicks > 0) {
+                    if (c == BACKTICK && count == inlineTicks) inlineTicks = 0
+                } else if (atMargin && count >= 3) {
+                    fence = c
+                    fenceSize = count
+                } else if (c == BACKTICK) {
+                    inlineTicks = count
+                }
+                copy(i, end)
+                i = end
+                continue
+            } else if (c == '<' && !escaped && fenceSize == 0 && inlineTicks == 0) {
+                val tag = if (thinking) "</think" else "<think"
+                if (partial(i, "<!--") || partial(i, tag)) break
+                if (text.startsWith("<!--", i)) {
+                    copy(i, i + 4)
+                    i += 4
+                    comment = true
+                    continue
+                }
+                if (text.regionMatches(i, tag, 0, tag.length, ignoreCase = true)) {
+                    val start = i + tag.length
+                    if (start == text.length && !eof) break
+                    if (start < text.length && (text[start] == '>' || text[start] in " \t\r\n")) {
+                        var end = start
+                        var quote = '\u0000'
+                        while (end < text.length && end - start < 4096) {
+                            val ch = text[end]
+                            if (quote == '\u0000' && ch in "<>") break
+                            if (quote == ch) quote = '\u0000'
+                            else if (quote == '\u0000' && ch in "\"'") quote = ch
+                            end++
+                        }
+                        if (end == text.length && !eof && end - start < 4096) break
+                        if (end < text.length && text[end] == '>' &&
+                            (if (thinking) text.substring(start, end).isBlank()
+                            else attributes.matches(text.substring(start, end)))
+                        ) {
+                            emit()
+                            thinking = !thinking
+                            indent = -1
+                            escaped = false
+                            i = end + 1
+                            continue
+                        }
+                    }
+                }
+            }
+            copy(i, i + 1)
+            i++
+        }
+        pending = text.substring(i)
+        emit()
+        return segments
+    }
+
+    companion object {
+        private val attributes = Regex("""(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>\x60]+))?)*\s*""")
+        private const val BACKTICK = 96.toChar()
+
+        fun visibleText(text: String): String {
+            val splitter = InlineThinkSplitter()
+            return (splitter.feed(text) + splitter.flush()).filterNot { it.thinking }.joinToString("") { it.text }
+        }
     }
 }

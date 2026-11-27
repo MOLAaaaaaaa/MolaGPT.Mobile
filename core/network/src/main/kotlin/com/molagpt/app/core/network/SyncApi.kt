@@ -7,14 +7,12 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
-import io.ktor.http.isSuccess
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 
@@ -26,8 +24,13 @@ import kotlinx.serialization.json.putJsonArray
  */
 interface ConversationSyncApi {
     suspend fun fullSync(jwt: String, body: JsonObject): JsonObject?
-    suspend fun fetchConversation(jwt: String, conversationId: String): JsonObject?
+    suspend fun fetchConversation(jwt: String, conversationId: String): CloudConversationDetail?
     suspend fun deleteConversations(jwt: String, conversationIds: List<String>): Boolean
+}
+
+sealed interface CloudConversationDetail {
+    data class Found(val conversation: JsonObject) : CloudConversationDetail
+    data object Missing : CloudConversationDetail
 }
 
 class SyncApi(private val http: MolaHttp) : ConversationSyncApi {
@@ -38,13 +41,19 @@ class SyncApi(private val http: MolaHttp) : ConversationSyncApi {
     override suspend fun fullSync(jwt: String, body: JsonObject): JsonObject? = post(jwt, body)
 
     /** 取单个会话详情（messages）。 */
-    override suspend fun fetchConversation(jwt: String, conversationId: String): JsonObject? = post(
-        jwt,
-        buildJsonObject {
+    override suspend fun fetchConversation(jwt: String, conversationId: String): CloudConversationDetail? {
+        val (status, body) = request(jwt, buildJsonObject {
             put("action", "fetch_conversation")
             put("conversation_id", conversationId)
-        },
-    )
+        }) ?: return null
+        return when {
+            status == 404 && body["success"] == JsonPrimitive(false) &&
+                body["message"] == JsonPrimitive("Conversation not found") -> CloudConversationDetail.Missing
+            status == 200 && body["success"] == JsonPrimitive(true) ->
+                (body["conversation"] as? JsonObject)?.let(CloudConversationDetail::Found)
+            else -> null
+        }
+    }
 
     /** 删除云端会话。 */
     override suspend fun deleteConversations(jwt: String, conversationIds: List<String>): Boolean {
@@ -56,7 +65,7 @@ class SyncApi(private val http: MolaHttp) : ConversationSyncApi {
                 putJsonArray("conversation_ids") { conversationIds.forEach { add(it) } }
             },
         )
-        return resp?.get("success")?.jsonPrimitive?.booleanOrNull ?: false
+        return (resp?.get("success") as? JsonPrimitive)?.booleanOrNull == true
     }
 
     /**
@@ -72,16 +81,19 @@ class SyncApi(private val http: MolaHttp) : ConversationSyncApi {
                 put("value", value)
             },
         )
-        return resp?.get("success")?.jsonPrimitive?.booleanOrNull ?: false
+        return (resp?.get("success") as? JsonPrimitive)?.booleanOrNull == true
     }
 
-    private suspend fun post(jwt: String, body: JsonObject): JsonObject? = runCatching {
+    private suspend fun post(jwt: String, body: JsonObject): JsonObject? =
+        request(jwt, body)?.takeIf { it.first in 200..299 }?.second
+
+    private suspend fun request(jwt: String, body: JsonObject): Pair<Int, JsonObject>? = runCatching {
         val resp = http.accountClient.post(url) {
             header(HttpHeaders.Authorization, "Bearer $jwt")
             contentType(ContentType.Application.Json)
             setBody(http.json.encodeToString(JsonObject.serializer(), body))
         }
-        if (!resp.status.isSuccess()) return null
-        http.json.parseToJsonElement(resp.bodyAsText()).jsonObject
+        val parsed = http.json.parseToJsonElement(resp.bodyAsText()) as? JsonObject ?: return null
+        resp.status.value to parsed
     }.getOrElse { if (it is CancellationException) throw it else null }
 }

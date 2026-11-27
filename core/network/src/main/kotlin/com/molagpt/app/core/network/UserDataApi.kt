@@ -276,7 +276,7 @@ class UserDataApi(private val http: MolaHttp) {
             setBody(http.json.encodeToString(JsonObject.serializer(), body))
         }
         http.json.parseToJsonElement(resp.bodyAsText()) as? JsonObject
-    }.getOrNull()
+    }.getOrElse { if (it is kotlinx.coroutines.CancellationException) throw it else null }
 }
 
 /** [UserDataApi.getMemoryEntries] 的结果：条目列表 + 投影统计 + 服务端开关状态。 */

@@ -53,6 +53,7 @@ import com.molagpt.app.core.storage.ContextCompactor
 import com.molagpt.app.core.storage.ConversationRecallRepository
 import com.molagpt.app.core.storage.ConversationTitler
 import com.molagpt.app.core.storage.CredentialStore
+import com.molagpt.app.core.storage.HistoryIdentity
 import com.molagpt.app.core.storage.ImageFileStore
 import com.molagpt.app.core.storage.ImageTaskRepository
 import com.molagpt.app.core.storage.MolaDatabase
@@ -258,7 +259,6 @@ class AppContainer(
                 }
             }
             if (!credentialStore.isLoggedIn) {
-                backgroundStreamManager.cancelOfficialTasks()
                 applicationScope.launch {
                     runCatching { settingsStore.setIsDonorCached(false) }
                 }
@@ -423,12 +423,11 @@ class AppContainer(
         },
         onWindowDiscovered = { providerId, modelId, window ->
             // 服务商在报错里写明了窗口：记到模型上，下次在超长之前就压缩。
-            byokProviderRepository.get(providerId)?.let { provider ->
-                val models = provider.models.map { model ->
+            byokProviderRepository.update(providerId) { provider ->
+                provider.copy(models = provider.models.map { model ->
                     val known = model.contextWindow
                     if (model.id == modelId && (known == null || known > window)) model.copy(contextWindow = window) else model
-                }
-                if (models != provider.models) byokProviderRepository.upsert(provider.copy(models = models))
+                })
             }
         },
     )
@@ -581,7 +580,7 @@ class AppContainer(
             .joinToString("") { "%02x".format(it) }.take(16)
 
     /** 云同步引擎（个人中心“立即同步”、登录、每轮完成均触发）。 */
-    val syncEngine = SyncEngine(
+    val syncEngine: SyncEngine = SyncEngine(
         database = database,
         syncApi = syncApi,
         settingsStore = settingsStore,
@@ -589,6 +588,8 @@ class AppContainer(
         identity = credentialStore.historyIdentity,
         dispatchers = dispatchers,
         scope = applicationScope,
+        isActive = { backgroundStreamManager.isStreaming(it) },
+        wireHistoryStore = wireHistoryStore,
     )
 
     /** 会话自动标题（首轮答完触发；手动「重新生成标题」也走它）。 */
@@ -623,26 +624,30 @@ class AppContainer(
      * 写在模型配置上而不是会话里：这是模型/服务商的属性，换个对话同样成立。
      */
     suspend fun markThinkingNotDisableable(providerId: String, modelId: String) {
-        val provider = byokProviderRepository.get(providerId) ?: return
-        val model = provider.models.firstOrNull { it.id == modelId } ?: return
-        val config = model.thinkingConfig ?: return
-        if (config.offIneffective) return
-        val updated = provider.models.map {
-            if (it.id == modelId) it.copy(thinkingConfig = config.copy(offIneffective = true)) else it
+        byokProviderRepository.update(providerId) { provider ->
+            provider.copy(models = provider.models.map { model ->
+                val config = model.thinkingConfig
+                if (model.id == modelId && config != null && !config.offIneffective) {
+                    model.copy(thinkingConfig = config.copy(offIneffective = true))
+                } else model
+            })
         }
-        byokProviderRepository.upsert(provider.copy(models = updated))
     }
 
     /** 整理完成的轻量提示。会话仍打开时由聊天页消费，不向消息历史插伪造内容。 */
     val memoryConsolidated =
         MutableSharedFlow<Pair<String, ByokMemoryConsolidator.Result>>(extraBufferCapacity = 8)
 
-    val backgroundStreamManager = BackgroundStreamManager(
+    val backgroundStreamManager: BackgroundStreamManager = BackgroundStreamManager(
         chatRepository = chatRepository,
         scope = applicationScope,
         apiUrlResolver = { providerId, modelId -> modelRegistry.apiUrlFor(providerId, modelId) },
-        titleGenerator = { id, expected -> conversationTitler.generate(id, expected) },
+        titleGenerator = { id, expected ->
+            conversationTitler.generate(id, expected)
+            if (credentialStore.historyIdentity.value == expected) syncEngine.schedulePush(id)
+        },
         memoryConsolidator = { sessionId -> byokMemoryConsolidator.onTurnFinished(sessionId) },
+        onOfficialSettled = { syncEngine.schedulePush(it) },
     )
 
     /** 会话级未发送草稿箱（内存隔离，跨会话切换与二级页往返保留）。 */
@@ -714,6 +719,7 @@ class AppContainer(
         scope = applicationScope,
         notifyEnabled = { currentSettings.completionNotify },
         isAuthenticated = { !credentialStore.jwt.isNullOrBlank() },
+        appForeground = { appForeground.value },
     )
 
     /** 当前可见的电脑对话（machineId/conversationId），用于提醒抑制。 */
@@ -740,6 +746,7 @@ class AppContainer(
     fun setAppForeground(value: Boolean) {
         val wasBackground = !appForeground.value
         appForeground.value = value
+        agentNotificationMonitor.onAppForegroundChanged()
         // 回到前台时看一眼记忆整理该不该跑。这是「距上次超过间隔」那条阈值的检查点，
         // 覆盖「聊两句就放下手机」——那种会话永远攒不够回合数，只靠回合阈值会永远学不到。
         // Android 的 Doze / WorkManager 约束下做不到可靠的后台定时，何况用的是用户自己的 key，
@@ -831,17 +838,24 @@ class AppContainer(
                 }
         }
 
+        applicationScope.launch {
+            combine(appForeground, credentialStore.historyIdentity) { foreground, expected ->
+                expected.takeIf { foreground && it.canReadOfficial }
+            }.collectLatest { expected ->
+                if (expected != null) reconcileStreamTasks(expected)
+            }
+        }
+
         // 模型由聊天页按当前实际阵营加载；启动任务不再抢跑重复请求官方列表。
         applicationScope.launch {
             settingsFlow.filterNotNull().first()
-            reconcileStreamTasks()
             runCatching { personaRepository.ensureSeeded() }
             sweepOrphanAttachments()
         }
         applicationScope.launch {
             credentialStore.historyIdentity.collectLatest { expected ->
+                backgroundStreamManager.cancelStaleOfficialTasks(expected).joinAll()
                 if (expected.resetPending) {
-                    backgroundStreamManager.cancelOfficialTasks()
                     while (credentialStore.historyIdentity.value == expected) {
                         try {
                             sessionRepository.clearOfficialCache(expected) { ids ->
@@ -862,27 +876,23 @@ class AppContainer(
             }
         }
 
-        // 有在途的回复或画图时拉起前台服务保活，都结束即停。
-        applicationScope.launch {
-            var shown: StreamForegroundService.Kind? = null
-            combine(backgroundStreamManager.activeCount, imageTaskManager.activeCount) { chats, images ->
-                when {
+        applicationScope.launch(kotlinx.coroutines.Dispatchers.Main.immediate) {
+            combine(backgroundStreamManager.activeCount, imageTaskManager.activeCount, appForeground) { chats, images, foreground ->
+                val kind = when {
                     chats > 0 -> StreamForegroundService.Kind.REPLY
                     images > 0 -> StreamForegroundService.Kind.IMAGE
                     else -> null
                 }
-            }.collect { kind ->
-                if (kind == shown) return@collect
-                if (kind == null) StreamForegroundService.stop(appContext) else StreamForegroundService.start(appContext, kind)
-                shown = kind
+                kind to foreground
+            }.collect { (kind, foreground) ->
+                StreamForegroundService.update(appContext, kind, foreground)
             }
         }
 
-        // 每轮对话正常完成 → 增量推送该会话到云端。
+        // 只统计正常完成的回合。
         applicationScope.launch {
             backgroundStreamManager.completions.collect {
                 if (it.officialSession != null && it.officialSession != credentialStore.historyIdentity.value) return@collect
-                syncEngine.schedulePush(it.sessionId)
                 runCatching { settingsStore.incrementCompletedTurnCount() }
             }
         }
@@ -934,21 +944,24 @@ class AppContainer(
      * 启动对账：读出被杀前落库的在途任务，向服务端 stream_cache 查状态——
      * completed/streaming 则 resume(offset=0) 续接补收，其余（停止/过期/不存在）清理任务。
      */
-    private suspend fun reconcileStreamTasks() {
-        val expected = credentialStore.historyIdentity.value
-        val tasks = runCatching { chatRepository.loadStreamTasks() }.getOrDefault(emptyList())
+    private suspend fun reconcileStreamTasks(expected: HistoryIdentity) {
+        val tasks = chatRepository.loadStreamTasks(expected)
+        if (expected != credentialStore.historyIdentity.value) return
         for (record in tasks) {
             if (record.providerKind == ProviderKind.BYOK) {
-                runCatching { chatRepository.removeStreamTask(record.sessionId, expected) }
+                runCatching { chatRepository.removeStreamTask(record.sessionId, record.streamSessionId, expected) }
                 continue
             }
-            if (!expected.canReadOfficial || expected != credentialStore.historyIdentity.value) continue
+            if (expected != credentialStore.historyIdentity.value || backgroundStreamManager.isStreaming(record.sessionId)) continue
             val status = withContext(com.molagpt.app.core.network.HistoryRequest { expected == credentialStore.historyIdentity.value }) {
-                runCatching { chatService.checkStreamStatus(record.streamSessionId) }.getOrNull()
+                chatService.checkStreamStatus(record.streamSessionId)
             }
             when (status?.status) {
-                "completed", "streaming" -> backgroundStreamManager.resume(record, expected)
-                else -> runCatching { chatRepository.removeStreamTask(record.sessionId, expected) }
+                "completed", "streaming" -> {
+                    if (status.conversationId == record.conversationId) backgroundStreamManager.resume(record, expected)
+                    else chatRepository.removeStreamTask(record.sessionId, record.streamSessionId, expected)
+                }
+                "missing", "stopped", "cancelled" -> chatRepository.removeStreamTask(record.sessionId, record.streamSessionId, expected)
             }
         }
     }

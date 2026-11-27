@@ -60,6 +60,9 @@ interface MessageDao {
         insertAll(entities)
     }
 
+    @Query("SELECT createdAt FROM messages WHERE sessionId = :sessionId AND messageId = :messageId")
+    suspend fun createdAtOf(sessionId: String, messageId: String): Long?
+
     /** 编辑重发：删掉旧分支尾部并写入新提问。 */
     @Transaction
     suspend fun replaceFrom(fromCreatedAt: Long, entity: MessageEntity) {

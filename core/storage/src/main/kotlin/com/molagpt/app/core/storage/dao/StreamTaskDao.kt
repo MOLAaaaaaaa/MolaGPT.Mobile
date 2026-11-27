@@ -11,8 +11,14 @@ interface StreamTaskDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: StreamTaskEntity)
 
-    @Query("DELETE FROM stream_tasks WHERE sessionId = :sessionId")
-    suspend fun delete(sessionId: String)
+    @Query("DELETE FROM stream_tasks WHERE sessionId = :sessionId AND streamSessionId = :streamSessionId")
+    suspend fun delete(sessionId: String, streamSessionId: String)
+
+    @Query("SELECT EXISTS(SELECT 1 FROM stream_tasks WHERE sessionId = :sessionId AND streamSessionId = :streamSessionId AND providerKind = 'MOLAGPT')")
+    suspend fun owns(sessionId: String, streamSessionId: String): Boolean
+
+    @Query("SELECT EXISTS(SELECT 1 FROM stream_tasks WHERE sessionId = :sessionId AND providerKind = 'MOLAGPT')")
+    suspend fun hasOfficialTask(sessionId: String): Boolean
 
     @Query("DELETE FROM stream_tasks WHERE providerKind = 'MOLAGPT'")
     suspend fun clearOfficial()

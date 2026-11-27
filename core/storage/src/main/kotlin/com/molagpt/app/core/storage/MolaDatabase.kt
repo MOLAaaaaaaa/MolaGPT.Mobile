@@ -51,8 +51,8 @@ import com.molagpt.app.core.storage.entity.StreamTaskEntity
         ImageRunEntity::class,
         ImageVersionEntity::class,
     ],
-    version = 21,
-    exportSchema = false,
+    version = 22,
+    exportSchema = true,
 )
 abstract class MolaDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
@@ -72,8 +72,25 @@ abstract class MolaDatabase : RoomDatabase() {
                 .addMigrations(object : Migration(19, 20) {
                     override fun migrate(db: SupportSQLiteDatabase) = wireHistoryStore.migrate(db)
                 })
-                .addMigrations(MIGRATION_20_21)
+                .addMigrations(MIGRATION_20_21, MIGRATION_21_22)
                 .build()
+
+        private val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE conversations ADD COLUMN localRevision INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN syncChanges INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN remoteVersion INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN bodyVersion INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE conversations ADD COLUMN bodyFingerprint TEXT DEFAULT NULL")
+                // The old dirty bit did not identify which fields were modified or which body was loaded.
+                db.execSQL(
+                    """UPDATE conversations SET placeholder = 0
+                       WHERE providerKind = 'MOLAGPT' AND placeholder = 1
+                         AND EXISTS (SELECT 1 FROM messages WHERE messages.sessionId = conversations.sessionId)""",
+                )
+                db.execSQL("UPDATE conversations SET syncChanges = ${CloudChange.LEGACY} WHERE dirty = 1 AND providerKind = 'MOLAGPT'")
+            }
+        }
 
         private val MIGRATION_20_21 = object : Migration(20, 21) {
             override fun migrate(db: SupportSQLiteDatabase) {

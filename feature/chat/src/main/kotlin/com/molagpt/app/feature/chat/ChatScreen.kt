@@ -601,6 +601,20 @@ fun ChatScreen(
                         androidx.compose.material3.TextButton(onClick = onOpenAccountSecurity) { Text("查看详情") }
                     }
                 }
+                if (state.needsCloudBody && !state.isLoadingHistory) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (viewModel.historyConflict) {
+                            Text("本机与云端历史存在冲突", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                            TextButton(onClick = viewModel::keepLocalHistoryAndRefresh) { Text("保留副本并更新") }
+                        } else {
+                            Text("历史记录待更新", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+                            TextButton(onClick = viewModel::retryHistory) { Text("重试") }
+                        }
+                    }
+                }
                 state.error?.let { err ->
                     Text(
                         text = err,
@@ -714,7 +728,7 @@ fun ChatScreen(
                     onCancelEdit = viewModel::cancelEdit,
                     draftText = viewModel.draftText,
                     onDraftChange = viewModel::saveDraftText,
-                    sendEnabled = !viewModel.isSubmitting,
+                    sendEnabled = !viewModel.isSubmitting && !state.isLoadingHistory && !state.needsCloudBody,
                     holdSendForAttachments = true,
                     onOpenModelReasoningSettings = {
                         val model = state.selectedModel ?: return@Composer
@@ -775,10 +789,10 @@ fun ChatScreen(
                     onRegenerateWithModel = { viewModel.regenerateLast(it) },
                     onEditUser = viewModel::startEditUser,
                     onEditAssistant = { editingAssistantId = it },
-                    canEdit = !state.isStreaming && !viewModel.isSubmitting,
+                    canEdit = state.inputEnabled && !viewModel.isSubmitting,
                     canEditAssistant = !state.isStreaming && !viewModel.isSubmitting &&
                         state.providerKind == ProviderKind.BYOK,
-                    canRegenerate = !viewModel.isSubmitting,
+                    canRegenerate = state.inputEnabled && !viewModel.isSubmitting,
                     onNavVersion = viewModel::navVersion,
                     onNavEditSnapshot = viewModel::navEditSnapshot,
                     compactions = state.compactions,
